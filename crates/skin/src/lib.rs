@@ -8,4 +8,5 @@ pub mod bmp;
 pub mod color;
 pub mod container;
 pub mod pledit;
+pub mod region;
 pub mod viscolor;

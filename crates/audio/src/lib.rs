@@ -5,5 +5,11 @@
 //! producer thread; the real-time callback only copies from a lock-free ring.
 
 pub mod channels;
+pub mod command;
 pub mod decode;
 pub mod ring;
+
+// PipeWire realtime output. Behind the `output` feature so the pure decode/ring/channels
+// build and test on a clean host; the dev container builds with `--features output`.
+#[cfg(feature = "output")]
+pub mod output;

@@ -10,10 +10,28 @@ authors.workspace = true
 
 [dependencies]
 # Pure-Rust decoders. default-features off trims formats we do not use; keep wav+pcm+mp3.
-# MP3 patents expired in 2017, so shipping the decoder is fine. PipeWire output lands in a
-# later sub-unit of Phase 3.
+# MP3 patents expired in 2017, so shipping the decoder is fine.
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3"] }
 
 # Wait-free SPSC ring between the producer thread and the realtime output callback. One
 # allocation at construction, none on push/pop. Pure Rust, no system libraries.
 rtrb = "0.3"
+
+# --- `output` feature only: PipeWire realtime playback ---
+# FFI to system libpipewire-0.3 (re-exports libspa as pipewire::spa). Building it needs
+# libpipewire-0.3-dev + libspa-0.2-dev + pkg-config + libclang, so it is OFF by default and
+# built only in the dev container (see Dockerfile.dev / scripts/dev-docker.sh). Pin exactly:
+# the crate is pre-1.0 and churny.
+pipewire = { version = "=0.10.0", optional = true }
+# Zero-copy &mut [u8] -> &mut [f32] reinterpret of the mapped buffer in the RT callback.
+bytemuck = { version = "1", optional = true }
+
+[features]
+# Enables the PipeWire output path (output.rs + the tone example + live tests). Kept out of
+# the default set so the pure decode/ring/channels build and test on a clean host.
+output = ["dep:pipewire", "dep:bytemuck"]
+
+[[example]]
+name = "tone"
+# Only builds with the PipeWire backend; skipped on a host without the output feature.
+required-features = ["output"]

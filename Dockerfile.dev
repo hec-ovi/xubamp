@@ -13,6 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libclang-dev \
         ca-certificates \
         curl \
+        # Runtime client bits so a program in the container can actually connect to the host
+        # PipeWire daemon over the mounted socket: pipewire-bin supplies client.conf and the
+        # protocol-native module, libspa-0.2-modules the SPA plugins (audioconvert) a client
+        # stream negotiates through. pipewire-bin also brings pw-top/pw-cli/pw-record for
+        # in-container verification. No daemon is ever started here; we use the host's.
+        pipewire-bin \
+        libspa-0.2-modules \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as the host UID so files in the mounted tree and the uid-1000-owned Wayland/PipeWire
@@ -27,7 +34,9 @@ USER dev
 ENV RUSTUP_HOME=/home/dev/.rustup \
     CARGO_HOME=/home/dev/.cargo \
     PATH=/home/dev/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# Pin to the workspace's rust-version so container and host builds are identical.
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+# Pin to the workspace's rust-version so container and host builds are identical. Add clippy
+# and rustfmt so lint/format checks run in-container too (the minimal profile omits them).
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.96.0 \
+        --component clippy --component rustfmt
 
 WORKDIR /work

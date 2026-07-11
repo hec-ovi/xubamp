@@ -45,11 +45,24 @@ in the repo and git history, nothing important lives only in chat.
   - (b) done: lock-free SPSC ring (`audio::ring`: `SharedState`, `new_ring`, `push_block`,
     `fill_output`) with round-trip/wrap/underrun/flush tests and a counting-allocator proof
     that the realtime path never allocates. Pure Rust (rtrb).
-  - (c) next: PipeWire output (needs the dev container, see below), then engine + resample.
+  - (c) done: PipeWire output (`audio::output`: `run_loop`, `RtData`, the RT `process`
+    callback, `param_changed` rate readback, control channel) plus `command::Control` and
+    `examples/tone.rs`. Behind the `output` cargo feature (default off) so the pipewire FFI
+    only builds in the dev container; the pure decode/ring/channels still build on the host.
+    Verified live against the real PipeWire daemon from the container: the ignored
+    `tests/live_playback.rs` connects, negotiates 48 kHz, and the RT callback consumes frames;
+    a null-sink capture of the tone example shows a clean 440 Hz sine (format/stride/channel
+    map correct end to end). Built against pipewire 0.10.0 / libspa 0.10.0.
+  - (d) next: wire decode -> ring -> output into an `AudioEngine` (command.rs `Command`,
+    producer.rs, lib.rs play/pause/resume/stop/seek/position). Then (e) resampling, (f) hook a
+    file path into the binary.
 
 - Dev build for the PipeWire crates runs in Docker so the host stays clean: `Dockerfile.dev`
-  (Ubuntu 26.04, rust pinned to 1.96.0) + `scripts/dev-docker.sh {image|build|test|run|shell}`.
-  Pure crates (skin/render/wl/audio-so-far) still build and test natively on the host.
+  (Ubuntu 26.04, rust pinned to 1.96.0, clippy+rustfmt, and the PipeWire client runtime bits
+  `pipewire-bin` + `libspa-0.2-modules` so a program in the container can connect to the host
+  daemon over the mounted socket) + `scripts/dev-docker.sh {image|build|test|run|shell}`. The
+  audio `output` feature builds there with `--features output`; pure crates
+  (skin/render/wl/audio-so-far) still build and test natively on the host.
 
 ## Next
 

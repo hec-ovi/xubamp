@@ -9,7 +9,24 @@ data="${XDG_DATA_HOME:-$HOME/.local/share}"
 apps="$data/applications"
 
 mkdir -p "$apps"
-install -Dm644 "$root/packaging/xubamp.desktop" "$apps/xubamp.desktop"
+
+# Recent GLib (Ubuntu 26.04 ships 2.88) refuses to load a .desktop whose Exec program is
+# not resolvable, and GNOME Shell then never registers the app, so the running window gets
+# no icon. The packaged .deb is fine (Exec=xubamp resolves from /usr/bin), but a dev
+# checkout runs via cargo with xubamp off PATH. So point Exec at the built binary here.
+bin=""
+for cand in "$root/target/release/xubamp" "$root/target/debug/xubamp"; do
+    [ -x "$cand" ] && bin="$cand" && break
+done
+if [ -n "$bin" ]; then
+    sed "s|^Exec=xubamp|Exec=$bin|" "$root/packaging/xubamp.desktop" >"$apps/xubamp.desktop"
+    chmod 644 "$apps/xubamp.desktop"
+    echo "Exec points at $bin"
+else
+    install -Dm644 "$root/packaging/xubamp.desktop" "$apps/xubamp.desktop"
+    echo "warning: no built xubamp binary found; run 'cargo build' first, else the icon" >&2
+    echo "         will not appear until xubamp is on PATH." >&2
+fi
 
 for png in "$root"/icons/*x*.png; do
     base="$(basename "$png" .png)" # e.g. 256x256

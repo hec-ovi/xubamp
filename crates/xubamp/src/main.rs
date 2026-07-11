@@ -121,8 +121,30 @@ fn main() {
         eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
     }
 
-    // Transport commands from the window. For now they are logged; wiring them to the engine
-    // (play/pause/stop) comes with the next sub-unit.
+    // Bridge transport commands from the window to the engine. Play resumes, Pause and Stop
+    // halt (Stop reset-to-start needs decoder seeking, which comes with the seek bar). Prev,
+    // Next and Eject wait for a playlist. Without the audio feature, commands are just logged.
+    #[cfg(feature = "audio")]
+    let on_command = {
+        let handle = _engine.as_ref().map(|engine| engine.handle());
+        move |command: xubamp_render::hit::Transport| {
+            use xubamp_render::hit::Transport;
+            match command {
+                Transport::Play => {
+                    if let Some(h) = &handle {
+                        h.set_active(true);
+                    }
+                }
+                Transport::Pause | Transport::Stop => {
+                    if let Some(h) = &handle {
+                        h.set_active(false);
+                    }
+                }
+                other => eprintln!("xubamp: {other:?} not wired yet (needs a playlist)"),
+            }
+        }
+    };
+    #[cfg(not(feature = "audio"))]
     let on_command = |command: xubamp_render::hit::Transport| {
         eprintln!("xubamp: transport command {command:?}");
     };

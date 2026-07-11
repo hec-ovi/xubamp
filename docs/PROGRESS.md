@@ -59,6 +59,14 @@ in the repo and git history, nothing important lives only in chat.
     crate recomposes and redraws the 275x116 frame on each pointer event. `run(skin, on_command)` emits
     a `Transport` command to the caller on a completed click; the binary logs it for now. Wiring those
     commands to the engine (play/pause/stop) is (c).
+  - (c) done: transport commands drive the engine. `AudioEngine::handle()` returns a cloneable
+    `EngineHandle` (a clone of the PipeWire control channel, so it can outlive borrows of the engine and
+    coexist with the engine's own shutdown control). The binary bridges the window's `Transport` commands
+    to it: Play resumes, Pause and Stop deactivate the stream (the realtime callback stops pulling frames
+    and the position clock holds; Stop reset-to-start waits for decoder seeking with the seek bar). Prev,
+    Next and Eject wait for a playlist. Pausing is a stream deactivation, so no decoder changes were
+    needed. Verified in the dev container against a silent null sink: an ignored engine test asserts the
+    position clock holds while paused and advances again on resume.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.

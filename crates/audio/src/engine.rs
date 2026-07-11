@@ -46,6 +46,26 @@ pub struct AudioEngine {
     producer_thread: Option<JoinHandle<()>>,
 }
 
+/// A cheap, cloneable remote control for a running [`AudioEngine`]. It owns a clone of the
+/// control channel, so the UI thread can pause and resume playback without holding the engine
+/// itself (which stays with whoever keeps the worker threads alive). Cloned senders wake the
+/// same PipeWire loop, so this coexists with the engine's own control (used for shutdown).
+#[derive(Clone)]
+pub struct EngineHandle {
+    control: ControlSender<Control>,
+}
+
+impl EngineHandle {
+    /// Resume (`true`) or pause (`false`) playback. Pausing deactivates the PipeWire stream, so
+    /// the realtime callback stops pulling frames and the position clock holds; the decoder
+    /// thread simply waits with the ring full until playback resumes.
+    pub fn set_active(&self, active: bool) {
+        // The only failure is a dropped receiver (the loop has already exited), which means
+        // there is nothing to pause anyway, so ignoring the error is correct.
+        let _ = self.control.send(Control::Active(active));
+    }
+}
+
 impl AudioEngine {
     /// Open `path`, connect a stereo output stream at the file's native rate (PipeWire
     /// converts to the device), and start decoding it into the ring on a background thread.
@@ -125,6 +145,13 @@ impl AudioEngine {
     /// Frames played so far. Basis for a future time display.
     pub fn position_frames(&self) -> u64 {
         self.shared.position_frames()
+    }
+
+    /// A cloneable remote control (pause/resume) that can outlive borrows of the engine.
+    pub fn handle(&self) -> EngineHandle {
+        EngineHandle {
+            control: self.control.clone(),
+        }
     }
 }
 

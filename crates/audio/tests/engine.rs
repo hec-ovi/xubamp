@@ -71,3 +71,53 @@ fn plays_a_file_and_advances_the_clock() {
     drop(engine); // clean shutdown: quit the loop, join both threads
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+#[ignore = "needs a running PipeWire session"]
+fn pause_holds_the_clock_and_resume_advances_it() {
+    let path = std::env::temp_dir().join("xubamp_pause_test.wav");
+    write_wav(&path, 48_000, 4); // long enough not to finish during the test
+
+    let engine = AudioEngine::play(&path).expect("engine failed to start playback");
+    let handle = engine.handle();
+
+    // Wait until it is clearly playing.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && engine.position_frames() <= 8_000 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        engine.position_frames() > 8_000,
+        "playback never started (got {})",
+        engine.position_frames()
+    );
+
+    // Pause, let the deactivation reach the loop, then measure that the clock holds.
+    handle.set_active(false);
+    std::thread::sleep(Duration::from_millis(300));
+    let a = engine.position_frames();
+    std::thread::sleep(Duration::from_millis(400));
+    let b = engine.position_frames();
+    // If still playing at 48 kHz this window would advance ~19k frames; allow a small margin
+    // for at most one in-flight quantum after the pause takes effect.
+    assert!(
+        b - a < 4_096,
+        "paused clock kept advancing: {a} -> {b} ({} frames)",
+        b - a
+    );
+
+    // Resume and confirm the clock moves again.
+    handle.set_active(true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && engine.position_frames() <= b + 8_000 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        engine.position_frames() > b + 8_000,
+        "resume did not advance the clock (held at {b}, now {})",
+        engine.position_frames()
+    );
+
+    drop(engine);
+    let _ = std::fs::remove_file(&path);
+}

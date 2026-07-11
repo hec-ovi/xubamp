@@ -5,3 +5,5 @@ Cargo.lock.bak
 *.swp
 *~
 .DS_Store
+# Docker dev-build caches (cargo registry + target); never committed.
+/.docker/

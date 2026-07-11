@@ -40,8 +40,16 @@ in the repo and git history, nothing important lives only in chat.
 
 ## In progress
 
-- Phase 3: audio engine (producer thread, lock-free ring, native PipeWire output,
-  WAV then MP3 decode). Second "strong" phase; gets a written plan before code.
+- Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
+  - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
+  - (b) done: lock-free SPSC ring (`audio::ring`: `SharedState`, `new_ring`, `push_block`,
+    `fill_output`) with round-trip/wrap/underrun/flush tests and a counting-allocator proof
+    that the realtime path never allocates. Pure Rust (rtrb).
+  - (c) next: PipeWire output (needs the dev container, see below), then engine + resample.
+
+- Dev build for the PipeWire crates runs in Docker so the host stays clean: `Dockerfile.dev`
+  (Ubuntu 26.04, rust pinned to 1.96.0) + `scripts/dev-docker.sh {image|build|test|run|shell}`.
+  Pure crates (skin/render/wl/audio-so-far) still build and test natively on the host.
 
 ## Next
 

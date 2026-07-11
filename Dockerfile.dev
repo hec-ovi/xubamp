@@ -1,0 +1,33 @@
+# Dev-only build environment for xubamp's PipeWire-dependent crates, so the audio build
+# deps never touch the host. Not a distribution image: it mounts the working tree and runs
+# cargo. Base matches the target (Ubuntu 26.04) so libpipewire/libspa are ABI-identical to
+# the host daemon. See scripts/dev-docker.sh for how it is driven.
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        libpipewire-0.3-dev \
+        libspa-0.2-dev \
+        libclang-dev \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Run as the host UID so files in the mounted tree and the uid-1000-owned Wayland/PipeWire
+# sockets are accessible without root. The ubuntu:26.04 base already ships a user at UID
+# 1000, so free that UID first (whatever it is named) before creating ours.
+ARG UID=1000
+RUN existing="$(getent passwd ${UID} | cut -d: -f1)"; \
+    if [ -n "$existing" ]; then userdel -r "$existing" 2>/dev/null || true; fi; \
+    useradd -m -u ${UID} dev
+USER dev
+
+ENV RUSTUP_HOME=/home/dev/.rustup \
+    CARGO_HOME=/home/dev/.cargo \
+    PATH=/home/dev/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Pin to the workspace's rust-version so container and host builds are identical.
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+
+WORKDIR /work

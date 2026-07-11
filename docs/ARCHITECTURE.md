@@ -184,6 +184,40 @@ The exact sprite rectangles are the pixel-exactness surface; the main-window set
 transcribed here from the documented classic layout and gets validated against real skins
 during the render-diff pass in a later phase.
 
+## Phase 3 plan: audio engine
+
+New crate `crates/audio` (`xubamp-audio`): decode plus channel-map plus resample plus
+PipeWire output. EQ (`dsp`) and the visualizer (`vis`) stay separate later crates.
+
+Dependencies: `symphonia` 0.5 (wav/pcm/mp3, pure Rust); then `pipewire` (FFI to
+libpipewire), `rtrb` (wait-free SPSC ring), `bytemuck`, `crossbeam-channel`; `rubato` for
+off-rate resampling.
+
+Threads: (1) the app/UI calls the thin `AudioEngine` API; (2) a producer thread (not
+real-time) decodes, maps to stereo, resamples, and writes the ring; (3) the PipeWire
+real-time callback only copies ring to buffer. The callback does no allocation, no locking,
+and no syscalls; an underrun becomes silence, and a flush (seek/stop/track change) is set by
+the producer via an atomic and executed on the callback.
+
+Rate: fix the stream at the negotiated graph rate (48000 on 26.04) and resample off-rate
+tracks on the producer thread, bypassing when equal.
+
+Public API: `AudioEngine::new/play/pause/resume/stop/seek/position/state`; `Drop` joins the
+threads.
+
+Build order, each a green sub-unit and PR: (a) decode via Symphonia [done]; (b) the SPSC
+ring; (c) PipeWire output playing a tone; (d) engine wiring decode to ring to output;
+(e) resampling; (f) hook a file path into the binary.
+
+Build note: the `pipewire` crate needs `libpipewire-0.3-dev` + `pkg-config` + `libclang` at
+build time (no dlopen escape like `wl` has). To keep the dev host clean the PipeWire build
+runs in an isolated environment (Docker or the Flatpak SDK; being decided). End users are
+unaffected: `libpipewire-0.3-0` already ships on 26.04, so an apt install adds no runtime.
+
+Tests: decode unit tests (a generated WAV plus a small MP3 fixture) [done]; ring round-trip
+plus a no-allocation assertion on the callback path; and a live playback test to a null sink
+asserting a tone's FFT peak (marked ignored, run explicitly on a real PipeWire session).
+
 ## Decisions
 
 - Language: Rust. The native-Wayland-in-Rust stack is production proven, memory safe,

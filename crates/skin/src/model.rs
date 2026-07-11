@@ -10,6 +10,9 @@ pub struct Skin {
     pub main: Option<Image>,
     pub titlebar: Option<Image>,
     pub cbuttons: Option<Image>,
+    /// The digit sheet for the time display. Loaded from `nums_ex.bmp` when the skin has it,
+    /// else the older `numbers.bmp`; the ten digit cells sit at identical coordinates in both.
+    pub numbers: Option<Image>,
 }
 
 impl Skin {
@@ -21,6 +24,10 @@ impl Skin {
             main: sheet("main.bmp"),
             titlebar: sheet("titlebar.bmp"),
             cbuttons: sheet("cbuttons.bmp"),
+            // Prefer the extended digit sheet (it carries full blank and minus cells); fall
+            // back to the classic one. Digits are at the same cells in both, so the renderer
+            // draws either the same way.
+            numbers: sheet("nums_ex.bmp").or_else(|| sheet("numbers.bmp")),
         }
     }
 }
@@ -43,5 +50,32 @@ mod tests {
         assert_eq!(&img.rgba[0..4], &[10, 20, 30, 255]); // top-left pixel
         assert!(skin.cbuttons.is_none());
         assert!(skin.titlebar.is_none());
+        assert!(skin.numbers.is_none());
+    }
+
+    #[test]
+    fn prefers_nums_ex_over_numbers() {
+        // Both digit sheets present: nums_ex.bmp wins, its top-left pixel proves which loaded.
+        let nums_ex = solid_bmp_24(108, 13, 1, 2, 3);
+        let numbers = solid_bmp_24(99, 13, 9, 8, 7);
+        let wsz = wsz_stored(&[("NUMS_EX.BMP", &nums_ex), ("NUMBERS.BMP", &numbers)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let img = skin.numbers.expect("a digit sheet decoded");
+        assert_eq!((img.width, img.height), (108, 13), "the 108-wide nums_ex sheet");
+        assert_eq!(&img.rgba[0..4], &[1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn falls_back_to_numbers_when_nums_ex_absent() {
+        let numbers = solid_bmp_24(99, 13, 9, 8, 7);
+        let wsz = wsz_stored(&[("NUMBERS.BMP", &numbers)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let img = skin.numbers.expect("numbers sheet decoded");
+        assert_eq!((img.width, img.height), (99, 13), "the 99-wide classic sheet");
+        assert_eq!(&img.rgba[0..4], &[9, 8, 7, 255]);
     }
 }

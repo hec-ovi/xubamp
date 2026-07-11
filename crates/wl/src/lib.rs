@@ -7,7 +7,13 @@
 //! on Ubuntu 26.04 rather than by unit tests.
 
 use std::error::Error;
+use std::time::Duration;
 
+use smithay_client_toolkit::reexports::calloop::{
+    timer::{TimeoutAction, Timer},
+    EventLoop,
+};
+use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
@@ -38,13 +44,16 @@ use xubamp_skin::Skin;
 
 /// Open the main window for `skin` and run until the user closes it. `on_command` is called on
 /// the event-loop thread whenever a transport button is clicked (pressed and released over
-/// itself); the caller bridges it to the audio engine.
+/// itself); the caller bridges it to the audio engine. `time_source` is polled once a second
+/// for the elapsed play time (whole seconds, or `None` to blank the display), so the time
+/// digits tick without this layer knowing anything about audio.
 pub fn run(
     skin: Skin,
     on_command: impl FnMut(hit::Transport) + 'static,
+    time_source: impl FnMut() -> Option<u32> + 'static,
 ) -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
-    let (globals, mut event_queue) = registry_queue_init(&conn)?;
+    let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
     let compositor = CompositorState::bind(&globals, &qh)?;
@@ -78,13 +87,40 @@ pub fn run(
         state,
         fb,
         on_command: Box::new(on_command),
+        time_source: Box::new(time_source),
         pointer: None,
         seat: None,
+        configured: false,
         exit: false,
     };
 
+    // Drive the Wayland queue and a periodic redraw timer from one calloop event loop. The
+    // timer is what makes the clock tick; the blocking dispatch we replaced could only wake on
+    // Wayland events, never on its own.
+    let mut event_loop: EventLoop<App> =
+        EventLoop::try_new().expect("failed to create the calloop event loop");
+    let loop_handle = event_loop.handle();
+
+    // WaylandSource feeds compositor events into the loop and flushes our requests back out; it
+    // takes the connection (cheap Arc clone) and the queue by value.
+    WaylandSource::new(conn.clone(), event_queue)
+        .insert(loop_handle.clone())
+        .expect("failed to insert the Wayland source");
+
+    // A self-re-arming ~1s timer: poll the clock and recompose only if the shown time moved.
+    loop_handle
+        .insert_source(
+            Timer::from_duration(Duration::from_secs(1)),
+            |_deadline, _meta, app: &mut App| {
+                app.tick();
+                TimeoutAction::ToDuration(Duration::from_secs(1))
+            },
+        )
+        .expect("failed to insert the redraw timer");
+
+    // `None` blocks until a Wayland event or the timer fires; no busy loop.
     while !app.exit {
-        event_queue.blocking_dispatch(&mut app)?;
+        event_loop.dispatch(None, &mut app)?;
     }
     Ok(())
 }
@@ -104,11 +140,16 @@ struct App {
     fb: Framebuffer,
     /// Sink for transport commands, called when a button click completes.
     on_command: Box<dyn FnMut(hit::Transport)>,
+    /// Polled once a second for the elapsed play time that drives the clock display.
+    time_source: Box<dyn FnMut() -> Option<u32>>,
     /// The pointer, once the seat reports the capability. `None` on a seat with no mouse.
     pointer: Option<wl_pointer::WlPointer>,
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
     /// move: `xdg_toplevel.move` needs the seat plus the press serial.
     seat: Option<wl_seat::WlSeat>,
+    /// Set once the window has had its first `configure`, so the timer never attaches a buffer
+    /// before the surface is mapped.
+    configured: bool,
     exit: bool,
 }
 
@@ -118,6 +159,19 @@ impl App {
     fn redraw(&mut self) {
         self.fb = compose_main_window(&self.skin, &self.state);
         self.draw();
+    }
+
+    /// Once-a-second timer tick: poll the playback clock and recompose only if the shown time
+    /// changed. Does nothing before the first configure (nothing to draw into yet) or while the
+    /// value is steady (paused / stopped), so idle playback costs nothing.
+    fn tick(&mut self) {
+        if !self.configured {
+            return;
+        }
+        let elapsed = (self.time_source)();
+        if hit::on_tick(&mut self.state, elapsed) {
+            self.redraw();
+        }
     }
 
     fn draw(&mut self) {
@@ -193,6 +247,7 @@ impl WindowHandler for App {
         _: WindowConfigure,
         _: u32,
     ) {
+        self.configured = true;
         self.draw();
     }
 }

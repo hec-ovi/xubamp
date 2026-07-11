@@ -149,7 +149,17 @@ fn main() {
         eprintln!("xubamp: transport command {command:?}");
     };
 
-    if let Err(e) = xubamp_wl::run(skin, on_command) {
+    // Feed the window's once-a-second clock. With audio, report the engine's elapsed seconds
+    // (or `None` when nothing is playing, blanking the display); without it, always blank.
+    #[cfg(feature = "audio")]
+    let time_source = {
+        let handle = _engine.as_ref().map(|engine| engine.handle());
+        move || handle.as_ref().map(|h| h.elapsed_secs())
+    };
+    #[cfg(not(feature = "audio"))]
+    let time_source = || None::<u32>;
+
+    if let Err(e) = xubamp_wl::run(skin, on_command, time_source) {
         eprintln!("xubamp: {e}");
         std::process::exit(1);
     }

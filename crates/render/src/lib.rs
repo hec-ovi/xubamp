@@ -61,6 +61,20 @@ fn blit_placement(fb: &mut Framebuffer, sheet: &Image, p: Placement) {
     blit(fb, sheet, p.src, p.dst_x, p.dst_y);
 }
 
+/// Split whole seconds into the four MM:SS digit values (tens then units of minutes, then of
+/// seconds) for the time display. Minutes saturate at 99 so the two-digit field never
+/// overflows; the classic display has no room to show more.
+pub fn mmss_digits(secs: u32) -> [u8; 4] {
+    let mins = (secs / 60).min(99);
+    let s = secs % 60;
+    [
+        (mins / 10) as u8,
+        (mins % 10) as u8,
+        (s / 10) as u8,
+        (s % 10) as u8,
+    ]
+}
+
 /// Compose the main window (275x116): the MAIN background, the active title bar, then the
 /// six transport buttons, drawing the pressed sprite for whichever button `state` reports as
 /// held. Missing sheets are simply skipped (their pixels stay whatever the lower layer left),
@@ -85,6 +99,13 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
                 *normal
             };
             blit_placement(&mut fb, cbuttons, placement);
+        }
+    }
+    // Time display: four digits from the number sheet, but only while a time is set. With no
+    // elapsed time (nothing loaded / stopped) the slots stay blank, as on the classic display.
+    if let (Some(numbers), Some(secs)) = (&skin.numbers, state.elapsed) {
+        for (&(dx, dy), &d) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
+            blit(&mut fb, numbers, sprites::DIGITS[d as usize], dx, dy);
         }
     }
     fb
@@ -160,12 +181,58 @@ mod tests {
         };
         let state = hit::UiState {
             pressed: Some(hit::Transport::Play),
+            ..Default::default()
         };
         let fb = compose_main_window(&skin, &state);
         // Play (dst 39,88) is pressed -> sampled from the WHITE bottom row.
         assert_eq!(px(&fb, 39 + 11, 88 + 9), [255, 255, 255, 255], "play pressed");
         // Stop (dst 85,88) is not pressed -> still the BLUE normal row.
         assert_eq!(px(&fb, 85 + 11, 88 + 9), [0, 0, 255, 255], "stop normal");
+    }
+
+    #[test]
+    fn mmss_digits_split_and_clamp() {
+        assert_eq!(mmss_digits(0), [0, 0, 0, 0]);
+        assert_eq!(mmss_digits(65), [0, 1, 0, 5]); // 01:05
+        assert_eq!(mmss_digits(3599), [5, 9, 5, 9]); // 59:59
+        assert_eq!(mmss_digits(6000), [9, 9, 0, 0]); // 100:00 clamps to 99:00
+        assert_eq!(mmss_digits(600_000), [9, 9, 0, 0]); // far past the cap, still 99:xx
+    }
+
+    #[test]
+    fn time_display_draws_the_elapsed_digits() {
+        // A number sheet where digit d's 9px cell is a d-distinct red, so we can read back
+        // which digit landed where. (Digit 0 is (10,0,0), digit 5 is (110,0,0), etc.)
+        let mut numbers = solid(99, 13, [0, 0, 0, 255]);
+        for d in 0..10u32 {
+            let color = [(10 + d * 20) as u8, 0, 0, 255];
+            for y in 0..13u32 {
+                for x in d * 9..d * 9 + 9 {
+                    let o = ((y * 99 + x) * 4) as usize;
+                    numbers.rgba[o..o + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            numbers: Some(numbers),
+            ..Default::default()
+        };
+        let state = hit::UiState {
+            elapsed: Some(65), // 01:05 -> digits [0, 1, 0, 5]
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &state);
+        for (&(dx, dy), &d) in xubamp_skin::sprites::TIME_DIGITS.iter().zip([0u32, 1, 0, 5].iter())
+        {
+            let want = [(10 + d * 20) as u8, 0, 0, 255];
+            let (cx, cy) = (dx as u32 + 4, dy as u32 + 6); // sample a pixel inside the cell
+            assert_eq!(px(&fb, cx, cy), want, "digit {d} at ({dx},{dy})");
+        }
+
+        // With no elapsed time the slots stay blank: the main background shows through.
+        let blank = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&blank, 48 + 4, 26 + 6), RED, "blank display draws no digit");
     }
 
     #[test]

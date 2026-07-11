@@ -73,6 +73,10 @@ pub fn hit_test(x: i32, y: i32) -> Region {
 pub struct UiState {
     /// The transport button currently pressed (drawn depressed), or `None`.
     pub pressed: Option<Transport>,
+    /// Elapsed play time shown in the MM:SS display, in whole seconds, or `None` to blank it
+    /// (nothing loaded or stopped). The platform timer refreshes it once a second via
+    /// [`on_tick`], so composition can read it without touching the audio engine.
+    pub elapsed: Option<u32>,
 }
 
 /// What the platform layer should do after a left-button press. Returned by [`on_press`].
@@ -130,6 +134,19 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> ReleaseOutcome {
 /// stays stuck down. Returns whether a redraw is needed.
 pub fn on_leave(state: &mut UiState) -> bool {
     state.pressed.take().is_some()
+}
+
+/// Refresh the displayed elapsed time from the latest playback clock (whole seconds, or `None`
+/// when nothing is playing), updating `state`. Returns whether the shown value changed and a
+/// redraw is needed, so the timer recomposes only when the display actually moves (not while
+/// paused, where the clock holds and this returns `false`).
+pub fn on_tick(state: &mut UiState, elapsed: Option<u32>) -> bool {
+    if state.elapsed == elapsed {
+        false
+    } else {
+        state.elapsed = elapsed;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +222,7 @@ mod tests {
     fn release_over_the_same_button_fires_the_command() {
         let mut s = UiState {
             pressed: Some(Transport::Play),
+            ..Default::default()
         };
         let out = on_release(&mut s, 39 + 11, 88 + 9);
         assert_eq!(out.command, Some(Transport::Play));
@@ -216,6 +234,7 @@ mod tests {
     fn release_off_the_button_cancels_the_command() {
         let mut s = UiState {
             pressed: Some(Transport::Play),
+            ..Default::default()
         };
         let out = on_release(&mut s, 200, 40); // released over the body
         assert_eq!(out.command, None, "dragged off = cancel");
@@ -235,9 +254,22 @@ mod tests {
     fn leave_clears_a_pressed_button() {
         let mut s = UiState {
             pressed: Some(Transport::Stop),
+            ..Default::default()
         };
         assert!(on_leave(&mut s), "needs redraw to un-press");
         assert_eq!(s.pressed, None);
         assert!(!on_leave(&mut s), "nothing pressed now");
+    }
+
+    #[test]
+    fn tick_redraws_only_when_the_shown_time_changes() {
+        let mut s = UiState::default();
+        assert!(on_tick(&mut s, Some(0)), "blank -> 00:00 is a change");
+        assert_eq!(s.elapsed, Some(0));
+        assert!(!on_tick(&mut s, Some(0)), "same second (e.g. paused): no redraw");
+        assert!(on_tick(&mut s, Some(1)), "next second: redraw");
+        assert!(on_tick(&mut s, None), "stop blanks the display: redraw");
+        assert_eq!(s.elapsed, None);
+        assert!(!on_tick(&mut s, None), "still blank: no redraw");
     }
 }

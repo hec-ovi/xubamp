@@ -70,6 +70,33 @@ pub const CBUTTONS_PRESSED: [Placement; 6] = [
     Placement::new(Rect::new(114, 16, 22, 16), 136, 89), // eject
 ];
 
+/// Time-display digit cell size in the number sheets (`NUMBERS.BMP` / `NUMS_EX.BMP`).
+pub const DIGIT_W: i32 = 9;
+pub const DIGIT_H: i32 = 13;
+
+/// Source rects for digits 0-9 in the number sheet. Both sheets place the ten digits at the
+/// same cells: digit `d` at x = d*9, y = 0, sized 9x13. (They differ only in the trailing
+/// blank and minus cells, which the elapsed-time display does not use.)
+pub const DIGITS: [Rect; 10] = [
+    Rect::new(0, 0, DIGIT_W, DIGIT_H),
+    Rect::new(9, 0, DIGIT_W, DIGIT_H),
+    Rect::new(18, 0, DIGIT_W, DIGIT_H),
+    Rect::new(27, 0, DIGIT_W, DIGIT_H),
+    Rect::new(36, 0, DIGIT_W, DIGIT_H),
+    Rect::new(45, 0, DIGIT_W, DIGIT_H),
+    Rect::new(54, 0, DIGIT_W, DIGIT_H),
+    Rect::new(63, 0, DIGIT_W, DIGIT_H),
+    Rect::new(72, 0, DIGIT_W, DIGIT_H),
+    Rect::new(81, 0, DIGIT_W, DIGIT_H),
+];
+
+/// Destination top-lefts of the four time-display digits on the main window, in order:
+/// tens-of-minutes, units-of-minutes, tens-of-seconds, units-of-seconds. Digits within a pair
+/// step by 12px; the MM and SS pairs are 18px apart, the extra 6px being where the background
+/// colon sits (the colon is part of MAIN.BMP, not a digit). Coordinates are the classic layout.
+/// (The countdown minus sign, added with a later remaining-time toggle, is a 9x13 cell at 39,26.)
+pub const TIME_DIGITS: [(i32, i32); 4] = [(48, 26), (60, 26), (78, 26), (90, 26)];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +115,22 @@ mod tests {
         assert_eq!(CBUTTONS[1].src, Rect::new(23, 0, 23, 18));
         // eject is the narrow, shorter button at the far right.
         assert_eq!(CBUTTONS[5].src, Rect::new(114, 0, 22, 16));
+    }
+
+    #[test]
+    fn digit_cells_tile_across_the_top_row() {
+        assert_eq!(DIGITS.len(), 10);
+        for (d, r) in DIGITS.iter().enumerate() {
+            assert_eq!(*r, Rect::new(d as i32 * DIGIT_W, 0, DIGIT_W, DIGIT_H), "digit {d}");
+        }
+    }
+
+    #[test]
+    fn time_digits_layout_leaves_room_for_the_colon() {
+        assert_eq!(TIME_DIGITS, [(48, 26), (60, 26), (78, 26), (90, 26)]);
+        assert_eq!(TIME_DIGITS[1].0 - TIME_DIGITS[0].0, 12, "step within the MM pair");
+        assert_eq!(TIME_DIGITS[3].0 - TIME_DIGITS[2].0, 12, "step within the SS pair");
+        assert_eq!(TIME_DIGITS[2].0 - TIME_DIGITS[1].0, 18, "MM->SS spans the colon gap");
     }
 
     #[test]

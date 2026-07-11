@@ -42,6 +42,9 @@ impl std::error::Error for EngineError {}
 pub struct AudioEngine {
     control: ControlSender<Control>,
     shared: Arc<SharedState>,
+    /// The stream's frame rate, for turning the position clock into seconds. This is the file's
+    /// native rate, which is the single format the output offers, so it is also the graph rate.
+    rate: u32,
     loop_thread: Option<JoinHandle<()>>,
     producer_thread: Option<JoinHandle<()>>,
 }
@@ -53,6 +56,8 @@ pub struct AudioEngine {
 #[derive(Clone)]
 pub struct EngineHandle {
     control: ControlSender<Control>,
+    shared: Arc<SharedState>,
+    rate: u32,
 }
 
 impl EngineHandle {
@@ -63,6 +68,17 @@ impl EngineHandle {
         // The only failure is a dropped receiver (the loop has already exited), which means
         // there is nothing to pause anyway, so ignoring the error is correct.
         let _ = self.control.send(Control::Active(active));
+    }
+
+    /// Elapsed whole seconds of playback, for the MM:SS time display. Derived from the same
+    /// position clock as [`AudioEngine::position_frames`], so it holds while paused and is 0
+    /// before any frame has played.
+    pub fn elapsed_secs(&self) -> u32 {
+        if self.rate == 0 {
+            0
+        } else {
+            (self.shared.position_frames() / self.rate as u64) as u32
+        }
     }
 }
 
@@ -137,6 +153,7 @@ impl AudioEngine {
         Ok(Self {
             control,
             shared,
+            rate,
             loop_thread: Some(loop_thread),
             producer_thread: Some(producer_thread),
         })
@@ -147,10 +164,13 @@ impl AudioEngine {
         self.shared.position_frames()
     }
 
-    /// A cloneable remote control (pause/resume) that can outlive borrows of the engine.
+    /// A cloneable remote control (pause/resume, elapsed time) that can outlive borrows of the
+    /// engine.
     pub fn handle(&self) -> EngineHandle {
         EngineHandle {
             control: self.control.clone(),
+            shared: Arc::clone(&self.shared),
+            rate: self.rate,
         }
     }
 }

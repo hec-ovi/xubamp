@@ -81,15 +81,26 @@ fn pause_holds_the_clock_and_resume_advances_it() {
     let engine = AudioEngine::play(&path).expect("engine failed to start playback");
     let handle = engine.handle();
 
-    // Wait until it is clearly playing.
+    // Wait until more than one second has clearly played (48 kHz -> 60_000 frames is ~1.25 s),
+    // so elapsed_secs has a non-zero, advancing value to check. Below one second every possible
+    // implementation reads back 0, so an assertion there would prove nothing.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && engine.position_frames() <= 8_000 {
+    while Instant::now() < deadline && engine.position_frames() <= 60_000 {
         std::thread::sleep(Duration::from_millis(50));
     }
+    let frames = engine.position_frames();
+    assert!(frames > 60_000, "playback did not reach one second (got {frames})");
+
+    // The handle reads the same clock and rate (48 kHz) as the engine. Its read lands a hair
+    // after `frames`, so it can only equal frames/rate or be one second more: it must have
+    // advanced past a second, and it must match the position clock within that gap. This fails
+    // a broken elapsed_secs (hardcoded 0, wrong base, or wrong divisor).
+    let secs = handle.elapsed_secs();
+    assert!(secs >= 1, "elapsed_secs did not advance past a second (got {secs})");
     assert!(
-        engine.position_frames() > 8_000,
-        "playback never started (got {})",
-        engine.position_frames()
+        secs.abs_diff((frames / 48_000) as u32) <= 1,
+        "elapsed_secs {secs} does not match the position clock ({} s)",
+        frames / 48_000
     );
 
     // Pause, let the deactivation reach the loop, then measure that the clock holds.

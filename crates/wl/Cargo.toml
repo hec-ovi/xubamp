@@ -11,8 +11,9 @@ authors.workspace = true
 [dependencies]
 xubamp-render = { path = "../render" }
 xubamp-skin = { path = "../skin" }
-# default-features off drops xkbcommon (keyboard, not needed yet) and calloop, which
-# otherwise require pkg-config + libxkbcommon-dev at build time.
-smithay-client-toolkit = { version = "0.19", default-features = false }
+# default-features off drops xkbcommon (keyboard, not needed yet), which needs pkg-config +
+# libxkbcommon-dev at build time. We re-enable only `calloop` for the event loop's ~1s redraw
+# timer; it is pure Rust (calloop + calloop-wayland-source) and pulls in no system libraries.
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 # dlopen loads libwayland-client at runtime, so no -dev package is needed to build.
 wayland-client = { version = "0.31", features = ["dlopen"] }

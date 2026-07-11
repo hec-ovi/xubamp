@@ -67,6 +67,19 @@ in the repo and git history, nothing important lives only in chat.
     Next and Eject wait for a playlist. Pausing is a stream deactivation, so no decoder changes were
     needed. Verified in the dev container against a silent null sink: an ignored engine test asserts the
     position clock holds while paused and advances again on resume.
+  - (d) done: running time display. The main window shows elapsed MM:SS and updates once a second.
+    `render::hit::UiState` gained an `elapsed` seconds field with a pure `on_tick` that sets it and
+    reports whether the shown value moved, so a held (paused) clock costs no redraw;
+    `compose_main_window` draws the four digits from the skin's number sheet (`nums_ex.bmp` preferred,
+    else `numbers.bmp`) at the classic destinations, and `mmss_digits` splits seconds into digit values
+    (minutes clamp at 99). The `wl` crate moved off the blocking Wayland dispatch to a calloop event
+    loop (SCTK's `calloop` feature, pure Rust, no new system deps) with a re-arming ~1s `Timer` that
+    polls a `time_source` closure and recomposes only on a change. The binary feeds it
+    `EngineHandle::elapsed_secs()` (a clone of the position clock plus the stream rate). Digit
+    sprites/destinations, the tick policy, and the seconds split are unit-tested; the elapsed clock is
+    checked against a null sink in the ignored engine test; verified live on GNOME. End-of-track freeze
+    (the clock currently counts silence past a track's end, needing an end-of-stream signal), the pause
+    blink, and the remaining-time toggle come next.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -101,9 +114,10 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): transport buttons wired to the engine with pressed-sprite feedback,
-  running time display, marquee title, seek/volume/balance sliders, in-window hotkeys, and a
-  real skin.
+- Phase 4 (continued): end-of-track auto-stop so the clock freezes at the true end (the engine
+  needs an end-of-stream signal), the marquee song title, seek/volume/balance sliders, in-window
+  hotkeys (needs keyboard input, i.e. re-enabling xkbcommon), and the spectrum/oscilloscope.
+  Polish: pause-blink and the click-to-toggle remaining-time display. Plus a real skin.
 
 ## Working rules
 

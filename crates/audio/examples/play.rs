@@ -18,31 +18,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use rtrb::Producer;
-
 use xubamp_audio::channels::to_stereo;
 use xubamp_audio::command::Control;
 use xubamp_audio::decode::Source;
 use xubamp_audio::output::{control_channel, run_loop, RtData};
-use xubamp_audio::ring::{new_ring, push_block, SharedState, CHANNELS};
-
-/// Push the whole buffer into the ring, retrying while the realtime side drains. Returns false
-/// if the consumer was dropped (the loop thread exited), so the producer can stop instead of
-/// spinning forever.
-fn push_all(producer: &mut Producer<f32>, mut buf: &[f32]) -> bool {
-    while !buf.is_empty() {
-        let n = push_block(producer, buf);
-        if n == 0 {
-            if producer.is_abandoned() {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(3));
-        } else {
-            buf = &buf[n..];
-        }
-    }
-    true
-}
+use xubamp_audio::ring::{new_ring, push_all, SharedState, CHANNELS};
 
 fn main() {
     let path = match env::args().nth(1) {

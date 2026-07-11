@@ -84,6 +84,25 @@ pub fn push_block(p: &mut Producer<f32>, block: &[f32]) -> usize {
     }
 }
 
+/// Producer side: push the whole of `block` into the ring, retrying the remainder while the
+/// realtime side drains, with a short sleep when it is full. Returns `false` if the consumer
+/// was dropped (the output loop exited), so the caller can stop instead of spinning forever.
+/// Not realtime: the sleep is a syscall, so this only runs on the producer thread.
+pub fn push_all(p: &mut Producer<f32>, mut block: &[f32]) -> bool {
+    while !block.is_empty() {
+        let n = push_block(p, block);
+        if n == 0 {
+            if p.is_abandoned() {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        } else {
+            block = &block[n..];
+        }
+    }
+    true
+}
+
 /// Realtime side (PipeWire callback): fill `out` with queued audio, silence-padding any
 /// shortfall. RT-safe, only atomic loads/stores and memcpy. If `flush` is set, drop all
 /// queued audio first (seek/stop/track change) and emit silence for this quantum.

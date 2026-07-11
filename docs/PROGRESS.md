@@ -34,6 +34,8 @@ in the repo and git history, nothing important lives only in chat.
 
 - `cargo run -p xubamp` shows the default (or your local `skins/` dev skin if present).
 - `cargo run -p xubamp -- path/to/skin.wsz` loads a specific skin.
+- `scripts/dev-docker.sh run ~/Music/song.mp3` plays a track with the window (audio needs the
+  dev container; the plain host build has no PipeWire deps and just shows the window).
 - `./packaging/install-icons.sh` puts the icon + desktop entry under `~/.local/share` so
   GNOME shows the app icon; `uninstall-icons.sh` reverses it.
 - User is authoring the real default skin; the built-in one is only the safe fallback.
@@ -53,9 +55,16 @@ in the repo and git history, nothing important lives only in chat.
     `tests/live_playback.rs` connects, negotiates 48 kHz, and the RT callback consumes frames;
     a null-sink capture of the tone example shows a clean 440 Hz sine (format/stride/channel
     map correct end to end). Built against pipewire 0.10.0 / libspa 0.10.0.
-  - (d) next: wire decode -> ring -> output into an `AudioEngine` (command.rs `Command`,
-    producer.rs, lib.rs play/pause/resume/stop/seek/position). Then (e) resampling, (f) hook a
-    file path into the binary.
+  - (d) done (minimal): `audio::engine::AudioEngine::play(path)` spawns the output loop + a
+    decode/producer thread and starts playback; `Drop` quits the loop and joins both threads
+    cleanly (no hang in any close scenario). Hooked into the binary: `xubamp song.mp3` plays
+    the track while the window shows. Arguments are classified by extension (`.wsz` -> skin,
+    audio -> track). Audio is behind the binary's `audio` feature (off by default) so host UI
+    dev stays PipeWire-free; the dev container runs `--features audio`. Streams at the file's
+    native rate (PipeWire converts to the device), so no resampler is needed yet. Verified with
+    a real MP3 (audible) and an ignored engine test (generated WAV -> null sink -> asserts the
+    clock advances). Transport (pause/resume/stop/seek), a time display and playlists come with
+    the interactivity phase; (e) a fixed-rate + own-resampler design is optional and deferred.
 
 - Dev build for the PipeWire crates runs in Docker so the host stays clean: `Dockerfile.dev`
   (Ubuntu 26.04, rust pinned to 1.96.0, clippy+rustfmt, and the PipeWire client runtime bits

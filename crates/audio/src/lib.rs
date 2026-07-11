@@ -9,7 +9,10 @@ pub mod command;
 pub mod decode;
 pub mod ring;
 
-// PipeWire realtime output. Behind the `output` feature so the pure decode/ring/channels
-// build and test on a clean host; the dev container builds with `--features output`.
+// PipeWire realtime output + the engine that drives it. Behind the `output` feature so the
+// pure decode/ring/channels build and test on a clean host; the dev container builds with
+// `--features output`.
+#[cfg(feature = "output")]
+pub mod engine;
 #[cfg(feature = "output")]
 pub mod output;

@@ -130,7 +130,7 @@ The classic Winamp add/save flow, in full:
 Each phase produces a runnable, testable artifact. Tests run locally (a `cargo test`
 target); no CI is added.
 
-- Phase 0 (in progress): workspace scaffold and the isolated BMP decoder with tests.
+- Phase 0 (done): workspace scaffold and the isolated BMP decoder with tests.
 - Phase 1: `.wsz` container reader (case-insensitive, default-skin fallback) plus the
   region/pledit/viscolor config parsers. Test: load real skins, assert parsed structs.
 - Phase 2: a native Wayland window showing a static render of MAIN, CBUTTONS, and

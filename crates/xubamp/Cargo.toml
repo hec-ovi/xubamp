@@ -1,0 +1,15 @@
+[package]
+name = "xubamp"
+description = "Lean native-Wayland Winamp 2.9x-style audio player for Ubuntu 26.04"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "xubamp"
+path = "src/main.rs"
+
+[dependencies]

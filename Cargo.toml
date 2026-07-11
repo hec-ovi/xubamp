@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/skin", "crates/xubamp"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.96"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/hec-ovi/xubamp"
+authors = ["Hector Oviedo"]
+
+# Lean, fast release binary: full LTO, one codegen unit, abort on panic
+# (drops unwinding tables), symbols stripped.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

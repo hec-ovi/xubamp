@@ -156,6 +156,33 @@ target); no CI is added.
   Launchpad PPA. Test: install the built `.deb` in a clean container, launch, load a
   skin, assert it renders.
 
+## Phase 2 plan: native Wayland window plus static render
+
+Goal: a native GNOME 50 / Wayland window that shows a static render of a loaded skin's
+main window, with the rendering logic pure and headless-tested. Split into two isolated
+crates so the tested part and the platform part do not entangle:
+
+- `render` (pure, fully tested): a `Framebuffer` (RGBA), a clipping sprite blit, and
+  `compose_main_window(&Skin)` that blits MAIN, the active titlebar, and the six
+  transport buttons at their fixed coordinates. Tested with synthetic skins (known
+  solid-colour sheets) asserting exact placement and clipping. Backed by the
+  `skin::sprites` coordinate tables and a `skin::Skin` model (decoded sheets, per-sheet
+  fallback to `None`).
+- `wl` (thin platform glue): raw `wayland-client`, one undecorated `xdg_toplevel`, a
+  `wl_shm` buffer that receives the `Framebuffer`, the configure/ack/commit and
+  frame-callback loop, and window close. No toolkit.
+
+Testability: the `render` crate carries the automated tests. The `wl` crate needs a live
+compositor to display, so it is compile-verified in local builds and manually verified on
+Ubuntu 26.04; its logic is kept thin so little goes untested.
+
+Sub-units, each a green commit: (1) this plan; (2) `skin::sprites` + `skin::Skin` model;
+(3) `render` crate with tests; (4) `wl` crate + `main` wiring; (5) Phase 2 checkpoint.
+
+The exact sprite rectangles are the pixel-exactness surface; the main-window set is
+transcribed here from the documented classic layout and gets validated against real skins
+during the render-diff pass in a later phase.
+
 ## Decisions
 
 - Language: Rust. The native-Wayland-in-Rust stack is production proven, memory safe,

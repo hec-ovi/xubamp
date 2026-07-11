@@ -5,4 +5,6 @@
 //! until called. Allocation is held to the minimum a result needs.
 
 pub mod bmp;
+pub mod color;
 pub mod container;
+pub mod viscolor;

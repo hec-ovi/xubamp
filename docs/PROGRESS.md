@@ -91,6 +91,23 @@ in the repo and git history, nothing important lives only in chat.
     behavior is checked end to end against a null sink (the clock reaches ~48_000 frames for a
     one-second file, reads finished, and does not move through 500 ms of following silence).
     Restart-on-play after the end (re-seek to 0) waits for decoder seeking with the seek bar.
+  - (f) done: the song-title marquee. The main window shows the track title in the classic
+    song-title strip (x 111, y 27, 154px wide), rendered from the skin's `text.bmp` bitmap font
+    (5x6 glyph cells: case-folded ASCII plus the Nordic letters, ellipsis and punctuation, laid
+    out on the documented grid, coordinates cross-checked against Webamp). It scrolls left when the
+    title overruns the strip and sits static, left-aligned, otherwise. `skin::textfont` maps each
+    character to its cell; `skin::model` loads `text.bmp` into a new `Skin.text`; `render::marquee`
+    holds the pure scroll logic (a title wider than the strip loops with a `  ***  ` separator,
+    stepping 2px per tick, offset wrapped over the loop width) and a region-clipped draw that cuts
+    glyphs straddling either edge. `render::hit::UiState` gained `title` and `marquee_offset`;
+    `compose_main_window` draws the marquee only when the skin ships `text.bmp` (the built-in
+    default has none, so it is unchanged). The `wl` redraw timer now steps the marquee and
+    reschedules itself fast (100ms) while a title scrolls, else once a second for the clock, so an
+    idle window barely wakes, and it only animates for a skin that actually renders a marquee. The
+    binary derives the title from the media file name (tag-based titles come with the playlist).
+    Verified against the real XMMS skin (the title renders pixel-correctly in its panel with zero
+    pixels leaking outside the strip); the glyph grid, the scroll threshold and seamless wrap, both
+    edges of the clip, multibyte titles, and undersized-sheet safety are unit-tested.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -125,9 +142,11 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): the marquee song title, seek/volume/balance sliders, in-window hotkeys
-  (needs keyboard input, i.e. re-enabling xkbcommon), and the spectrum/oscilloscope. Polish:
-  pause-blink and the click-to-toggle remaining-time display. Plus a real skin.
+- Phase 4 (continued): seek/volume/balance sliders, in-window hotkeys (needs keyboard input,
+  i.e. re-enabling xkbcommon), and the spectrum/oscilloscope. Polish: pause-blink and the
+  click-to-toggle remaining-time display. Plus a real skin. (The built-in default skin has no
+  text.bmp, so its song title is still the baked static one; a live marquee for it awaits an
+  authored default 5x6 text font.)
 
 ## Working rules
 

@@ -77,6 +77,12 @@ pub struct UiState {
     /// (nothing loaded or stopped). The platform timer refreshes it once a second via
     /// [`on_tick`], so composition can read it without touching the audio engine.
     pub elapsed: Option<u32>,
+    /// The song title shown in the marquee. Empty draws nothing. When it overruns the marquee
+    /// width it scrolls, paced by the platform timer through [`crate::marquee::advance`].
+    pub title: String,
+    /// Horizontal scroll offset of the marquee, in pixels, wrapped over the looping title.
+    /// Only meaningful while the title scrolls; held at 0 for a title that fits.
+    pub marquee_offset: u32,
 }
 
 /// What the platform layer should do after a left-button press. Returned by [`on_press`].

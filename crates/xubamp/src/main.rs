@@ -29,6 +29,17 @@ fn has_ext(name: &str, ext: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
+/// The marquee title for a media path: its file name without the extension. This is Winamp's
+/// fallback when there are no tags to read (tag-based titles come with the playlist). A path
+/// with no file name yields an empty title, which draws no marquee. A leading-dot name (e.g.
+/// `.mp3`) is extension-less to Rust, so the whole name is the stem.
+fn track_title(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Split CLI arguments into an optional skin path and an optional media path, by extension.
 /// The first of each kind wins; anything unrecognized is ignored. Kept pure and iterator-based
 /// so it is unit-testable without a real argv.
@@ -91,10 +102,18 @@ fn main() {
     let (skin_arg, media_arg) = classify(std::env::args().skip(1));
     let skin = resolve_skin(skin_arg.as_deref());
 
+    // The marquee shows the track's file name (tag-based titles arrive with the playlist).
+    let title = media_arg.as_deref().map(track_title).unwrap_or_default();
+
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
-    // window would display in its resting state, then exit without opening a window.
+    // window would display, then exit without opening a window. `XUBAMP_TITLE` overrides the
+    // marquee text so the title strip can be diffed without a real media file.
     if let Ok(path) = std::env::var("XUBAMP_DUMP_RGBA") {
-        let fb = xubamp_render::compose_main_window(&skin, &xubamp_render::hit::UiState::default());
+        let state = xubamp_render::hit::UiState {
+            title: std::env::var("XUBAMP_TITLE").unwrap_or_else(|_| title.clone()),
+            ..Default::default()
+        };
+        let fb = xubamp_render::compose_main_window(&skin, &state);
         std::fs::write(&path, &fb.rgba).expect("write rgba dump");
         println!("dumped {}x{} rgba to {path}", fb.width, fb.height);
         return;
@@ -159,7 +178,7 @@ fn main() {
     #[cfg(not(feature = "audio"))]
     let time_source = || None::<u32>;
 
-    if let Err(e) = xubamp_wl::run(skin, on_command, time_source) {
+    if let Err(e) = xubamp_wl::run(skin, title, on_command, time_source) {
         eprintln!("xubamp: {e}");
         std::process::exit(1);
     }
@@ -167,10 +186,20 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
+    use super::{classify, track_title};
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn track_title_is_the_file_stem() {
+        assert_eq!(track_title("/music/Aphex Twin - Xtal.mp3"), "Aphex Twin - Xtal");
+        assert_eq!(track_title("song.flac"), "song");
+        assert_eq!(track_title("no_extension"), "no_extension");
+        assert_eq!(track_title(""), "");
+        // A leading-dot name is extension-less to Rust, so the whole name is the stem.
+        assert_eq!(track_title(".mp3"), ".mp3");
     }
 
     #[test]

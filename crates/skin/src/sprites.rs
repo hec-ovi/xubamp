@@ -90,6 +90,14 @@ pub const DIGITS: [Rect; 10] = [
     Rect::new(81, 0, DIGIT_W, DIGIT_H),
 ];
 
+/// The song-title marquee region on the main window: a `MARQUEE_W`-wide strip whose glyph
+/// rows start at (`MARQUEE_X`, `MARQUEE_Y`). Classic skins draw the title here from `text.bmp`
+/// (5x6 cells), scrolling it when it overruns the width. `MARQUEE_Y` is the top of the 6px
+/// glyph row (the classic element sits at y=24 with 3px of top padding above the glyphs).
+pub const MARQUEE_X: i32 = 111;
+pub const MARQUEE_Y: i32 = 27;
+pub const MARQUEE_W: i32 = 154;
+
 /// Destination top-lefts of the four time-display digits on the main window, in order:
 /// tens-of-minutes, units-of-minutes, tens-of-seconds, units-of-seconds. Digits within a pair
 /// step by 12px; the MM and SS pairs are 18px apart, the extra 6px being where the background
@@ -123,6 +131,14 @@ mod tests {
         for (d, r) in DIGITS.iter().enumerate() {
             assert_eq!(*r, Rect::new(d as i32 * DIGIT_W, 0, DIGIT_W, DIGIT_H), "digit {d}");
         }
+    }
+
+    #[test]
+    fn marquee_region_matches_the_classic_layout() {
+        assert_eq!((MARQUEE_X, MARQUEE_Y), (111, 27));
+        assert_eq!(MARQUEE_W, 154);
+        // The strip stays inside the 275px-wide window, ending 10px shy of the right edge.
+        assert_eq!(MARQUEE_X + MARQUEE_W, MAIN_W - 10);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use xubamp_skin::sprites::{self, Placement, Rect};
 use xubamp_skin::Skin;
 
 pub mod hit;
+pub mod marquee;
 
 /// A top-down `RGBA8888` framebuffer, 4 bytes per pixel.
 pub struct Framebuffer {
@@ -107,6 +108,11 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         for (&(dx, dy), &d) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
             blit(&mut fb, numbers, sprites::DIGITS[d as usize], dx, dy);
         }
+    }
+    // Song-title marquee: drawn from the skin's text.bmp font over the display panel. Skins
+    // without that sheet (including the built-in default) simply show no marquee here.
+    if let Some(text) = &skin.text {
+        marquee::draw(&mut fb, text, &state.title, state.marquee_offset);
     }
     fb
 }
@@ -233,6 +239,45 @@ mod tests {
         // With no elapsed time the slots stay blank: the main background shows through.
         let blank = compose_main_window(&skin, &hit::UiState::default());
         assert_eq!(px(&blank, 48 + 4, 26 + 6), RED, "blank display draws no digit");
+    }
+
+    #[test]
+    fn marquee_draws_over_the_panel_only_with_a_title_and_a_text_sheet() {
+        // A text sheet whose glyph cells are all GREEN, over a RED main background.
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            text: Some(solid(155, 18, GREEN)),
+            ..Default::default()
+        };
+        let (mx, my) = (xubamp_skin::sprites::MARQUEE_X as u32, xubamp_skin::sprites::MARQUEE_Y as u32);
+
+        // With a title, the first glyph cell paints the marquee origin green.
+        let playing = hit::UiState {
+            title: "HELLO".to_string(),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &playing);
+        assert_eq!(px(&fb, mx, my), GREEN, "title glyph drawn at the marquee origin");
+        // The glyph row is confined to CELL_H pixels: the rows just above and below stay the
+        // red background, so a mis-sized cell (drawing above or below the strip) would be caught.
+        assert_eq!(px(&fb, mx, my - 1), RED, "nothing drawn above the glyph row");
+        assert_eq!(
+            px(&fb, mx, my + xubamp_skin::textfont::CELL_H as u32),
+            RED,
+            "nothing drawn below the glyph row",
+        );
+
+        // With no title the strip is untouched: the red background shows through.
+        let idle = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&idle, mx, my), RED, "empty title leaves the panel background");
+
+        // A skin without text.bmp never draws a marquee, even with a title set.
+        let no_font = Skin {
+            main: Some(solid(275, 116, RED)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&no_font, &playing);
+        assert_eq!(px(&fb, mx, my), RED, "no text sheet, no marquee");
     }
 
     #[test]

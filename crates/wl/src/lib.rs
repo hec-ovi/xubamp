@@ -39,16 +39,22 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
-use xubamp_render::{compose_main_window, hit, Framebuffer};
+use xubamp_render::{compose_main_window, hit, marquee, Framebuffer};
 use xubamp_skin::Skin;
 
-/// Open the main window for `skin` and run until the user closes it. `on_command` is called on
-/// the event-loop thread whenever a transport button is clicked (pressed and released over
-/// itself); the caller bridges it to the audio engine. `time_source` is polled once a second
-/// for the elapsed play time (whole seconds, or `None` to blank the display), so the time
-/// digits tick without this layer knowing anything about audio.
+/// How often the marquee steps while a title is scrolling. Between scrolls the redraw timer
+/// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
+const MARQUEE_TICK: Duration = Duration::from_millis(100);
+
+/// Open the main window for `skin` and run until the user closes it. `title` is the song title
+/// shown in the marquee (empty for none). `on_command` is called on the event-loop thread
+/// whenever a transport button is clicked (pressed and released over itself); the caller bridges
+/// it to the audio engine. `time_source` is polled once a second for the elapsed play time
+/// (whole seconds, or `None` to blank the display), so the time digits tick without this layer
+/// knowing anything about audio.
 pub fn run(
     skin: Skin,
+    title: String,
     on_command: impl FnMut(hit::Transport) + 'static,
     time_source: impl FnMut() -> Option<u32> + 'static,
 ) -> Result<(), Box<dyn Error>> {
@@ -60,7 +66,10 @@ pub fn run(
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
 
-    let state = hit::UiState::default();
+    let state = hit::UiState {
+        title,
+        ..Default::default()
+    };
     let fb = compose_main_window(&skin, &state);
     let (w, h) = (fb.width, fb.height);
 
@@ -107,14 +116,13 @@ pub fn run(
         .insert(loop_handle.clone())
         .expect("failed to insert the Wayland source");
 
-    // A self-re-arming ~1s timer: poll the clock and recompose only if the shown time moved.
+    // A self-re-arming redraw timer. Each tick steps the marquee and polls the clock, then
+    // reschedules itself: fast while a title is scrolling, once a second otherwise, so an idle
+    // window barely wakes.
     loop_handle
         .insert_source(
-            Timer::from_duration(Duration::from_secs(1)),
-            |_deadline, _meta, app: &mut App| {
-                app.tick();
-                TimeoutAction::ToDuration(Duration::from_secs(1))
-            },
+            Timer::from_duration(MARQUEE_TICK),
+            |_deadline, _meta, app: &mut App| TimeoutAction::ToDuration(app.tick()),
         )
         .expect("failed to insert the redraw timer");
 
@@ -161,16 +169,29 @@ impl App {
         self.draw();
     }
 
-    /// Once-a-second timer tick: poll the playback clock and recompose only if the shown time
-    /// changed. Does nothing before the first configure (nothing to draw into yet) or while the
-    /// value is steady (paused / stopped), so idle playback costs nothing.
-    fn tick(&mut self) {
+    /// Redraw-timer tick: step the marquee, poll the playback clock, and recompose only if
+    /// something moved. Returns how long to wait before the next tick: [`MARQUEE_TICK`] while a
+    /// title is scrolling, else a second (just the clock). Does nothing before the first
+    /// configure (nothing to draw into yet).
+    fn tick(&mut self) -> Duration {
         if !self.configured {
-            return;
+            // Nothing to draw into yet; retry soon so scrolling begins right after the first
+            // configure instead of waiting out a full second.
+            return MARQUEE_TICK;
         }
-        let elapsed = (self.time_source)();
-        if hit::on_tick(&mut self.state, elapsed) {
+        let mut changed = hit::on_tick(&mut self.state, (self.time_source)());
+        // Only animate when the skin actually renders a marquee. A skin without text.bmp (the
+        // built-in default) shows no title strip, so it must not spin a 10 fps redraw loop over
+        // a title it never draws.
+        let scrolling = self.skin.text.is_some() && marquee::advance(&mut self.state);
+        changed |= scrolling;
+        if changed {
             self.redraw();
+        }
+        if scrolling {
+            MARQUEE_TICK
+        } else {
+            Duration::from_secs(1)
         }
     }
 

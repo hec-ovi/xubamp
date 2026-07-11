@@ -13,6 +13,9 @@ pub struct Skin {
     /// The digit sheet for the time display. Loaded from `nums_ex.bmp` when the skin has it,
     /// else the older `numbers.bmp`; the ten digit cells sit at identical coordinates in both.
     pub numbers: Option<Image>,
+    /// The bitmap font sheet (`text.bmp`) for the song-title marquee. `None` when the skin
+    /// omits it, in which case the marquee simply does not draw.
+    pub text: Option<Image>,
 }
 
 impl Skin {
@@ -28,6 +31,7 @@ impl Skin {
             // back to the classic one. Digits are at the same cells in both, so the renderer
             // draws either the same way.
             numbers: sheet("nums_ex.bmp").or_else(|| sheet("numbers.bmp")),
+            text: sheet("text.bmp"),
         }
     }
 }
@@ -51,6 +55,21 @@ mod tests {
         assert!(skin.cbuttons.is_none());
         assert!(skin.titlebar.is_none());
         assert!(skin.numbers.is_none());
+        assert!(skin.text.is_none());
+    }
+
+    #[test]
+    fn decodes_the_text_font_sheet_when_present() {
+        // A classic text.bmp is 155x18 (31 cells wide, 3 rows of 6px). Its presence is what
+        // switches the marquee on, so decoding it into `skin.text` is the gate.
+        let text = solid_bmp_24(155, 18, 4, 5, 6);
+        let wsz = wsz_stored(&[("TEXT.BMP", &text)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let img = skin.text.expect("text sheet decoded");
+        assert_eq!((img.width, img.height), (155, 18));
+        assert_eq!(&img.rgba[0..4], &[4, 5, 6, 255]);
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod model;
 pub mod pledit;
 pub mod region;
 pub mod sprites;
+pub mod textfont;
 pub mod viscolor;
 
 pub use default_skin::default_skin;

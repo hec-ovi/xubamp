@@ -119,15 +119,16 @@ pub fn run_loop(
                 let usable = &mut raw[..frames * STRIDE];
                 // Aligned (MAP_BUFFERS) and length is a multiple of 4, so this succeeds; the
                 // fallible form keeps the RT thread panic-free if that ever fails to hold.
+                // `fill_output` advances `frames_consumed` by the real frames it copies (before
+                // padding), so trailing silence after a track's last frame never moves the clock
+                // and the producer draining the ring sees the final count immediately.
                 match bytemuck::try_cast_slice_mut::<u8, f32>(usable) {
-                    Ok(out) => fill_output(&mut ud.consumer, out, &ud.shared.flush),
+                    Ok(out) => {
+                        fill_output(&mut ud.consumer, out, &ud.shared.flush, &ud.shared.frames_consumed);
+                    }
                     Err(_) => usable.fill(0),
                 }
             }
-            // The RT thread only ever adds to this counter (Relaxed); readers derive position.
-            ud.shared
-                .frames_consumed
-                .fetch_add(frames as u64, Ordering::Relaxed);
 
             let chunk = data.chunk_mut();
             *chunk.offset_mut() = 0;

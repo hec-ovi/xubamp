@@ -77,9 +77,20 @@ in the repo and git history, nothing important lives only in chat.
     polls a `time_source` closure and recomposes only on a change. The binary feeds it
     `EngineHandle::elapsed_secs()` (a clone of the position clock plus the stream rate). Digit
     sprites/destinations, the tick policy, and the seconds split are unit-tested; the elapsed clock is
-    checked against a null sink in the ignored engine test; verified live on GNOME. End-of-track freeze
-    (the clock currently counts silence past a track's end, needing an end-of-stream signal), the pause
-    blink, and the remaining-time toggle come next.
+    checked against a null sink in the ignored engine test; verified live on GNOME. The pause blink
+    and the remaining-time toggle come next.
+  - (e) done: end-of-track freeze and auto-stop. `fill_output` returns the count of real frames it
+    copied from the ring, and the realtime callback advances the position clock by that only, so
+    trailing silence after a track's last frame never moves it: the clock and MM:SS display freeze at
+    the true length instead of counting padded quanta forever (a mid-track underrun freezes momentarily
+    and self-corrects). The producer thread, once its drain loop sees the ring fully emptied after a
+    clean end of decode, sets a new `SharedState.finished` flag and deactivates the stream
+    (`Control::Active(false)`) so the RT thread stops waking to emit silence;
+    `EngineHandle::is_finished()` exposes that end-of-stream signal for the play indicator and a future
+    playlist's auto-advance. The real-frame count is a pure ring unit test; the freeze plus finished
+    behavior is checked end to end against a null sink (the clock reaches ~48_000 frames for a
+    one-second file, reads finished, and does not move through 500 ms of following silence).
+    Restart-on-play after the end (re-seek to 0) waits for decoder seeking with the seek bar.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -114,10 +125,9 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): end-of-track auto-stop so the clock freezes at the true end (the engine
-  needs an end-of-stream signal), the marquee song title, seek/volume/balance sliders, in-window
-  hotkeys (needs keyboard input, i.e. re-enabling xkbcommon), and the spectrum/oscilloscope.
-  Polish: pause-blink and the click-to-toggle remaining-time display. Plus a real skin.
+- Phase 4 (continued): the marquee song title, seek/volume/balance sliders, in-window hotkeys
+  (needs keyboard input, i.e. re-enabling xkbcommon), and the spectrum/oscilloscope. Polish:
+  pause-blink and the click-to-toggle remaining-time display. Plus a real skin.
 
 ## Working rules
 

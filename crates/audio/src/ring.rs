@@ -28,6 +28,9 @@ pub struct SharedState {
     pub flush: AtomicBool,
     /// The graph rate PipeWire actually negotiated, published from `param_changed`.
     pub stream_rate: AtomicU32,
+    /// Producer -> app: the track fully drained after a clean end of decode. Set once, so the
+    /// UI can show the stopped state and a future playlist can advance to the next track.
+    pub finished: AtomicBool,
 }
 
 impl SharedState {
@@ -38,6 +41,7 @@ impl SharedState {
             consumed_base: AtomicU64::new(0),
             flush: AtomicBool::new(false),
             stream_rate: AtomicU32::new(0),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -48,6 +52,12 @@ impl SharedState {
         let consumed = self.frames_consumed.load(Ordering::Relaxed);
         let base = self.consumed_base.load(Ordering::Relaxed);
         self.seek_base.load(Ordering::Relaxed) + consumed.saturating_sub(base)
+    }
+
+    /// Whether the track has played to its end (the producer sets `finished` once the ring has
+    /// drained after a clean end of decode).
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
     }
 }
 
@@ -104,9 +114,20 @@ pub fn push_all(p: &mut Producer<f32>, mut block: &[f32]) -> bool {
 }
 
 /// Realtime side (PipeWire callback): fill `out` with queued audio, silence-padding any
-/// shortfall. RT-safe, only atomic loads/stores and memcpy. If `flush` is set, drop all
-/// queued audio first (seek/stop/track change) and emit silence for this quantum.
-pub fn fill_output(c: &mut Consumer<f32>, out: &mut [f32], flush: &AtomicBool) {
+/// shortfall, advance `consumed` by the real frames copied (before padding), and return that
+/// same count. RT-safe: only atomic loads/stores and memcpy. Trailing silence after a track's
+/// last frame copies nothing, so the clock stops there and the time display freezes at the true
+/// end. The count is published *before* the ring slots are freed (`commit_all`), so the producer
+/// draining the ring sees the final frames the instant it observes the ring empty; without that
+/// order it could flag end-of-track with the last quantum still uncounted and the clock would
+/// tick up afterward. If `flush` is set, drop all queued audio first (seek/stop/track change) and
+/// emit silence for this quantum (counting and returning 0).
+pub fn fill_output(
+    c: &mut Consumer<f32>,
+    out: &mut [f32],
+    flush: &AtomicBool,
+    consumed: &AtomicU64,
+) -> usize {
     if flush.swap(false, Ordering::AcqRel) {
         // read_chunk(slots()) never errors (n <= readable) and does not allocate.
         if let Ok(chunk) = c.read_chunk(c.slots()) {
@@ -121,9 +142,15 @@ pub fn fill_output(c: &mut Consumer<f32>, out: &mut [f32], flush: &AtomicBool) {
         out[..a.len()].copy_from_slice(a);
         out[a.len()..a.len() + b.len()].copy_from_slice(b);
         written = a.len() + b.len();
+        // Count the real frames before `commit_all` frees the ring: the producer's drain loop
+        // waits on `slots()` (the read index that `commit_all` releases), so counting first gives
+        // it a happens-before view of this final count the moment it sees the ring drained.
+        // Relaxed is enough; the release/acquire on the ring's read index carries the store.
+        consumed.fetch_add((written / CHANNELS) as u64, Ordering::Relaxed);
         chunk.commit_all();
     }
     for s in &mut out[written..] {
         *s = 0.0;
     }
+    written / CHANNELS
 }

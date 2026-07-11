@@ -132,3 +132,45 @@ fn pause_holds_the_clock_and_resume_advances_it() {
     drop(engine);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+#[ignore = "needs a running PipeWire session"]
+fn freezes_the_clock_at_end_of_track_and_reports_finished() {
+    let path = std::env::temp_dir().join("xubamp_eos_test.wav");
+    write_wav(&path, 48_000, 1); // exactly one second of audio
+
+    let engine = AudioEngine::play(&path).expect("engine failed to start playback");
+    let handle = engine.handle();
+
+    // Wait for the track to drain to its end (the producer flags it after the ring empties).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !handle.is_finished() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(handle.is_finished(), "engine never reported end of track");
+
+    // The clock froze at the true one-second length (48_000 frames), not past it from counted
+    // silence. A broken implementation that counts silence quanta would keep climbing.
+    let at_end = engine.position_frames();
+    assert!(
+        (47_000..=48_100).contains(&at_end),
+        "clock did not freeze near the true one-second end (got {at_end})"
+    );
+    assert!(
+        handle.elapsed_secs() <= 1,
+        "elapsed_secs overran the one-second track (got {})",
+        handle.elapsed_secs()
+    );
+
+    // The realtime thread emits many more silent quanta over this window; the frozen clock must
+    // not move a single frame.
+    std::thread::sleep(Duration::from_millis(500));
+    let later = engine.position_frames();
+    assert_eq!(
+        later, at_end,
+        "clock kept advancing after end of track: {at_end} -> {later}"
+    );
+
+    drop(engine);
+    let _ = std::fs::remove_file(&path);
+}

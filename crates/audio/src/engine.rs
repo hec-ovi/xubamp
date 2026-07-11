@@ -8,6 +8,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -80,6 +81,13 @@ impl EngineHandle {
             (self.shared.position_frames() / self.rate as u64) as u32
         }
     }
+
+    /// Whether the track has played to its end. Once true, the position clock is frozen at the
+    /// track's length and the stream has been deactivated; a future playlist reads this to
+    /// advance to the next track.
+    pub fn is_finished(&self) -> bool {
+        self.shared.is_finished()
+    }
 }
 
 impl AudioEngine {
@@ -117,9 +125,13 @@ impl AudioEngine {
             }
         });
 
+        // Clones for the producer thread so it can flag end-of-track and stop the stream.
+        let shared_producer = Arc::clone(&shared);
+        let control_producer = control.clone();
         // Producer: prime with the first block, decode the rest into the ring, then wait for
         // the realtime side to drain it. `push_all`/the drain loop both stop early if the
-        // consumer is dropped (engine drop -> loop thread gone), so this never hangs.
+        // consumer is dropped (engine drop -> loop thread gone), so this never hangs. On a
+        // clean end it flags the track finished and deactivates the stream.
         let producer_thread = thread::spawn(move || {
             let mut stereo = Vec::new();
             to_stereo(&first, channels, &mut stereo);
@@ -144,10 +156,16 @@ impl AudioEngine {
             }
             while producer.slots() < ring_slots {
                 if producer.is_abandoned() {
-                    break;
+                    return; // engine dropped mid-drain: not a natural end, leave `finished` unset
                 }
                 thread::sleep(Duration::from_millis(10));
             }
+            // The ring emptied after a clean end of decode: every real frame has been handed to
+            // the graph. Flag the track finished (the RT side counts only real frames, so the
+            // clock is already frozen at the true end) and deactivate the stream so the realtime
+            // thread stops waking to emit silence.
+            shared_producer.finished.store(true, Ordering::Release);
+            let _ = control_producer.send(Control::Active(false));
         });
 
         Ok(Self {
@@ -162,6 +180,11 @@ impl AudioEngine {
     /// Frames played so far. Basis for a future time display.
     pub fn position_frames(&self) -> u64 {
         self.shared.position_frames()
+    }
+
+    /// Whether the track has played through to its end.
+    pub fn is_finished(&self) -> bool {
+        self.shared.is_finished()
     }
 
     /// A cloneable remote control (pause/resume, elapsed time) that can outlive borrows of the

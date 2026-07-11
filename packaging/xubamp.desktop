@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=xubamp
+GenericName=Audio Player
+Comment=Lean native-Wayland audio player with classic Winamp skin support
+Exec=xubamp %F
+Icon=xubamp
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/x-mpegurl;audio/x-scpls;audio/x-wav;audio/wav;
+Keywords=winamp;music;mp3;player;skin;wayland;
+StartupWMClass=xubamp
+StartupNotify=false

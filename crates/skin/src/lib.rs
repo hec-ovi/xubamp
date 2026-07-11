@@ -7,12 +7,15 @@
 pub mod bmp;
 pub mod color;
 pub mod container;
+pub mod default_skin;
+pub mod font;
 pub mod model;
 pub mod pledit;
 pub mod region;
 pub mod sprites;
 pub mod viscolor;
 
+pub use default_skin::default_skin;
 pub use model::Skin;
 
 #[cfg(test)]

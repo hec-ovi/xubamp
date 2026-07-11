@@ -21,6 +21,23 @@ in the repo and git history, nothing important lives only in chat.
   the RLE8-compressed base 2.91) by dumping the composed frame. The binary loads a skin
   from a path argument. 26 tests.
 
+- Built-in default skin and app packaging: an original clean-room 275x116 default skin
+  (`skin::default_skin`) drawn in code in a cyan/blue classic layout, plus a compact 5x7
+  bitmap font (`skin::font`) for the pixels we author ourselves. Ships no third-party skin
+  art (every classic `.wsz` is copyrighted). The binary resolves its skin in order: CLI
+  path, `$XUBAMP_SKIN`, a local `skins/` dev skin if checked out, else the built-in
+  default. App icon packaged from `icons/` (sizes 32-256 generated from the 1024 master)
+  with a validated `packaging/xubamp.desktop` (app_id `xubamp`) and install/uninstall
+  scripts. 31 tests.
+
+## Running it
+
+- `cargo run -p xubamp` shows the default (or your local `skins/` dev skin if present).
+- `cargo run -p xubamp -- path/to/skin.wsz` loads a specific skin.
+- `./packaging/install-icons.sh` puts the icon + desktop entry under `~/.local/share` so
+  GNOME shows the app icon; `uninstall-icons.sh` reverses it.
+- User is authoring the real default skin; the built-in one is only the safe fallback.
+
 ## In progress
 
 - Phase 3: audio engine (producer thread, lock-free ring, native PipeWire output,

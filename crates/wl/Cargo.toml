@@ -1,0 +1,17 @@
+[package]
+name = "xubamp-wl"
+description = "Native Wayland window for xubamp: undecorated xdg_toplevel with a wl_shm software buffer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+xubamp-render = { path = "../render" }
+# default-features off drops xkbcommon (keyboard, not needed yet) and calloop, which
+# otherwise require pkg-config + libxkbcommon-dev at build time.
+smithay-client-toolkit = { version = "0.19", default-features = false }
+# dlopen loads libwayland-client at runtime, so no -dev package is needed to build.
+wayland-client = { version = "0.31", features = ["dlopen"] }

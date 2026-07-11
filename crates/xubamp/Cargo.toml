@@ -13,3 +13,6 @@ name = "xubamp"
 path = "src/main.rs"
 
 [dependencies]
+xubamp-skin = { path = "../skin" }
+xubamp-render = { path = "../render" }
+xubamp-wl = { path = "../wl" }

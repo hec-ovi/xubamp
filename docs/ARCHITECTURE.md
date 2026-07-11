@@ -168,9 +168,9 @@ crates so the tested part and the platform part do not entangle:
   solid-colour sheets) asserting exact placement and clipping. Backed by the
   `skin::sprites` coordinate tables and a `skin::Skin` model (decoded sheets, per-sheet
   fallback to `None`).
-- `wl` (thin platform glue): raw `wayland-client`, one undecorated `xdg_toplevel`, a
-  `wl_shm` buffer that receives the `Framebuffer`, the configure/ack/commit and
-  frame-callback loop, and window close. No toolkit.
+- `wl` (thin platform glue): `wayland-client` via smithay-client-toolkit, one undecorated
+  `xdg_toplevel`, a `wl_shm` buffer that receives the `Framebuffer`, the configure/commit
+  loop, and window close. No widget toolkit.
 
 Testability: the `render` crate carries the automated tests. The `wl` crate needs a live
 compositor to display, so it is compile-verified in local builds and manually verified on
@@ -190,7 +190,11 @@ during the render-diff pass in a later phase.
   raw minimalism.
 - License: GPL-2.0-or-later.
 - Always on top: manual GNOME action, no bundled shell extension.
-- Windowing: raw Wayland with a `wl_shm` software framebuffer, not SDL or a toolkit.
+- Windowing: native Wayland via smithay-client-toolkit for the protocol plumbing
+  (registry, shm slot pool, xdg window), and we software-blit our own `Framebuffer` into
+  the `wl_shm` buffer. No widget toolkit (no GTK/Qt/SDL); we still own every pixel. SCTK
+  is the wayland-rs client layer, not a widget library, and it removes the untestable
+  hand-rolled shm/registry boilerplate.
 
 ## Clean-room note
 

@@ -35,3 +35,7 @@ output = ["dep:pipewire", "dep:bytemuck"]
 name = "tone"
 # Only builds with the PipeWire backend; skipped on a host without the output feature.
 required-features = ["output"]
+
+[[example]]
+name = "play"
+required-features = ["output"]

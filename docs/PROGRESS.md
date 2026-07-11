@@ -15,15 +15,21 @@ in the repo and git history, nothing important lives only in chat.
   (viscolor.txt, pledit.txt, region.txt) and the shared `Rgb` type. 19 tests total,
   skin-crate dependency surface is 2 crates (miniz_oxide, adler2).
 
+- Phase 2: `render` crate (Framebuffer, clipping blit, compose_main_window) plus the
+  `wl` crate (native Wayland window via smithay-client-toolkit + wl_shm). Verified on the
+  real Ubuntu 26.04 GNOME 50 session, and validated against real skins (SpyAMP, XMMS, and
+  the RLE8-compressed base 2.91) by dumping the composed frame. The binary loads a skin
+  from a path argument. 26 tests.
+
 ## In progress
 
-- Phase 2: native Wayland window showing a static render of a skin, verified by a
-  headless offscreen render diff. First "strong" phase; gets a written plan before code.
+- Phase 3: audio engine (producer thread, lock-free ring, native PipeWire output,
+  WAV then MP3 decode). Second "strong" phase; gets a written plan before code.
 
 ## Next
 
-- Phase 3: audio engine (producer thread, lock-free ring, native PipeWire output,
-  WAV then MP3 decode).
+- Phase 4: transport and a real skin (buttons wired, time display, marquee, sliders,
+  in-window hotkeys, drag).
 
 ## Working rules
 

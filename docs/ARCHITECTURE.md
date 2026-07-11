@@ -134,9 +134,10 @@ target); no CI is added.
 - Phase 1 (done): `.wsz` container reader (case-insensitive, default-skin fallback) plus
   the region/pledit/viscolor config parsers. Test: build real archives, assert parsed
   structs.
-- Phase 2: a native Wayland window showing a static render of MAIN, CBUTTONS, and
-  TITLEBAR from a bundled default skin. Test: headless offscreen render diffed against
-  a reference image.
+- Phase 2 (done): a native Wayland window showing a static render of a skin's main
+  window (MAIN, active TITLEBAR, and the transport buttons). Verified live on GNOME 50
+  and by dumping the composed framebuffer; validated against real skins including the
+  RLE8-compressed base 2.91.
 - Phase 3: audio. Producer thread, lock-free ring, PipeWire output, WAV then MP3 decode.
   Test: play to a file/null sink, assert PCM checksum and duration; assert no allocation
   on the callback path.

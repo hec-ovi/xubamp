@@ -1,4 +1,6 @@
 /target
+# Local third-party skins used only for testing; never shipped (clean-room policy).
+/skins/
 Cargo.lock.bak
 *.swp
 *~

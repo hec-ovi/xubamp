@@ -1,10 +1,11 @@
 //! xubamp binary entry point.
 //!
-//! Phase 2: composes the main window from a placeholder skin and shows it in a native
-//! Wayland window. Audio, real skin loading, and interactivity land in later phases; see
-//! `docs/ARCHITECTURE.md`.
+//! Phase 2: composes a skin's main window and shows it in a native Wayland window. Pass a
+//! `.wsz` (or `.zip`) skin path to load it, or none for a placeholder. Audio, real skin
+//! interactivity, and the rest land in later phases; see `docs/ARCHITECTURE.md`.
 
 use xubamp_skin::bmp::Image;
+use xubamp_skin::container::SkinArchive;
 use xubamp_skin::Skin;
 
 fn solid_image(w: u32, h: u32, rgb: [u8; 3]) -> Image {
@@ -29,8 +30,36 @@ fn placeholder_skin() -> Skin {
     }
 }
 
+fn load_skin(path: &str) -> Skin {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("xubamp: cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    let archive = SkinArchive::from_bytes(&bytes).unwrap_or_else(|e| {
+        eprintln!("xubamp: {path} is not a readable skin archive: {e:?}");
+        std::process::exit(1);
+    });
+    let skin = Skin::from_archive(&archive);
+    let dim = |img: &Option<Image>| {
+        img.as_ref()
+            .map(|i| format!("{}x{}", i.width, i.height))
+            .unwrap_or_else(|| "missing".into())
+    };
+    eprintln!(
+        "xubamp: loaded {path}: {} members, main={} titlebar={} cbuttons={}",
+        archive.len(),
+        dim(&skin.main),
+        dim(&skin.titlebar),
+        dim(&skin.cbuttons),
+    );
+    skin
+}
+
 fn main() {
-    let skin = placeholder_skin();
+    let skin = match std::env::args().nth(1) {
+        Some(path) => load_skin(&path),
+        None => placeholder_skin(),
+    };
     let fb = xubamp_render::compose_main_window(&skin);
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw

@@ -131,8 +131,9 @@ Each phase produces a runnable, testable artifact. Tests run locally (a `cargo t
 target); no CI is added.
 
 - Phase 0 (done): workspace scaffold and the isolated BMP decoder with tests.
-- Phase 1: `.wsz` container reader (case-insensitive, default-skin fallback) plus the
-  region/pledit/viscolor config parsers. Test: load real skins, assert parsed structs.
+- Phase 1 (done): `.wsz` container reader (case-insensitive, default-skin fallback) plus
+  the region/pledit/viscolor config parsers. Test: build real archives, assert parsed
+  structs.
 - Phase 2: a native Wayland window showing a static render of MAIN, CBUTTONS, and
   TITLEBAR from a bundled default skin. Test: headless offscreen render diffed against
   a reference image.

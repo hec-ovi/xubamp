@@ -10,16 +10,20 @@ in the repo and git history, nothing important lives only in chat.
   architecture and plan doc.
 - Phase 0: `crates/skin` BMP decoder (1/4/8/24/32-bit, top-down and bottom-up) with 5
   unit tests, clippy clean.
+- Phase 1: `crates/skin` `.wsz` container reader (hand-rolled ZIP over miniz_oxide,
+  case-insensitive lookup, default-skin fallback contract) plus the config parsers
+  (viscolor.txt, pledit.txt, region.txt) and the shared `Rgb` type. 19 tests total,
+  skin-crate dependency surface is 2 crates (miniz_oxide, adler2).
 
 ## In progress
 
-- Phase 1: `.wsz` container reader (zip, case-insensitive lookup, default-skin
-  fallback) and the config parsers (region.txt, pledit.txt, viscolor.txt).
+- Phase 2: native Wayland window showing a static render of a skin, verified by a
+  headless offscreen render diff. First "strong" phase; gets a written plan before code.
 
 ## Next
 
-- Phase 2: native Wayland window showing a static render of a skin, verified by a
-  headless offscreen render diff.
+- Phase 3: audio engine (producer thread, lock-free ring, native PipeWire output,
+  WAV then MP3 decode).
 
 ## Working rules
 

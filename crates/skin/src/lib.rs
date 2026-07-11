@@ -7,4 +7,5 @@
 pub mod bmp;
 pub mod color;
 pub mod container;
+pub mod pledit;
 pub mod viscolor;

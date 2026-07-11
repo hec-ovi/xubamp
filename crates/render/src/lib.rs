@@ -62,9 +62,10 @@ fn blit_placement(fb: &mut Framebuffer, sheet: &Image, p: Placement) {
 }
 
 /// Compose the main window (275x116): the MAIN background, the active title bar, then the
-/// six transport buttons. Missing sheets are simply skipped (their pixels stay whatever
-/// the lower layer left), which is the default-skin fallback point.
-pub fn compose_main_window(skin: &Skin) -> Framebuffer {
+/// six transport buttons, drawing the pressed sprite for whichever button `state` reports as
+/// held. Missing sheets are simply skipped (their pixels stay whatever the lower layer left),
+/// which is the default-skin fallback point.
+pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
     if let Some(main) = &skin.main {
         blit_placement(&mut fb, main, sprites::MAIN_BG);
@@ -73,7 +74,16 @@ pub fn compose_main_window(skin: &Skin) -> Framebuffer {
         blit_placement(&mut fb, titlebar, sprites::TITLEBAR_ACTIVE);
     }
     if let Some(cbuttons) = &skin.cbuttons {
-        for placement in sprites::CBUTTONS {
+        for ((normal, pressed), id) in sprites::CBUTTONS
+            .iter()
+            .zip(sprites::CBUTTONS_PRESSED.iter())
+            .zip(hit::TRANSPORT_ORDER)
+        {
+            let placement = if state.pressed == Some(id) {
+                *pressed
+            } else {
+                *normal
+            };
             blit_placement(&mut fb, cbuttons, placement);
         }
     }
@@ -111,7 +121,7 @@ mod tests {
             main: Some(solid(275, 116, RED)),
             ..Default::default()
         };
-        let fb = compose_main_window(&skin);
+        let fb = compose_main_window(&skin, &hit::UiState::default());
         assert_eq!((fb.width, fb.height), (275, 116));
         assert_eq!(px(&fb, 0, 0), RED);
         assert_eq!(px(&fb, 274, 115), RED);
@@ -124,13 +134,38 @@ mod tests {
             cbuttons: Some(solid(136, 36, GREEN)),
             ..Default::default()
         };
-        let fb = compose_main_window(&skin);
+        let fb = compose_main_window(&skin, &hit::UiState::default());
         // Play button occupies dst x 39..62, y 88..106.
         assert_eq!(px(&fb, 39, 88), GREEN, "play top-left");
         assert_eq!(px(&fb, 61, 105), GREEN, "play bottom-right");
         // Away from any button the main background shows through.
         assert_eq!(px(&fb, 200, 40), RED);
         assert_eq!(px(&fb, 0, 0), RED);
+    }
+
+    #[test]
+    fn pressed_button_draws_from_the_bottom_row() {
+        // A cbuttons sheet split top/bottom: normal row (y 0..18) BLUE, pressed row WHITE.
+        let mut sheet = solid(136, 36, [0, 0, 255, 255]); // BLUE top
+        for y in 18..36 {
+            for x in 0..136 {
+                let o = ((y * 136 + x) * 4) as usize;
+                sheet.rgba[o..o + 4].copy_from_slice(&[255, 255, 255, 255]); // WHITE bottom
+            }
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            cbuttons: Some(sheet),
+            ..Default::default()
+        };
+        let state = hit::UiState {
+            pressed: Some(hit::Transport::Play),
+        };
+        let fb = compose_main_window(&skin, &state);
+        // Play (dst 39,88) is pressed -> sampled from the WHITE bottom row.
+        assert_eq!(px(&fb, 39 + 11, 88 + 9), [255, 255, 255, 255], "play pressed");
+        // Stop (dst 85,88) is not pressed -> still the BLUE normal row.
+        assert_eq!(px(&fb, 85 + 11, 88 + 9), [0, 0, 255, 255], "stop normal");
     }
 
     #[test]

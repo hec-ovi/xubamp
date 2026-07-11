@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 xubamp-render = { path = "../render" }
+xubamp-skin = { path = "../skin" }
 # default-features off drops xkbcommon (keyboard, not needed yet) and calloop, which
 # otherwise require pkg-config + libxkbcommon-dev at build time.
 smithay-client-toolkit = { version = "0.19", default-features = false }

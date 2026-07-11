@@ -50,8 +50,15 @@ in the repo and git history, nothing important lives only in chat.
     client-set absolute position, so a compositor grab is the way to do the classic drag. Hit
     mapping is a pure `render::hit::hit_test(x, y) -> Region` (unit-tested: title-bar band is the
     top 14px from the title-bar sprite, body and out-of-bounds are not draggable); the platform
-    glue is verified by running on the real GNOME 50 session. Transport buttons, sliders and the
-    time display come next.
+    glue is verified by running on the real GNOME 50 session.
+  - (b) done: transport buttons are interactive. `render::hit` maps the six button rects to a
+    `Transport` id and holds the input policy as pure functions (`on_press` arms a button or starts a
+    title-bar move, `on_release` fires the command only when released over the same button, `on_leave`
+    un-presses), all unit-tested. `compose_main_window(skin, &UiState)` draws the pressed sprite (the
+    bottom row of cbuttons.bmp, coordinates from Webamp's sprite map) for the held button, and the `wl`
+    crate recomposes and redraws the 275x116 frame on each pointer event. `run(skin, on_command)` emits
+    a `Transport` command to the caller on a completed click; the binary logs it for now. Wiring those
+    commands to the engine (play/pause/stop) is (c).
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.

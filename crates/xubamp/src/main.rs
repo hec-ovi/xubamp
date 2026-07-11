@@ -90,11 +90,11 @@ fn resolve_skin(cli: Option<&str>) -> Skin {
 fn main() {
     let (skin_arg, media_arg) = classify(std::env::args().skip(1));
     let skin = resolve_skin(skin_arg.as_deref());
-    let fb = xubamp_render::compose_main_window(&skin);
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
-    // window would display, then exit without opening a window.
+    // window would display in its resting state, then exit without opening a window.
     if let Ok(path) = std::env::var("XUBAMP_DUMP_RGBA") {
+        let fb = xubamp_render::compose_main_window(&skin, &xubamp_render::hit::UiState::default());
         std::fs::write(&path, &fb.rgba).expect("write rgba dump");
         println!("dumped {}x{} rgba to {path}", fb.width, fb.height);
         return;
@@ -121,7 +121,13 @@ fn main() {
         eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
     }
 
-    if let Err(e) = xubamp_wl::run(fb) {
+    // Transport commands from the window. For now they are logged; wiring them to the engine
+    // (play/pause/stop) comes with the next sub-unit.
+    let on_command = |command: xubamp_render::hit::Transport| {
+        eprintln!("xubamp: transport command {command:?}");
+    };
+
+    if let Err(e) = xubamp_wl::run(skin, on_command) {
         eprintln!("xubamp: {e}");
         std::process::exit(1);
     }

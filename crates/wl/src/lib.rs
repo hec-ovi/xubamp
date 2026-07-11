@@ -33,10 +33,16 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
-use xubamp_render::{hit, Framebuffer};
+use xubamp_render::{compose_main_window, hit, Framebuffer};
+use xubamp_skin::Skin;
 
-/// Open a window showing `fb` and run until the user closes it.
-pub fn run(fb: Framebuffer) -> Result<(), Box<dyn Error>> {
+/// Open the main window for `skin` and run until the user closes it. `on_command` is called on
+/// the event-loop thread whenever a transport button is clicked (pressed and released over
+/// itself); the caller bridges it to the audio engine.
+pub fn run(
+    skin: Skin,
+    on_command: impl FnMut(hit::Transport) + 'static,
+) -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -45,17 +51,21 @@ pub fn run(fb: Framebuffer) -> Result<(), Box<dyn Error>> {
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
 
+    let state = hit::UiState::default();
+    let fb = compose_main_window(&skin, &state);
+    let (w, h) = (fb.width, fb.height);
+
     let surface = compositor.create_surface(&qh);
     // RequestClient: no server-side decorations. We draw the whole window ourselves.
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestClient, &qh);
     window.set_title("xubamp");
     window.set_app_id("xubamp");
     // Classic main window is a fixed size.
-    window.set_min_size(Some((fb.width, fb.height)));
-    window.set_max_size(Some((fb.width, fb.height)));
+    window.set_min_size(Some((w, h)));
+    window.set_max_size(Some((w, h)));
     window.commit();
 
-    let pool = SlotPool::new(fb.width as usize * fb.height as usize * 4, &shm)?;
+    let pool = SlotPool::new(w as usize * h as usize * 4, &shm)?;
 
     let mut app = App {
         registry_state: RegistryState::new(&globals),
@@ -64,7 +74,10 @@ pub fn run(fb: Framebuffer) -> Result<(), Box<dyn Error>> {
         shm,
         pool,
         window,
+        skin,
+        state,
         fb,
+        on_command: Box::new(on_command),
         pointer: None,
         seat: None,
         exit: false,
@@ -83,7 +96,14 @@ struct App {
     shm: Shm,
     pool: SlotPool,
     window: Window,
+    /// The decoded skin, kept so the window can be recomposed when UI state changes.
+    skin: Skin,
+    /// Current interaction state (which button is held, etc.), drives composition.
+    state: hit::UiState,
+    /// The composited frame for the current `state`, uploaded to the shm buffer by `draw`.
     fb: Framebuffer,
+    /// Sink for transport commands, called when a button click completes.
+    on_command: Box<dyn FnMut(hit::Transport)>,
     /// The pointer, once the seat reports the capability. `None` on a seat with no mouse.
     pointer: Option<wl_pointer::WlPointer>,
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
@@ -93,6 +113,13 @@ struct App {
 }
 
 impl App {
+    /// Recompose the frame from the current UI state and push it to the screen. Cheap (the
+    /// window is 275x116), so we just rebuild the whole frame on any state change.
+    fn redraw(&mut self) {
+        self.fb = compose_main_window(&self.skin, &self.state);
+        self.draw();
+    }
+
     fn draw(&mut self) {
         let (w, h) = (self.fb.width, self.fb.height);
         let stride = w as i32 * 4;
@@ -221,19 +248,39 @@ impl PointerHandler for App {
             if event.surface != *self.window.wl_surface() {
                 continue;
             }
-            if let PointerEventKind::Press { button, serial, .. } = event.kind {
-                if button != BTN_LEFT {
-                    continue;
-                }
-                let (x, y) = (event.position.0 as i32, event.position.1 as i32);
-                if hit::hit_test(x, y) == hit::Region::TitleBar {
+            let (x, y) = (event.position.0 as i32, event.position.1 as i32);
+            match event.kind {
+                PointerEventKind::Press {
+                    button, serial, ..
+                } if button == BTN_LEFT => match hit::on_press(&mut self.state, x, y) {
                     // Hand the drag to the compositor: it moves the window while the button
                     // is held, then ends the grab on release. This is the classic title-bar
                     // drag; Wayland has no client-set absolute position, so this is the way.
-                    if let Some(seat) = &self.seat {
-                        self.window.move_(seat, serial);
+                    hit::PressOutcome::StartMove => {
+                        if let Some(seat) = &self.seat {
+                            self.window.move_(seat, serial);
+                        }
+                    }
+                    hit::PressOutcome::Redraw => self.redraw(),
+                    hit::PressOutcome::Ignore => {}
+                },
+                PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                    let outcome = hit::on_release(&mut self.state, x, y);
+                    if outcome.redraw {
+                        self.redraw();
+                    }
+                    if let Some(command) = outcome.command {
+                        (self.on_command)(command);
                     }
                 }
+                PointerEventKind::Leave { .. } => {
+                    // Cancel any in-progress press so a button never stays stuck down.
+                    let needs_redraw = hit::on_leave(&mut self.state);
+                    if needs_redraw {
+                        self.redraw();
+                    }
+                }
+                _ => {}
             }
         }
     }

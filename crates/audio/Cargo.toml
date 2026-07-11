@@ -10,6 +10,10 @@ authors.workspace = true
 
 [dependencies]
 # Pure-Rust decoders. default-features off trims formats we do not use; keep wav+pcm+mp3.
-# MP3 patents expired in 2017, so shipping the decoder is fine. PipeWire output and the
-# lock-free ring land in later sub-units of Phase 3.
+# MP3 patents expired in 2017, so shipping the decoder is fine. PipeWire output lands in a
+# later sub-unit of Phase 3.
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3"] }
+
+# Wait-free SPSC ring between the producer thread and the realtime output callback. One
+# allocation at construction, none on push/pop. Pure Rust, no system libraries.
+rtrb = "0.3"

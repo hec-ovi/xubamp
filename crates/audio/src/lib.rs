@@ -6,3 +6,4 @@
 
 pub mod channels;
 pub mod decode;
+pub mod ring;

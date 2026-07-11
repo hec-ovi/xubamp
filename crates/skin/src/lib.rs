@@ -5,3 +5,4 @@
 //! until called. Allocation is held to the minimum a result needs.
 
 pub mod bmp;
+pub mod container;

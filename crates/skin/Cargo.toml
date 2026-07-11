@@ -9,3 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The one allowed skin dependency: a pure-Rust DEFLATE core for reading .wsz (ZIP)
+# members. The ZIP container itself (central directory, local headers) is parsed by
+# hand to keep the dependency surface tiny.
+miniz_oxide = "0.8"

@@ -10,11 +10,15 @@ use std::error::Error;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_shm,
-    delegate_xdg_shell, delegate_xdg_window,
+    delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
+    delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{
+        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
+        Capability, SeatHandler, SeatState,
+    },
     shell::{
         xdg::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
@@ -26,10 +30,10 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
-use xubamp_render::Framebuffer;
+use xubamp_render::{hit, Framebuffer};
 
 /// Open a window showing `fb` and run until the user closes it.
 pub fn run(fb: Framebuffer) -> Result<(), Box<dyn Error>> {
@@ -56,10 +60,13 @@ pub fn run(fb: Framebuffer) -> Result<(), Box<dyn Error>> {
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
+        seat_state: SeatState::new(&globals, &qh),
         shm,
         pool,
         window,
         fb,
+        pointer: None,
+        seat: None,
         exit: false,
     };
 
@@ -72,10 +79,16 @@ pub fn run(fb: Framebuffer) -> Result<(), Box<dyn Error>> {
 struct App {
     registry_state: RegistryState,
     output_state: OutputState,
+    seat_state: SeatState,
     shm: Shm,
     pool: SlotPool,
     window: Window,
     fb: Framebuffer,
+    /// The pointer, once the seat reports the capability. `None` on a seat with no mouse.
+    pointer: Option<wl_pointer::WlPointer>,
+    /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
+    /// move: `xdg_toplevel.move` needs the seat plus the press serial.
+    seat: Option<wl_seat::WlSeat>,
     exit: bool,
 }
 
@@ -157,6 +170,75 @@ impl WindowHandler for App {
     }
 }
 
+impl SeatHandler for App {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn new_capability(
+        &mut self,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            let pointer = self
+                .seat_state
+                .get_pointer(qh, &seat)
+                .expect("failed to create pointer");
+            self.pointer = Some(pointer);
+            self.seat = Some(seat);
+        }
+    }
+    fn remove_capability(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+            self.seat = None;
+        }
+    }
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for App {
+    fn pointer_frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            // Ignore events for surfaces that are not our window.
+            if event.surface != *self.window.wl_surface() {
+                continue;
+            }
+            if let PointerEventKind::Press { button, serial, .. } = event.kind {
+                if button != BTN_LEFT {
+                    continue;
+                }
+                let (x, y) = (event.position.0 as i32, event.position.1 as i32);
+                if hit::hit_test(x, y) == hit::Region::TitleBar {
+                    // Hand the drag to the compositor: it moves the window while the button
+                    // is held, then ends the grab on release. This is the classic title-bar
+                    // drag; Wayland has no client-set absolute position, so this is the way.
+                    if let Some(seat) = &self.seat {
+                        self.window.move_(seat, serial);
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
@@ -176,11 +258,13 @@ impl ProvidesRegistryState for App {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
 delegate_compositor!(App);
 delegate_output!(App);
+delegate_seat!(App);
+delegate_pointer!(App);
 delegate_shm!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);

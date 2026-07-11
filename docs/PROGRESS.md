@@ -42,6 +42,17 @@ in the repo and git history, nothing important lives only in chat.
 
 ## In progress
 
+- Phase 4: interactivity. Sub-units:
+  - (a) done: pointer input and interactive title-bar drag. The `wl` crate now binds `wl_seat`
+    and `wl_pointer` (SeatHandler + PointerHandler; still `default-features = false`, so no
+    calloop and no xkbcommon keyboard) and a left-button press on the title-bar band hands an
+    interactive move to the compositor via `xdg_toplevel.move` (`Window::move_`). Wayland has no
+    client-set absolute position, so a compositor grab is the way to do the classic drag. Hit
+    mapping is a pure `render::hit::hit_test(x, y) -> Region` (unit-tested: title-bar band is the
+    top 14px from the title-bar sprite, body and out-of-bounds are not draggable); the platform
+    glue is verified by running on the real GNOME 50 session. Transport buttons, sliders and the
+    time display come next.
+
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
   - (b) done: lock-free SPSC ring (`audio::ring`: `SharedState`, `new_ring`, `push_block`,
@@ -75,8 +86,9 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4: transport and a real skin (buttons wired, time display, marquee, sliders,
-  in-window hotkeys, drag).
+- Phase 4 (continued): transport buttons wired to the engine with pressed-sprite feedback,
+  running time display, marquee title, seek/volume/balance sliders, in-window hotkeys, and a
+  real skin.
 
 ## Working rules
 

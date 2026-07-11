@@ -9,6 +9,8 @@ use xubamp_skin::bmp::Image;
 use xubamp_skin::sprites::{self, Placement, Rect};
 use xubamp_skin::Skin;
 
+pub mod hit;
+
 /// A top-down `RGBA8888` framebuffer, 4 bytes per pixel.
 pub struct Framebuffer {
     pub width: u32,

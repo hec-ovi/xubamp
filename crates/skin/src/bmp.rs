@@ -84,9 +84,9 @@ pub fn decode(data: &[u8]) -> Result<Image, BmpError> {
     let compression = rd_u32(data, 30);
     let mut clr_used = rd_u32(data, 46);
 
-    // BI_RGB (0) only. BI_BITFIELDS (3) is accepted for 24/32-bit where the default
-    // byte order applies; RLE / JPEG / PNG payloads we decline.
-    if compression != 0 && compression != 3 {
+    // 0 = BI_RGB, 1 = BI_RLE8, 3 = BI_BITFIELDS (accepted for 24/32-bit in default byte
+    // order). RLE4 (2), JPEG, and PNG payloads we decline.
+    if !matches!(compression, 0 | 1 | 3) {
         return Err(BmpError::UnsupportedCompression(compression));
     }
     if width_i <= 0 || height_i == 0 {
@@ -126,6 +126,35 @@ pub fn decode(data: &[u8]) -> Result<Image, BmpError> {
     }
     if off_bits > data.len() {
         return Err(BmpError::Truncated);
+    }
+
+    // BI_RLE8 is an 8-bit command stream rather than strided rows (and always bottom-up).
+    // Decode it to an index grid, then map through the palette like the indexed path.
+    if compression == 1 {
+        if bpp != 8 {
+            return Err(BmpError::UnsupportedCompression(1));
+        }
+        let wu = width as usize;
+        let hu = height as usize;
+        let idx = decode_rle8(data, off_bits, wu, hu);
+        let mut rgba = vec![0u8; px as usize * 4];
+        for y in 0..hu {
+            let src_row = hu - 1 - y; // RLE grid is bottom-up
+            for x in 0..wu {
+                let i = idx[src_row * wu + x] as usize;
+                let p = i.min(palette_len.saturating_sub(1)) * 4;
+                let o = (y * wu + x) * 4;
+                rgba[o] = palette[p + 2];
+                rgba[o + 1] = palette[p + 1];
+                rgba[o + 2] = palette[p];
+                rgba[o + 3] = 255;
+            }
+        }
+        return Ok(Image {
+            width,
+            height,
+            rgba,
+        });
     }
 
     let row_bytes = (bpp as usize * width as usize).div_ceil(32) * 4;
@@ -204,6 +233,63 @@ pub fn decode(data: &[u8]) -> Result<Image, BmpError> {
     })
 }
 
+/// Decode a BI_RLE8 stream into an 8-bit index grid, bottom-up (row 0 is the bottom row).
+/// Writes are bounds-guarded, so a malformed stream yields a partial image rather than a
+/// panic; decoding stops at end-of-bitmap or when the input runs out.
+fn decode_rle8(data: &[u8], off: usize, width: usize, height: usize) -> Vec<u8> {
+    let mut idx = vec![0u8; width * height];
+    let (mut x, mut y, mut p) = (0usize, 0usize, off);
+    while let Some(&count) = data.get(p) {
+        p += 1;
+        if count > 0 {
+            // Encoded run: `count` pixels of one index.
+            let Some(&val) = data.get(p) else { break };
+            p += 1;
+            for _ in 0..count {
+                if x < width && y < height {
+                    idx[y * width + x] = val;
+                }
+                x += 1;
+            }
+        } else {
+            // Escape: the next byte is the opcode.
+            let Some(&op) = data.get(p) else { break };
+            p += 1;
+            match op {
+                0 => {
+                    x = 0;
+                    y += 1;
+                } // end of line
+                1 => break, // end of bitmap
+                2 => {
+                    // delta: shift the current position
+                    let (Some(&dx), Some(&dy)) = (data.get(p), data.get(p + 1)) else {
+                        break;
+                    };
+                    p += 2;
+                    x += dx as usize;
+                    y += dy as usize;
+                }
+                n => {
+                    // absolute run of `n` literal indices, padded to a word boundary
+                    for _ in 0..n {
+                        let Some(&val) = data.get(p) else { break };
+                        p += 1;
+                        if x < width && y < height {
+                            idx[y * width + x] = val;
+                        }
+                        x += 1;
+                    }
+                    if n % 2 == 1 {
+                        p += 1;
+                    }
+                }
+            }
+        }
+    }
+    idx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,14 +305,21 @@ mod tests {
     }
 
     /// Assemble a BMP with a 40-byte INFOHEADER from raw palette + pixel bytes.
-    fn build(width: i32, height: i32, bpp: u16, palette: &[[u8; 4]], pixels: &[u8]) -> Vec<u8> {
+    fn build(
+        width: i32,
+        height: i32,
+        bpp: u16,
+        compression: u32,
+        palette: &[[u8; 4]],
+        pixels: &[u8],
+    ) -> Vec<u8> {
         let mut dib = Vec::new();
         dib.extend_from_slice(&u32b(40)); // biSize
         dib.extend_from_slice(&i32b(width));
         dib.extend_from_slice(&i32b(height));
         dib.extend_from_slice(&u16b(1)); // planes
         dib.extend_from_slice(&u16b(bpp));
-        dib.extend_from_slice(&u32b(0)); // BI_RGB
+        dib.extend_from_slice(&u32b(compression));
         dib.extend_from_slice(&u32b(0)); // sizeImage
         dib.extend_from_slice(&i32b(2835)); // x px/m
         dib.extend_from_slice(&i32b(2835)); // y px/m
@@ -275,7 +368,7 @@ mod tests {
         pixels.extend_from_slice(&row_bottom);
         pixels.extend_from_slice(&row_top);
 
-        let img = decode(&build(2, 2, 24, &[], &pixels)).unwrap();
+        let img = decode(&build(2, 2, 24, 0, &[], &pixels)).unwrap();
         assert_eq!((img.width, img.height), (2, 2));
         assert_eq!(px(&img, 0, 0), [255, 0, 0, 255]); // red
         assert_eq!(px(&img, 1, 0), [0, 255, 0, 255]); // green
@@ -293,7 +386,7 @@ mod tests {
             [255, 0, 0, 0],
         ];
         // 2x1, negative height = top-down; indices [1, 2] then pad to 4 bytes.
-        let img = decode(&build(2, -1, 8, &palette, &[1, 2, 0, 0])).unwrap();
+        let img = decode(&build(2, -1, 8, 0, &palette, &[1, 2, 0, 0])).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(px(&img, 0, 0), [255, 0, 0, 255]); // red
         assert_eq!(px(&img, 1, 0), [0, 255, 0, 255]); // green
@@ -304,7 +397,7 @@ mod tests {
         // The bit depth stb_image gets wrong. Palette: 0=black, 1=white.
         let palette = [[0, 0, 0, 0], [255, 255, 255, 0]];
         // 8x1 top-down; 0b1010_1010 => white, black, white, ...; padded to 4 bytes.
-        let img = decode(&build(8, -1, 1, &palette, &[0b1010_1010, 0, 0, 0])).unwrap();
+        let img = decode(&build(8, -1, 1, 0, &palette, &[0b1010_1010, 0, 0, 0])).unwrap();
         assert_eq!((img.width, img.height), (8, 1));
         for x in 0..8 {
             let expect = if x % 2 == 0 {
@@ -321,9 +414,39 @@ mod tests {
         // Palette (BGRA): 0=black, 1=red, 2=green.
         let palette = [[0, 0, 0, 0], [0, 0, 255, 0], [0, 255, 0, 0]];
         // 2x1 top-down; one byte packs two nibbles: high=1 (red), low=2 (green).
-        let img = decode(&build(2, -1, 4, &palette, &[0x12, 0, 0, 0])).unwrap();
+        let img = decode(&build(2, -1, 4, 0, &palette, &[0x12, 0, 0, 0])).unwrap();
         assert_eq!(px(&img, 0, 0), [255, 0, 0, 255]); // red
         assert_eq!(px(&img, 1, 0), [0, 255, 0, 255]); // green
+    }
+
+    #[test]
+    fn decodes_rle8() {
+        // The compression the classic base-2.91 skin uses. Palette (BGRA):
+        // 1=red, 2=green, 3=blue, 4=white.
+        let palette = [
+            [0, 0, 0, 0],
+            [0, 0, 255, 0],
+            [0, 255, 0, 0],
+            [255, 0, 0, 0],
+            [255, 255, 255, 0],
+        ];
+        // 4x2 image, RLE is bottom-up so the first encoded row is the bottom one.
+        // bottom row -> C,C,C,D ; top row -> A,A,B,B.
+        let rle = [
+            3, 3, // 3x index3 (blue)
+            1, 4, // 1x index4 (white)
+            0, 0, // end of line
+            2, 1, // 2x index1 (red)
+            2, 2, // 2x index2 (green)
+            0, 0, // end of line
+            0, 1, // end of bitmap
+        ];
+        let img = decode(&build(4, 2, 8, 1, &palette, &rle)).unwrap();
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(px(&img, 0, 0), [255, 0, 0, 255]); // top-left: red
+        assert_eq!(px(&img, 2, 0), [0, 255, 0, 255]); // top: green
+        assert_eq!(px(&img, 0, 1), [0, 0, 255, 255]); // bottom: blue
+        assert_eq!(px(&img, 3, 1), [255, 255, 255, 255]); // bottom-right: white
     }
 
     #[test]

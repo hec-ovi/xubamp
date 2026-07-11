@@ -1,0 +1,12 @@
+[package]
+name = "xubamp-render"
+description = "Software sprite compositor for xubamp: blits classic skin sheets into an RGBA framebuffer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+xubamp-skin = { path = "../skin" }

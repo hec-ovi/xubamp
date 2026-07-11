@@ -1,0 +1,143 @@
+//! Software sprite compositor.
+//!
+//! The whole classic UI is bitmap sprites blitted into one CPU framebuffer, which the
+//! `wl` crate then hands to the compositor as a `wl_shm` buffer. This crate is pure: a
+//! `Framebuffer`, a clipping `blit`, and window-composition functions. No platform code,
+//! no allocation per blit beyond the single framebuffer.
+
+use xubamp_skin::bmp::Image;
+use xubamp_skin::sprites::{self, Placement, Rect};
+use xubamp_skin::Skin;
+
+/// A top-down `RGBA8888` framebuffer, 4 bytes per pixel.
+pub struct Framebuffer {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, row-major, top-down.
+    pub rgba: Vec<u8>,
+}
+
+impl Framebuffer {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            rgba: vec![0; width as usize * height as usize * 4],
+        }
+    }
+
+    /// The raw pixel bytes, for upload into a `wl_shm` buffer.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.rgba
+    }
+}
+
+/// Copy `rect` from `src` into `fb` at (`dst_x`, `dst_y`), opaque, clipped to both the
+/// source image and the destination framebuffer. Regions outside either are skipped, so
+/// off-screen or oversized placements never panic.
+pub fn blit(fb: &mut Framebuffer, src: &Image, rect: Rect, dst_x: i32, dst_y: i32) {
+    for row in 0..rect.h {
+        let sy = rect.y + row;
+        let dy = dst_y + row;
+        if sy < 0 || dy < 0 || sy as u32 >= src.height || dy as u32 >= fb.height {
+            continue;
+        }
+        for col in 0..rect.w {
+            let sx = rect.x + col;
+            let dx = dst_x + col;
+            if sx < 0 || dx < 0 || sx as u32 >= src.width || dx as u32 >= fb.width {
+                continue;
+            }
+            let s_off = ((sy as u32 * src.width + sx as u32) * 4) as usize;
+            let d_off = ((dy as u32 * fb.width + dx as u32) * 4) as usize;
+            fb.rgba[d_off..d_off + 4].copy_from_slice(&src.rgba[s_off..s_off + 4]);
+        }
+    }
+}
+
+fn blit_placement(fb: &mut Framebuffer, sheet: &Image, p: Placement) {
+    blit(fb, sheet, p.src, p.dst_x, p.dst_y);
+}
+
+/// Compose the main window (275x116): the MAIN background, the active title bar, then the
+/// six transport buttons. Missing sheets are simply skipped (their pixels stay whatever
+/// the lower layer left), which is the default-skin fallback point.
+pub fn compose_main_window(skin: &Skin) -> Framebuffer {
+    let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
+    if let Some(main) = &skin.main {
+        blit_placement(&mut fb, main, sprites::MAIN_BG);
+    }
+    if let Some(titlebar) = &skin.titlebar {
+        blit_placement(&mut fb, titlebar, sprites::TITLEBAR_ACTIVE);
+    }
+    if let Some(cbuttons) = &skin.cbuttons {
+        for placement in sprites::CBUTTONS {
+            blit_placement(&mut fb, cbuttons, placement);
+        }
+    }
+    fb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Image {
+        Image {
+            width: w,
+            height: h,
+            rgba: rgba
+                .iter()
+                .copied()
+                .cycle()
+                .take(w as usize * h as usize * 4)
+                .collect(),
+        }
+    }
+
+    fn px(fb: &Framebuffer, x: u32, y: u32) -> [u8; 4] {
+        let o = ((y * fb.width + x) * 4) as usize;
+        [fb.rgba[o], fb.rgba[o + 1], fb.rgba[o + 2], fb.rgba[o + 3]]
+    }
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+    #[test]
+    fn compose_fills_from_main_background() {
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin);
+        assert_eq!((fb.width, fb.height), (275, 116));
+        assert_eq!(px(&fb, 0, 0), RED);
+        assert_eq!(px(&fb, 274, 115), RED);
+    }
+
+    #[test]
+    fn transport_buttons_land_on_their_rects() {
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            cbuttons: Some(solid(136, 36, GREEN)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin);
+        // Play button occupies dst x 39..62, y 88..106.
+        assert_eq!(px(&fb, 39, 88), GREEN, "play top-left");
+        assert_eq!(px(&fb, 61, 105), GREEN, "play bottom-right");
+        // Away from any button the main background shows through.
+        assert_eq!(px(&fb, 200, 40), RED);
+        assert_eq!(px(&fb, 0, 0), RED);
+    }
+
+    #[test]
+    fn blit_clips_at_the_edge_without_panicking() {
+        let mut fb = Framebuffer::new(10, 10);
+        let src = solid(5, 5, GREEN);
+        // Drawn at (8,8): only the 2x2 top-left corner of src fits.
+        blit(&mut fb, &src, Rect::new(0, 0, 5, 5), 8, 8);
+        assert_eq!(px(&fb, 9, 9), GREEN); // inside
+        assert_eq!(px(&fb, 7, 7), [0, 0, 0, 0]); // untouched
+    }
+}

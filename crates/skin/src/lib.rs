@@ -7,6 +7,13 @@
 pub mod bmp;
 pub mod color;
 pub mod container;
+pub mod model;
 pub mod pledit;
 pub mod region;
+pub mod sprites;
 pub mod viscolor;
+
+pub use model::Skin;
+
+#[cfg(test)]
+mod testkit;

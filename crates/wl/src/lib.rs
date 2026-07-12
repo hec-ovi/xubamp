@@ -22,7 +22,10 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
+        pointer::{
+            CursorIcon, PointerData, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec,
+            ThemedPointer, BTN_LEFT,
+        },
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -132,6 +135,7 @@ pub fn run(
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
         seat_state: SeatState::new(&globals, &qh),
+        compositor,
         shm,
         pool,
         window,
@@ -204,8 +208,12 @@ struct App {
     /// When the marquee last stepped, so it advances on its own ~100ms wall clock independent of
     /// how fast the visualizer drives the redraw timer.
     last_marquee: Instant,
-    /// The pointer, once the seat reports the capability. `None` on a seat with no mouse.
-    pointer: Option<wl_pointer::WlPointer>,
+    /// The compositor, kept so a cursor surface can be created when the pointer is set up.
+    compositor: CompositorState,
+    /// The pointer, once the seat reports the capability. A themed pointer so we can set a proper
+    /// arrow cursor on enter (without it the window inherits whatever cursor was last active).
+    /// `None` on a seat with no mouse.
+    pointer: Option<ThemedPointer<PointerData>>,
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
     /// move: `xdg_toplevel.move` needs the seat plus the press serial.
     seat: Option<wl_seat::WlSeat>,
@@ -469,9 +477,20 @@ impl SeatHandler for App {
         capability: Capability,
     ) {
         if capability == Capability::Pointer && self.pointer.is_none() {
+            // A themed pointer, so we can set a normal arrow cursor on enter (without it the window
+            // inherits whatever cursor was last active, often an I-beam). It needs its own cursor
+            // surface, and uses the cursor-shape protocol when the compositor supports it (Mutter
+            // does), else the system XCURSOR theme.
+            let cursor_surface = self.compositor.create_surface(qh);
             let pointer = self
                 .seat_state
-                .get_pointer(qh, &seat)
+                .get_pointer_with_theme(
+                    qh,
+                    &seat,
+                    self.shm.wl_shm(),
+                    cursor_surface,
+                    ThemeSpec::System,
+                )
                 .expect("failed to create pointer");
             self.pointer = Some(pointer);
             // Clone so the keyboard branch below can still take `seat`; only one capability arrives
@@ -509,7 +528,7 @@ impl SeatHandler for App {
     ) {
         if capability == Capability::Pointer {
             if let Some(pointer) = self.pointer.take() {
-                pointer.release();
+                pointer.pointer().release();
             }
             self.seat = None;
         }
@@ -528,7 +547,7 @@ impl SeatHandler for App {
 impl PointerHandler for App {
     fn pointer_frame(
         &mut self,
-        _: &Connection,
+        conn: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_pointer::WlPointer,
         events: &[PointerEvent],
@@ -540,6 +559,13 @@ impl PointerHandler for App {
             }
             let (x, y) = (event.position.0 as i32, event.position.1 as i32);
             match event.kind {
+                PointerEventKind::Enter { .. } => {
+                    // Set a normal arrow cursor; without this the window shows whatever cursor was
+                    // active on entry (often an I-beam), which makes the title bar feel un-draggable.
+                    if let Some(pointer) = &self.pointer {
+                        let _ = pointer.set_cursor(conn, CursorIcon::Default);
+                    }
+                }
                 PointerEventKind::Press {
                     button, serial, ..
                 } if button == BTN_LEFT => {

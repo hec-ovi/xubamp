@@ -111,19 +111,20 @@ enum EngineOp {
     SetActive(bool),
 }
 
-/// The engine operations a transport button/key maps to, given whether audio is currently playing.
-/// Classic Winamp semantics: Play does nothing while already playing, and otherwise (stopped/paused/
-/// finished) starts the current track from the top (rewind then activate); Pause toggles
-/// pause/resume from the live playing state; Stop halts and rewinds. Prev/Next/Eject need a
-/// playlist, so they map to nothing yet.
+/// The engine operations a transport button maps to, given whether audio is currently `playing` and
+/// whether the track has `finished`. Classic Winamp semantics for the Play button: a no-op while
+/// already playing; a restart from the top once the track has finished; otherwise (paused, or
+/// stopped which already rewound to 0) a plain resume in place. Pause toggles pause/resume; Stop
+/// halts and rewinds. Prev/Next/Eject need a playlist, so they map to nothing yet. (The `x` hotkey's
+/// unconditional restart is a separate `Command::Restart`, not routed through here.)
 #[cfg(any(feature = "audio", test))]
-fn transport_ops(t: xubamp_render::hit::Transport, playing: bool) -> Vec<EngineOp> {
+fn transport_ops(t: xubamp_render::hit::Transport, playing: bool, finished: bool) -> Vec<EngineOp> {
     use xubamp_render::hit::Transport;
     use EngineOp::{SeekToStart, SetActive};
     match t {
-        // Already playing: Play is a no-op. Otherwise start from the top.
         Transport::Play if playing => Vec::new(),
-        Transport::Play => vec![SeekToStart, SetActive(true)],
+        Transport::Play if finished => vec![SeekToStart, SetActive(true)],
+        Transport::Play => vec![SetActive(true)],
         Transport::Pause => vec![SetActive(!playing)],
         Transport::Stop => vec![SetActive(false), SeekToStart],
         Transport::Prev | Transport::Next | Transport::Eject => Vec::new(),
@@ -196,9 +197,10 @@ fn main() {
             match command {
                 Command::Transport(t) => {
                     use xubamp_render::hit::Transport;
-                    // Pause toggles from the live playing state, so read it now; the others ignore it.
+                    // Play/Pause depend on the live state (resume vs restart, pause vs unpause).
                     let playing = handle.as_ref().is_some_and(|h| h.is_playing());
-                    let ops = transport_ops(t, playing);
+                    let finished = handle.as_ref().is_some_and(|h| h.is_finished());
+                    let ops = transport_ops(t, playing, finished);
                     // Prev/Next/Eject map to nothing because there is no playlist yet; log that.
                     // Play-while-playing also maps to nothing, but that is the intended no-op.
                     if ops.is_empty() && matches!(t, Transport::Prev | Transport::Next | Transport::Eject) {
@@ -294,27 +296,33 @@ mod tests {
     }
 
     #[test]
-    fn play_does_nothing_while_playing_and_starts_from_the_top_otherwise() {
-        // Already playing: Play is a no-op (matching classic Winamp, which does not restart a track
-        // that is already playing).
-        assert!(transport_ops(Transport::Play, true).is_empty(), "playing: Play does nothing");
-        // Stopped/paused/finished: Play starts the track from the top (rewind then activate).
+    fn play_button_resumes_when_paused_restarts_when_finished_and_is_a_noop_while_playing() {
+        // Already playing: no-op.
+        assert!(transport_ops(Transport::Play, true, false).is_empty(), "playing: Play does nothing");
+        // Paused or stopped (not playing, not finished): resume in place. Stop already rewound to 0,
+        // so this doubles as "play from the top" after a Stop, while Pause resumes where it paused.
         assert_eq!(
-            transport_ops(Transport::Play, false),
+            transport_ops(Transport::Play, false, false),
+            vec![EngineOp::SetActive(true)],
+            "paused/stopped: Play resumes in place",
+        );
+        // Finished: restart from the top (resume in place would find nothing left to play).
+        assert_eq!(
+            transport_ops(Transport::Play, false, true),
             vec![EngineOp::SeekToStart, EngineOp::SetActive(true)],
-            "not playing: Play starts from the top",
+            "finished: Play restarts from the top",
         );
     }
 
     #[test]
     fn pause_toggles_from_the_live_playing_state() {
         assert_eq!(
-            transport_ops(Transport::Pause, true),
+            transport_ops(Transport::Pause, true, false),
             vec![EngineOp::SetActive(false)],
             "playing -> pause",
         );
         assert_eq!(
-            transport_ops(Transport::Pause, false),
+            transport_ops(Transport::Pause, false, false),
             vec![EngineOp::SetActive(true)],
             "paused -> resume",
         );
@@ -324,7 +332,7 @@ mod tests {
     fn stop_halts_and_rewinds() {
         // Order matters: deactivate first, then rewind, so the clock shows 00:00 stopped.
         assert_eq!(
-            transport_ops(Transport::Stop, true),
+            transport_ops(Transport::Stop, true, false),
             vec![EngineOp::SetActive(false), EngineOp::SeekToStart],
         );
     }
@@ -332,7 +340,7 @@ mod tests {
     #[test]
     fn skip_commands_map_to_nothing_until_a_playlist() {
         for t in [Transport::Prev, Transport::Next, Transport::Eject] {
-            assert!(transport_ops(t, true).is_empty(), "{t:?} maps to nothing yet");
+            assert!(transport_ops(t, true, false).is_empty(), "{t:?} maps to nothing yet");
         }
     }
 

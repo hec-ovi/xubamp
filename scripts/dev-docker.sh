@@ -9,7 +9,7 @@
 #                                               # editing Dockerfile.dev)
 #   scripts/dev-docker.sh build [cargo args]    # e.g. build --workspace
 #   scripts/dev-docker.sh test  [cargo args]    # e.g. test -p xubamp-audio
-#   scripts/dev-docker.sh run   [xubamp args]   # cargo run -p xubamp --features audio -- <args>
+#   scripts/dev-docker.sh run   [xubamp args]   # cargo run -p xubamp --features audio,keyboard --
 #                                               # e.g. run ~/Music/song.mp3 to play with the window
 #   scripts/dev-docker.sh shell                 # interactive shell in the container
 set -euo pipefail
@@ -46,7 +46,7 @@ case "$cmd" in
     image) docker build -f "$root/Dockerfile.dev" --build-arg UID="$(id -u)" -t "$img" "$root" ;;
     build) docker run "${common[@]}" "$img" cargo build "$@" ;;
     test) docker run "${common[@]}" "$img" cargo test "$@" ;;
-    run) docker run "${common[@]}" "${session[@]}" "$img" cargo run -p xubamp --features audio -- "$@" ;;
+    run) docker run "${common[@]}" "${session[@]}" "$img" cargo run -p xubamp --features audio,keyboard -- "$@" ;;
     shell) docker run "${common[@]}" "${session[@]}" "$img" bash ;;
     *)
         echo "usage: $0 {image|build|test|run|shell} [args]" >&2

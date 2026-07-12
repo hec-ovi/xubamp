@@ -24,3 +24,7 @@ xubamp-audio = { path = "../audio", optional = true }
 # Play a media-file argument through PipeWire. Off by default (host UI dev stays PipeWire-free);
 # enabled in the dev container: `cargo run -p xubamp --features audio -- song.mp3`.
 audio = ["dep:xubamp-audio", "xubamp-audio/output"]
+# In-window keyboard shortcuts (transport / volume / seek). Off by default because it makes
+# libxkbcommon a build-time dependency (see the wl crate); the dev container enables it alongside
+# `audio`. Split from `audio` so a keyboard-only build stays possible.
+keyboard = ["xubamp-wl/keyboard"]

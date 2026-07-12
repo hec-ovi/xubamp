@@ -179,6 +179,22 @@ in the repo and git history, nothing important lives only in chat.
     same button (dragging off cancels), matching classic behaviour. Geometry (close 264,3,9x9;
     minimize 244,3; shade 254,3; options 6,3) cross-checked against Webamp; the hit priority, the
     press/release/cancel policy, and the pressed-sprite draw are unit-tested.
+  - (k) done: in-window keyboard shortcuts. The classic main-window keys drive the same commands as
+    the mouse: x play, c pause, v stop, b next, z previous, Up/Down volume, Left/Right seek 5s (keys
+    and amounts cross-checked against Webamp's `hotkeys.ts`). The policy is a pure
+    `render::hit::on_key(state, KeyPress, is_repeat) -> Outcome` (the keyboard twin of `on_press`):
+    transport keys fire once per press and are swallowed on auto-repeat (so holding Next does not
+    machine-gun a playlist), while volume and seek ramp on repeat; seek is relative to the current
+    position, clamped to the track, and inert without a known length or during a pointer scrub. Fully
+    unit-tested (step/clamp/dedup, repeat gating, relative-seek math, inert cases). The `wl` crate
+    adds a `KeyboardHandler`: it re-enables smithay-client-toolkit's `xkbcommon` support (gated behind
+    a new `keyboard` cargo feature so the host's dependency-free build still compiles without
+    `libxkbcommon-dev`; the dev container installs it and builds `--features audio,keyboard`), creates
+    the keyboard with SCTK's calloop key-repeat, gates on focus and on clear modifiers (so Ctrl/Alt/
+    Super chords like Ctrl+X never trigger a shortcut), and decodes letters from the produced text
+    (layout-correct, follows the key's printed label) and arrows from their keysym. Verified: host
+    build/clippy/tests green with the feature off, container build/clippy green with it on, and a live
+    startup smoke test maps the window through the new keyboard path without panicking.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -213,11 +229,12 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): in-window hotkeys (needs keyboard input, i.e. re-enabling xkbcommon), the
-  windowshade (compact) mode, and the options/main menu. Polish: a gapless seek flush (drop the
-  stale tail without underrunning the stream, e.g. deactivate then flush then refill), pause-blink,
-  the click-to-toggle remaining-time display, a center detent on the balance slider, and button
-  drag-off un-press. Plus a real skin. (The built-in default skin ships no
+- Phase 4 (continued): the windowshade (compact) mode and the options/main menu. More keyboard
+  bindings once their targets exist (r/s repeat/shuffle, l open-file, Alt+W/E/G window toggles,
+  Ctrl+D double-size), all of which need the playlist, equalizer, or a menu first. Polish: a gapless
+  seek flush (drop the stale tail without underrunning the stream, e.g. deactivate then flush then
+  refill), pause-blink, the click-to-toggle remaining-time display, a center detent on the balance
+  slider, and button drag-off un-press. Plus a real skin. (The built-in default skin ships no
   volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt, so it shows none of the sliders,
   the seek bar, the marquee, or the visualizer; those await an authored default sheet set.)
 

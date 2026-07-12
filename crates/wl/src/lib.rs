@@ -43,6 +43,17 @@ use xubamp_render::vis::{VisMode, FFT_N};
 use xubamp_render::{compose_main_window, hit, marquee, Framebuffer};
 use xubamp_skin::Skin;
 
+// Keyboard shortcuts are gated behind the `keyboard` feature so the host build stays free of the
+// libxkbcommon build dependency (see Cargo.toml). These imports exist only when it is enabled.
+#[cfg(feature = "keyboard")]
+use smithay_client_toolkit::delegate_keyboard;
+#[cfg(feature = "keyboard")]
+use smithay_client_toolkit::reexports::calloop::LoopHandle;
+#[cfg(feature = "keyboard")]
+use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
+#[cfg(feature = "keyboard")]
+use wayland_client::protocol::wl_keyboard;
+
 /// How often the marquee steps while a title is scrolling. Between scrolls the redraw timer
 /// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
@@ -97,6 +108,20 @@ pub fn run(
 
     let pool = SlotPool::new(w as usize * h as usize * 4, &shm)?;
 
+    // Build the calloop event loop before the App so its LoopHandle can be handed both to the
+    // redraw timer and (with the `keyboard` feature) to the keyboard, on which SCTK schedules key
+    // repeat. The timer is what makes the clock tick; the blocking dispatch we replaced could only
+    // wake on Wayland events, never on its own.
+    let mut event_loop: EventLoop<App> =
+        EventLoop::try_new().expect("failed to create the calloop event loop");
+    let loop_handle = event_loop.handle();
+
+    // WaylandSource feeds compositor events into the loop and flushes our requests back out; it
+    // takes the connection (cheap Arc clone) and the queue by value.
+    WaylandSource::new(conn.clone(), event_queue)
+        .insert(loop_handle.clone())
+        .expect("failed to insert the Wayland source");
+
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -114,22 +139,17 @@ pub fn run(
         last_marquee: Instant::now(),
         pointer: None,
         seat: None,
+        #[cfg(feature = "keyboard")]
+        keyboard: None,
+        #[cfg(feature = "keyboard")]
+        keyboard_focus: false,
+        #[cfg(feature = "keyboard")]
+        modifiers: Modifiers::default(),
+        #[cfg(feature = "keyboard")]
+        loop_handle: loop_handle.clone(),
         configured: false,
         exit: false,
     };
-
-    // Drive the Wayland queue and a periodic redraw timer from one calloop event loop. The
-    // timer is what makes the clock tick; the blocking dispatch we replaced could only wake on
-    // Wayland events, never on its own.
-    let mut event_loop: EventLoop<App> =
-        EventLoop::try_new().expect("failed to create the calloop event loop");
-    let loop_handle = event_loop.handle();
-
-    // WaylandSource feeds compositor events into the loop and flushes our requests back out; it
-    // takes the connection (cheap Arc clone) and the queue by value.
-    WaylandSource::new(conn.clone(), event_queue)
-        .insert(loop_handle.clone())
-        .expect("failed to insert the Wayland source");
 
     // A self-re-arming redraw timer. Each tick steps the marquee and polls the clock, then
     // reschedules itself: fast while a title is scrolling, once a second otherwise, so an idle
@@ -179,6 +199,21 @@ struct App {
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
     /// move: `xdg_toplevel.move` needs the seat plus the press serial.
     seat: Option<wl_seat::WlSeat>,
+    /// The keyboard, once the seat reports the capability. Created with repeat so held seek/volume
+    /// keys auto-ramp; `None` on a seat with no keyboard.
+    #[cfg(feature = "keyboard")]
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// Whether our surface currently holds keyboard focus, so a shortcut fires only while focused.
+    #[cfg(feature = "keyboard")]
+    keyboard_focus: bool,
+    /// The latest modifier state. Key press events do not carry it, so it is cached here from
+    /// `update_modifiers` and read to decide whether a shortcut's modifiers are clear.
+    #[cfg(feature = "keyboard")]
+    modifiers: Modifiers,
+    /// A handle to the event loop, so the keyboard can be created with SCTK's calloop-driven key
+    /// repeat when the seat advertises the capability. The `'static` here pins the loop's lifetime.
+    #[cfg(feature = "keyboard")]
+    loop_handle: LoopHandle<'static, App>,
     /// Set once the window has had its first `configure`, so the timer never attaches a buffer
     /// before the surface is mapped.
     configured: bool,
@@ -371,6 +406,29 @@ impl SeatHandler for App {
                 .get_pointer(qh, &seat)
                 .expect("failed to create pointer");
             self.pointer = Some(pointer);
+            // Clone so the keyboard branch below can still take `seat`; only one capability arrives
+            // per call, but both branches reference `seat`, so the pointer branch must not move it.
+            self.seat = Some(seat.clone());
+        }
+        #[cfg(feature = "keyboard")]
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            // Create the keyboard WITH repeat: SCTK arms a calloop timer on our loop and re-invokes
+            // this callback for each auto-repeat, which we route to the same handler as a real press
+            // (flagged `is_repeat` so only seek/volume ramp, never the transport keys).
+            let loop_handle = self.loop_handle.clone();
+            let keyboard = self
+                .seat_state
+                .get_keyboard_with_repeat(
+                    qh,
+                    &seat,
+                    None,
+                    loop_handle,
+                    Box::new(|app: &mut App, _kbd: &wl_keyboard::WlKeyboard, event: KeyEvent| {
+                        app.on_key(&event, true);
+                    }),
+                )
+                .expect("failed to create keyboard");
+            self.keyboard = Some(keyboard);
             self.seat = Some(seat);
         }
     }
@@ -386,6 +444,14 @@ impl SeatHandler for App {
                 pointer.release();
             }
             self.seat = None;
+        }
+        #[cfg(feature = "keyboard")]
+        if capability == Capability::Keyboard {
+            if let Some(keyboard) = self.keyboard.take() {
+                keyboard.release();
+            }
+            // SCTK cancels any in-flight repeat timer on release; drop focus so nothing lingers.
+            self.keyboard_focus = false;
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -443,6 +509,110 @@ impl PointerHandler for App {
     }
 }
 
+#[cfg(feature = "keyboard")]
+impl KeyboardHandler for App {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[Keysym],
+    ) {
+        if surface == self.window.wl_surface() {
+            self.keyboard_focus = true;
+        }
+    }
+    fn leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {
+        if surface == self.window.wl_surface() {
+            self.keyboard_focus = false;
+        }
+    }
+    fn press_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        self.on_key(&event, false);
+    }
+    fn release_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+    fn update_modifiers(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        modifiers: Modifiers,
+        _layout: u32,
+    ) {
+        self.modifiers = modifiers;
+    }
+}
+
+#[cfg(feature = "keyboard")]
+impl App {
+    /// Handle a key: gate on focus and modifiers, decode it to a [`hit::KeyPress`], and run it
+    /// through the same [`hit::Outcome`] path as a pointer event. `is_repeat` is true for SCTK's
+    /// synthesized auto-repeats, so [`hit::on_key`] ramps seek/volume while firing transport keys
+    /// once.
+    fn on_key(&mut self, event: &KeyEvent, is_repeat: bool) {
+        // Events only reach a focused surface, but gate on our own flag so a trailing repeat right
+        // after a focus loss can never fire.
+        if !self.keyboard_focus {
+            return;
+        }
+        // Plain shortcuts only (Shift/Caps merely change letter case). A Ctrl/Alt/Super chord is
+        // left for the compositor or a later binding, so e.g. Ctrl+X never triggers Play.
+        let m = self.modifiers;
+        if m.ctrl || m.alt || m.logo {
+            return;
+        }
+        let Some(key) = decode_key(event) else {
+            return;
+        };
+        let outcome = hit::on_key(&mut self.state, key, is_repeat);
+        self.apply(outcome);
+    }
+}
+
+/// Decode an SCTK key event into a main-window [`hit::KeyPress`], or `None` for unbound keys. The
+/// arrow keys are matched on their layout-independent keysym; any other key is taken from its
+/// produced text (`utf8`) folded to lowercase, so a letter shortcut follows the key's printed label
+/// on the user's layout rather than a fixed physical position.
+#[cfg(feature = "keyboard")]
+fn decode_key(event: &KeyEvent) -> Option<hit::KeyPress> {
+    use hit::KeyPress;
+    match event.keysym {
+        Keysym::Up => return Some(KeyPress::Up),
+        Keysym::Down => return Some(KeyPress::Down),
+        Keysym::Left => return Some(KeyPress::Left),
+        Keysym::Right => return Some(KeyPress::Right),
+        _ => {}
+    }
+    let ch = event.utf8.as_deref()?.chars().next()?;
+    Some(KeyPress::Char(ch.to_ascii_lowercase()))
+}
+
 impl ShmHandler for App {
     fn shm_state(&mut self) -> &mut Shm {
         &mut self.shm
@@ -469,6 +639,8 @@ delegate_compositor!(App);
 delegate_output!(App);
 delegate_seat!(App);
 delegate_pointer!(App);
+#[cfg(feature = "keyboard")]
+delegate_keyboard!(App);
 delegate_shm!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);

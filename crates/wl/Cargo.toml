@@ -11,9 +11,18 @@ authors.workspace = true
 [dependencies]
 xubamp-render = { path = "../render" }
 xubamp-skin = { path = "../skin" }
-# default-features off drops xkbcommon (keyboard, not needed yet), which needs pkg-config +
-# libxkbcommon-dev at build time. We re-enable only `calloop` for the event loop's ~1s redraw
-# timer; it is pure Rust (calloop + calloop-wayland-source) and pulls in no system libraries.
+# default-features off drops xkbcommon; we re-enable only `calloop` for the event loop's ~1s
+# redraw timer, which is pure Rust (calloop + calloop-wayland-source) and pulls in no system
+# libraries. Keyboard shortcuts need xkbcommon on top, gated behind our `keyboard` feature (see
+# below) because it links libxkbcommon at build time.
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 # dlopen loads libwayland-client at runtime, so no -dev package is needed to build.
 wayland-client = { version = "0.31", features = ["dlopen"] }
+
+[features]
+# Keyboard shortcuts. smithay-client-toolkit's `xkbcommon` support gates its whole seat::keyboard
+# module (KeyboardHandler, key repeat) and links libxkbcommon at build time via pkg-config, so it
+# needs `libxkbcommon-dev` present. Gated off by default so the host's dependency-free build (and
+# its unit tests) still compile without that package; the dev container installs it and enables
+# this feature, exactly as the audio crate gates its PipeWire FFI.
+keyboard = ["smithay-client-toolkit/xkbcommon"]

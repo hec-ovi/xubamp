@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpipewire-0.3-dev \
         libspa-0.2-dev \
         libclang-dev \
+        # Keyboard shortcuts: the wl crate's `keyboard` feature links libxkbcommon at build time
+        # (smithay-client-toolkit's xkbcommon support, via pkg-config). Runtime libxkbcommon.so is
+        # already on any GNOME host; this -dev package supplies the headers/.pc for the build.
+        libxkbcommon-dev \
         ca-certificates \
         curl \
         # Runtime client bits so a program in the container can actually connect to the host

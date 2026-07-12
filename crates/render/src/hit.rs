@@ -64,6 +64,22 @@ pub enum Command {
     Seek(f32),
 }
 
+/// A decoded key the main window responds to, produced by the platform layer from its keysym so
+/// this crate needs no windowing types. Letter shortcuts arrive as their produced character folded
+/// to lowercase (so Shift is transparent and the binding follows the key's printed label rather
+/// than a physical scancode); the arrow keys arrive as named variants, which are layout-independent.
+/// The platform layer only forwards a press when no Ctrl/Alt/Super modifier is held, so those
+/// combinations never reach here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyPress {
+    /// A character-producing key, already lowercased (e.g. `'x'`).
+    Char(char),
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
 /// Transport identity for each entry of [`sprites::CBUTTONS`] (and `CBUTTONS_PRESSED`), in the
 /// same order, so the compositor can pick the pressed sprite for the held button.
 pub const TRANSPORT_ORDER: [Transport; 6] = [
@@ -413,6 +429,92 @@ pub fn on_leave(state: &mut UiState) -> bool {
     let transport = state.pressed.take().is_some();
     let title = state.pressed_title.take().is_some();
     transport || title
+}
+
+/// Volume change per Up/Down key, in 0..=100 units. Webamp steps by 1 and real Winamp 2.x by a
+/// small internal increment (~1-2%); we use 2 so a single tap is perceptible while OS key-repeat
+/// still ramps it smoothly when the key is held.
+const VOLUME_STEP: i32 = 2;
+
+/// Seek distance per Left/Right key, in seconds. Classic Winamp and Webamp both seek 5 seconds.
+const SEEK_STEP_SECS: f32 = 5.0;
+
+/// Map a decoded key press to its effect on `state`, returning the [`Outcome`] for the platform
+/// layer to carry out (emit a command, redraw). `is_repeat` is true when the key is auto-repeating
+/// while held: the seek and volume keys ramp on repeat, but the transport keys fire once per
+/// physical press (so holding `b` does not machine-gun through a playlist). Keys with no binding,
+/// and transport keys on auto-repeat, return the empty outcome. This is the keyboard twin of
+/// [`on_press`]: same command vocabulary, no pointer geometry.
+pub fn on_key(state: &mut UiState, key: KeyPress, is_repeat: bool) -> Outcome {
+    match key {
+        // Transport: one action per press, never on auto-repeat.
+        KeyPress::Char('z') => transport_key(is_repeat, Transport::Prev),
+        KeyPress::Char('x') => transport_key(is_repeat, Transport::Play),
+        KeyPress::Char('c') => transport_key(is_repeat, Transport::Pause),
+        KeyPress::Char('v') => transport_key(is_repeat, Transport::Stop),
+        KeyPress::Char('b') => transport_key(is_repeat, Transport::Next),
+        // Volume and seek ramp while the key is held.
+        KeyPress::Up => volume_key(state, VOLUME_STEP),
+        KeyPress::Down => volume_key(state, -VOLUME_STEP),
+        KeyPress::Right => seek_key(state, SEEK_STEP_SECS),
+        KeyPress::Left => seek_key(state, -SEEK_STEP_SECS),
+        // Any other character key is unbound (for now: r/s/l and the rest arrive with the playlist
+        // and equalizer).
+        KeyPress::Char(_) => Outcome::default(),
+    }
+}
+
+/// A transport shortcut: emit the command once, but swallow auto-repeats so a held key does not
+/// re-fire (holding Next must not skip repeatedly). No redraw: unlike a mouse click there is no
+/// button to draw depressed for a keystroke.
+fn transport_key(is_repeat: bool, t: Transport) -> Outcome {
+    if is_repeat {
+        return Outcome::default();
+    }
+    Outcome {
+        command: Some(Command::Transport(t)),
+        ..Default::default()
+    }
+}
+
+/// Nudge the volume by `step` (clamped 0..=100), emitting the new value and redrawing the slider.
+/// A no-op (no command, no redraw) once the value is already at the rail, so holding the key at
+/// full or zero does not spam identical commands.
+fn volume_key(state: &mut UiState, step: i32) -> Outcome {
+    let v = (state.volume as i32 + step).clamp(0, 100) as u8;
+    if v == state.volume {
+        return Outcome::default();
+    }
+    state.volume = v;
+    Outcome {
+        command: Some(Command::Volume(v)),
+        redraw: true,
+        ..Default::default()
+    }
+}
+
+/// Seek by `delta_secs` relative to the current position, emitting an absolute [`Command::Seek`]
+/// fraction. Inert when the length or position is unknown (an unseekable stream, matching the
+/// position bar) or while the bar is being dragged with the pointer (the drag owns the thumb).
+/// The thumb and time are moved optimistically so the display responds at once even while paused
+/// (the clock tick would otherwise lag up to a second); the engine's clock reconfirms them when
+/// the seek lands.
+fn seek_key(state: &mut UiState, delta_secs: f32) -> Outcome {
+    let (Some(pos), Some(dur)) = (state.position, state.duration) else {
+        return Outcome::default();
+    };
+    if dur == 0 || state.dragging == Some(Slider::Position) {
+        return Outcome::default();
+    }
+    let target = (pos * dur as f32 + delta_secs).clamp(0.0, dur as f32);
+    let fraction = target / dur as f32;
+    state.position = Some(fraction);
+    state.elapsed = Some(target.round() as u32);
+    Outcome {
+        command: Some(Command::Seek(fraction)),
+        redraw: true,
+        ..Default::default()
+    }
 }
 
 /// Refresh the display from the latest playback snapshot (elapsed seconds and seek-bar position,
@@ -842,5 +944,114 @@ mod tests {
         );
         assert!(!changed, "no redraw: the drag owns the display and duration was unchanged");
         assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview still held");
+    }
+
+    #[test]
+    fn transport_keys_emit_the_command_once_and_swallow_repeat() {
+        // The five main-window transport letters, matched on their lowercase char.
+        let keys = [
+            ('z', Transport::Prev),
+            ('x', Transport::Play),
+            ('c', Transport::Pause),
+            ('v', Transport::Stop),
+            ('b', Transport::Next),
+        ];
+        for (ch, t) in keys {
+            let mut s = UiState::default();
+            let out = on_key(&mut s, KeyPress::Char(ch), false);
+            assert_eq!(out.command, Some(Command::Transport(t)), "{ch} -> {t:?}");
+            assert!(!out.redraw, "a transport keystroke draws no depressed button");
+            // Held: the auto-repeat must not re-fire the transport action.
+            let repeat = on_key(&mut s, KeyPress::Char(ch), true);
+            assert_eq!(repeat, Outcome::default(), "{ch} held emits nothing on repeat");
+        }
+    }
+
+    #[test]
+    fn unbound_keys_do_nothing() {
+        let mut s = UiState::default();
+        for key in [KeyPress::Char('q'), KeyPress::Char('1'), KeyPress::Char(' ')] {
+            assert_eq!(on_key(&mut s, key, false), Outcome::default(), "{key:?} is unbound");
+        }
+    }
+
+    #[test]
+    fn volume_keys_step_clamp_and_dedup() {
+        // Fresh volume is 100 (full): Up is already at the rail, so it is a no-op.
+        let mut s = UiState::default();
+        assert_eq!(on_key(&mut s, KeyPress::Up, false), Outcome::default(), "already at 100");
+        assert_eq!(s.volume, 100);
+        // Down steps by VOLUME_STEP and emits + redraws.
+        let out = on_key(&mut s, KeyPress::Down, false);
+        assert_eq!(s.volume, 98);
+        assert_eq!(out.command, Some(Command::Volume(98)));
+        assert!(out.redraw);
+        // Repeats ramp (the auto-repeat is allowed through for volume).
+        let out = on_key(&mut s, KeyPress::Down, true);
+        assert_eq!(s.volume, 96, "held Down keeps ramping");
+        assert_eq!(out.command, Some(Command::Volume(96)));
+        // Near the bottom, the step clamps to 0 rather than underflowing.
+        s.volume = 1;
+        let out = on_key(&mut s, KeyPress::Down, false);
+        assert_eq!(s.volume, 0);
+        assert_eq!(out.command, Some(Command::Volume(0)));
+        // At 0, Down is a no-op (no spam of identical commands while held at the rail).
+        assert_eq!(on_key(&mut s, KeyPress::Down, true), Outcome::default(), "pinned at 0");
+        // And Up clamps to 100 from the top.
+        s.volume = 99;
+        let out = on_key(&mut s, KeyPress::Up, false);
+        assert_eq!(s.volume, 100);
+        assert_eq!(out.command, Some(Command::Volume(100)));
+    }
+
+    #[test]
+    fn seek_keys_move_relative_and_clamp_to_the_track() {
+        // Pull the fraction out of a Seek command (f32, so compared with a tolerance).
+        fn seek_frac(out: &Outcome) -> f32 {
+            match out.command {
+                Some(Command::Seek(f)) => f,
+                other => panic!("expected a Seek command, got {other:?}"),
+            }
+        }
+        // A 100s track at the halfway point: Right adds 5s, Left subtracts 5s.
+        let mut s = UiState { duration: Some(100), position: Some(0.5), ..Default::default() };
+        let out = on_key(&mut s, KeyPress::Right, false);
+        assert!((seek_frac(&out) - 0.55).abs() < 1e-6, "50s + 5s = 55%");
+        assert_eq!(s.elapsed, Some(55), "time preview updated at once");
+        assert!((s.position.unwrap() - 0.55).abs() < 1e-6, "thumb moved optimistically");
+        assert!(out.redraw);
+
+        s.position = Some(0.5);
+        let out = on_key(&mut s, KeyPress::Left, false);
+        assert!((seek_frac(&out) - 0.45).abs() < 1e-6, "50s - 5s = 45%");
+
+        // Near the ends, the target clamps into [0, duration] (0.0 and 1.0 are exact).
+        s.position = Some(0.02); // 2s in
+        let out = on_key(&mut s, KeyPress::Left, false);
+        assert_eq!(out.command, Some(Command::Seek(0.0)), "clamps to the start, not negative");
+        assert_eq!(s.elapsed, Some(0));
+        s.position = Some(0.99); // 99s in
+        let out = on_key(&mut s, KeyPress::Right, true); // repeat also seeks
+        assert_eq!(out.command, Some(Command::Seek(1.0)), "clamps to the end");
+        assert_eq!(s.elapsed, Some(100));
+    }
+
+    #[test]
+    fn seek_keys_are_inert_without_a_length_or_during_a_pointer_drag() {
+        // No duration/position (an unseekable or not-yet-playing stream): nothing happens.
+        let mut s = UiState::default();
+        assert_eq!(on_key(&mut s, KeyPress::Right, false), Outcome::default(), "no length");
+        assert_eq!(on_key(&mut s, KeyPress::Left, false), Outcome::default(), "no length");
+
+        // A known length but the pointer is mid-drag on the bar: the drag owns the thumb, so the
+        // key must not fight it.
+        let mut d = UiState {
+            duration: Some(100),
+            position: Some(0.5),
+            dragging: Some(Slider::Position),
+            ..Default::default()
+        };
+        assert_eq!(on_key(&mut d, KeyPress::Right, false), Outcome::default(), "yields to the drag");
+        assert_eq!(d.position, Some(0.5), "preview untouched");
     }
 }

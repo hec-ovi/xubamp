@@ -43,7 +43,7 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 use xubamp_render::vis::{VisMode, FFT_N};
-use xubamp_render::{compose_main_window, hit, marquee, Framebuffer};
+use xubamp_render::{compose_main_window, hit, marquee, pledit, Framebuffer};
 use xubamp_skin::Skin;
 
 // Keyboard shortcuts are gated behind the `keyboard` feature so the host build stays free of the
@@ -71,6 +71,22 @@ const FRAME_FALLBACK: Duration = Duration::from_millis(250);
 /// visualizer to read each frame.
 type SampleSource = Box<dyn FnMut(&mut [f32])>;
 
+/// Returns the playlist rows and the index of the currently-playing track, polled each tick so the
+/// playlist window follows track changes. The window layer keeps selection/scroll itself.
+type PlaylistSource = Box<dyn FnMut() -> (Vec<pledit::Row>, Option<usize>)>;
+
+/// The secondary playlist (PLEDIT) window's Wayland resources. Held in an `Option` on [`App`]: `None`
+/// means closed, and dropping it destroys the `xdg_toplevel` (SCTK has no hide/unmap). The playlist
+/// content and selection/scroll live in `App::playlist_state`, so a close/reopen loses nothing.
+struct PlaylistWin {
+    window: Window,
+    pool: SlotPool,
+    fb: Framebuffer,
+    configured: bool,
+    /// A title-bar press deferred into a compositor move (same threshold as the main window).
+    armed_move: Option<(i32, i32, u32)>,
+}
+
 /// Open the main window for `skin` and run until the user closes it. `title` is the song title
 /// shown in the marquee (empty for none). `on_command` is called on the event-loop thread for
 /// every UI command: a transport button click, a volume/balance change as its slider is dragged,
@@ -85,6 +101,7 @@ pub fn run(
     on_command: impl FnMut(hit::Command) + 'static,
     playback_source: impl FnMut() -> hit::Playback + 'static,
     sample_source: impl FnMut(&mut [f32]) + 'static,
+    playlist_source: impl FnMut() -> (Vec<pledit::Row>, Option<usize>) + 'static,
 ) -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -132,6 +149,7 @@ pub fn run(
         output_state: OutputState::new(&globals, &qh),
         seat_state: SeatState::new(&globals, &qh),
         compositor,
+        xdg_shell,
         shm,
         pool,
         window,
@@ -141,6 +159,9 @@ pub fn run(
         on_command: Box::new(on_command),
         playback_source: Box::new(playback_source),
         sample_source: Box::new(sample_source),
+        playlist: None,
+        playlist_state: pledit::PlState::default(),
+        playlist_source: Box::new(playlist_source),
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
         qh: qh.clone(),
@@ -206,6 +227,8 @@ struct App {
     last_marquee: Instant,
     /// The compositor, kept so a cursor surface can be created when the pointer is set up.
     compositor: CompositorState,
+    /// The xdg shell, kept alive so the playlist window (a second toplevel) can be created on demand.
+    xdg_shell: XdgShell,
     /// The pointer, once the seat reports the capability. A themed pointer so we can set a proper
     /// arrow cursor on enter (without it the window inherits whatever cursor was last active).
     /// `None` on a seat with no mouse.
@@ -242,7 +265,13 @@ struct App {
     /// Whether audio is playing, from the last playback poll. Gates the frame-callback loop: the
     /// visualizer only animates from live audio while this holds.
     playing: bool,
-    /// Set once the window has had its first `configure`, so the timer never attaches a buffer
+    /// The secondary playlist window (PLEDIT), or `None` when closed.
+    playlist: Option<PlaylistWin>,
+    /// The playlist window's content + selection/scroll state; survives close/reopen.
+    playlist_state: pledit::PlState,
+    /// Polled each tick for the current track rows + playing index, to keep the playlist in sync.
+    playlist_source: PlaylistSource,
+    /// Set once the main window has had its first `configure`, so the timer never attaches a buffer
     /// before the surface is mapped.
     configured: bool,
     exit: bool,
@@ -273,6 +302,14 @@ impl App {
                 // pressed feedback, but the action is a no-op for now.
                 hit::TitleButton::Shade => eprintln!("xubamp: windowshade mode not implemented yet"),
                 hit::TitleButton::Options => eprintln!("xubamp: main menu not implemented yet"),
+            }
+        }
+        if let Some(t) = outcome.toggle {
+            match t {
+                hit::WindowToggle::Playlist => self.toggle_playlist(),
+                hit::WindowToggle::Equalizer => {
+                    eprintln!("xubamp: equalizer window not implemented yet")
+                }
             }
         }
     }
@@ -347,6 +384,15 @@ impl App {
             return MARQUEE_TICK;
         }
         let changed = self.step_clock_and_marquee();
+        // Keep the playlist window (if open) in sync with the track list and playing track.
+        if self.playlist.is_some() {
+            let (rows, current) = (self.playlist_source)();
+            if rows != self.playlist_state.rows || current != self.playlist_state.current {
+                self.playlist_state.rows = rows;
+                self.playlist_state.current = current;
+                self.redraw_playlist();
+            }
+        }
         if self.animating() {
             // The frame-callback loop renders the visualizer. Kick it off (or restart it if it
             // stalled) with a redraw, which re-arms the callback; otherwise just poll again soon.
@@ -398,6 +444,123 @@ impl App {
         buffer.attach_to(&surface).expect("attach buffer");
         surface.commit();
     }
+
+    /// Open the playlist window (a second toplevel) if it is not already open, and light the PL
+    /// button on the main window. No-op if already open.
+    fn open_playlist(&mut self) {
+        if self.playlist.is_some() {
+            return;
+        }
+        let fb = pledit::compose(&self.skin, &self.playlist_state);
+        let (w, h) = (fb.width, fb.height);
+        let surface = self.compositor.create_surface(&self.qh);
+        let window = self
+            .xdg_shell
+            .create_window(surface, WindowDecorations::RequestClient, &self.qh);
+        window.set_title("xubamp playlist");
+        window.set_app_id("xubamp");
+        window.set_min_size(Some((w, h)));
+        window.set_max_size(Some((w, h)));
+        window.commit();
+        let pool = SlotPool::new(w as usize * h as usize * 4, &self.shm).expect("playlist pool");
+        self.playlist = Some(PlaylistWin { window, pool, fb, configured: false, armed_move: None });
+        self.state.pl_open = true;
+        self.redraw(); // relight the PL button on the main window
+    }
+
+    /// Close the playlist window (drops it, destroying the toplevel) and dim the PL button.
+    fn close_playlist(&mut self) {
+        self.playlist = None;
+        self.state.pl_open = false;
+        self.redraw();
+    }
+
+    fn toggle_playlist(&mut self) {
+        if self.playlist.is_some() {
+            self.close_playlist();
+        } else {
+            self.open_playlist();
+        }
+    }
+
+    /// Recompose and present the playlist window from `playlist_state`, if it is open and mapped.
+    fn redraw_playlist(&mut self) {
+        if !self.playlist.as_ref().is_some_and(|pl| pl.configured) {
+            return;
+        }
+        let fb = pledit::compose(&self.skin, &self.playlist_state);
+        let pl = self.playlist.as_mut().unwrap();
+        pl.fb = fb;
+        pl.present();
+    }
+
+    /// Pointer handling for the playlist window. For now only the title-bar drag (to move it) and
+    /// the arrow cursor; list selection, double-click-play and scrolling arrive with the playlist
+    /// interactions sub-unit.
+    fn playlist_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        match kind {
+            PointerEventKind::Enter { .. } => {
+                if let Some(pointer) = &self.pointer {
+                    let _ = pointer.set_cursor(conn, CursorIcon::Default);
+                }
+            }
+            PointerEventKind::Press { button, serial, .. } if *button == BTN_LEFT => {
+                // The title-bar band is the top 20px; a press there arms a compositor move.
+                if y < xubamp_skin::sprites::PLEDIT_TITLE_H {
+                    if let Some(pl) = &mut self.playlist {
+                        pl.armed_move = Some((x, y, *serial));
+                    }
+                }
+            }
+            PointerEventKind::Motion { .. } => {
+                let start = self
+                    .playlist
+                    .as_ref()
+                    .and_then(|pl| pl.armed_move)
+                    .filter(|&(px, py, _)| hit::exceeds_move_threshold(x - px, y - py));
+                if let Some((_, _, serial)) = start {
+                    if let (Some(seat), Some(pl)) = (self.seat.clone(), self.playlist.as_mut()) {
+                        pl.window.move_(&seat, serial);
+                        pl.armed_move = None;
+                    }
+                }
+            }
+            PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
+                if let Some(pl) = &mut self.playlist {
+                    pl.armed_move = None;
+                }
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(pl) = &mut self.playlist {
+                    pl.armed_move = None;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl PlaylistWin {
+    /// Upload `self.fb` to the window's shm buffer and commit. No frame callback: the playlist is
+    /// static (redrawn only on interaction / track change), so it does not drive an animation loop.
+    fn present(&mut self) {
+        let (w, h) = (self.fb.width, self.fb.height);
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .expect("create wl_shm buffer");
+        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        let surface = self.window.wl_surface();
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer.attach_to(surface).expect("attach buffer");
+        surface.commit();
+    }
 }
 
 impl CompositorHandler for App {
@@ -417,8 +580,11 @@ impl CompositorHandler for App {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.on_frame();
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
+        // Only the main window drives the frame-callback (visualizer) loop; the playlist is static.
+        if surface == self.window.wl_surface() {
+            self.on_frame();
+        }
     }
     fn surface_enter(
         &mut self,
@@ -439,19 +605,31 @@ impl CompositorHandler for App {
 }
 
 impl WindowHandler for App {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
-        self.exit = true;
+    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
+        // Closing the main window quits; closing the playlist window just hides it.
+        if *window == self.window {
+            self.exit = true;
+        } else {
+            self.close_playlist();
+        }
     }
     fn configure(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &Window,
+        window: &Window,
         _: WindowConfigure,
         _: u32,
     ) {
-        self.configured = true;
-        self.draw();
+        if *window == self.window {
+            self.configured = true;
+            self.draw();
+        } else if self.playlist.as_ref().is_some_and(|pl| *window == pl.window) {
+            if let Some(pl) = &mut self.playlist {
+                pl.configured = true;
+            }
+            self.redraw_playlist();
+        }
     }
 }
 
@@ -544,11 +722,20 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
-            // Ignore events for surfaces that are not our window.
-            if event.surface != *self.window.wl_surface() {
+            let (x, y) = (event.position.0 as i32, event.position.1 as i32);
+            let on_main = event.surface == *self.window.wl_surface();
+            let on_playlist = !on_main
+                && self
+                    .playlist
+                    .as_ref()
+                    .is_some_and(|pl| event.surface == *pl.window.wl_surface());
+            if on_playlist {
+                self.playlist_pointer(conn, &event.kind, x, y);
                 continue;
             }
-            let (x, y) = (event.position.0 as i32, event.position.1 as i32);
+            if !on_main {
+                continue; // an event for some other surface (e.g. the cursor surface)
+            }
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     // Set a normal arrow cursor; without this the window shows whatever cursor was

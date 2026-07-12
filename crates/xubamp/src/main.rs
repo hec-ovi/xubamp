@@ -209,8 +209,14 @@ fn main() {
             let player = Rc::clone(&player);
             move |out: &mut [f32]| player.borrow().read_scope(out)
         };
+        let playlist_source = {
+            let player = Rc::clone(&player);
+            move || player.borrow().playlist_view()
+        };
 
-        if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source, sample_source) {
+        if let Err(e) =
+            xubamp_wl::run(skin, title, on_command, playback_source, sample_source, playlist_source)
+        {
             eprintln!("xubamp: {e}");
             std::process::exit(1);
         }
@@ -226,7 +232,10 @@ fn main() {
             |command: xubamp_render::hit::Command| eprintln!("xubamp: command {command:?}");
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
-        if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source, sample_source) {
+        let playlist_source = || (Vec::new(), None);
+        if let Err(e) =
+            xubamp_wl::run(skin, title, on_command, playback_source, sample_source, playlist_source)
+        {
             eprintln!("xubamp: {e}");
             std::process::exit(1);
         }

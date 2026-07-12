@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use xubamp_audio::engine::AudioEngine;
 use xubamp_audio::playlist::Playlist;
 use xubamp_render::hit::{Playback, Transport};
+use xubamp_render::pledit;
 
 use crate::{track_title, transport_ops, EngineOp};
 
@@ -120,6 +121,22 @@ impl Player {
         {
             self.load_current();
         }
+    }
+
+    /// The playlist rows (numbered file stems; durations arrive once tracks are probed) and the
+    /// index of the currently-playing track, for the playlist window to render.
+    pub fn playlist_view(&self) -> (Vec<pledit::Row>, Option<usize>) {
+        let rows = self
+            .playlist
+            .tracks()
+            .iter()
+            .enumerate()
+            .map(|(i, path)| pledit::Row {
+                title: format!("{}. {}", i + 1, track_title(&path.to_string_lossy())),
+                duration: String::new(),
+            })
+            .collect();
+        (rows, self.playlist.current_index())
     }
 
     /// The current track's marquee title (its file stem), or empty when nothing is loaded.

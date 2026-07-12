@@ -165,6 +165,19 @@ in the repo and git history, nothing important lives only in chat.
       fresh, clock correction), a no-alloc proof of the drop branch, an ignored paused-scrub
       regression test, and an adversarial RT-safety review. Known follow-up: reviving a fully
       finished, drained track via Play can reactivate over an empty ring.
+  - (m) done, "finish the main window" round: the small indicators and a smoother visualizer.
+    * kbps (bitrate) / kHz (sample rate) / mono-stereo indicators. The kbps and kHz readouts use the
+      small `text.bmp` font (5x6 digits, not the big time digits): a 3-digit field at (111,43) and a
+      2-digit field at (156,43); `monoster.bmp` (56x24) lights "mono" (212,41) or "stereo" (239,41)
+      by the track's channel count. Geometry cross-checked against Webamp. The engine computes the
+      average bitrate from the file size and duration (true rate for PCM, VBR average for
+      compressed); kHz and channels come straight off the decoder. Digit placement and lit-word
+      selection are unit-tested.
+    * Frame-synced visualizer. Redraws were driven by a 33ms timer with no compositor frame callback,
+      so the effective rate sat below target. While playing, the visualizer now renders off the
+      surface's frame callbacks (each draw requests the next), running at the display's refresh rate;
+      the timer keeps the clock/marquee moving, kicks off the loop, and settles the visualizer when
+      playback stops.
   - (i) done: the main-window visualizer (spectrum analyzer, oscilloscope, off), cycled by clicking
     the panel. The realtime callback taps the post-gain output into a wait-free scope ring
     (`SharedState::push_scope`, a lock-free ring of atomics, downmixed mono, no allocation) that the

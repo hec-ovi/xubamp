@@ -188,6 +188,7 @@ pub fn run(
         sample_source: Box::new(sample_source),
         playlist: None,
         playlist_state: pledit::PlState::default(),
+        pl_size: (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H),
         playlist_source: Box::new(playlist_source),
         mod_ctrl: false,
         mod_shift: false,
@@ -303,6 +304,9 @@ struct App {
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
     playlist_state: pledit::PlState,
+    /// The playlist window's last size, remembered so reopening it restores the size (its on-screen
+    /// position cannot be restored: Wayland does not let a client set its toplevel's position).
+    pl_size: (i32, i32),
     /// Latest Ctrl/Shift state, mirrored from `update_modifiers`. Always present (unlike the
     /// keyboard-gated `modifiers`) so the pointer handler can read them for ctrl/shift-click
     /// selection; they simply stay false in a build without the keyboard feature.
@@ -512,7 +516,10 @@ impl App {
         if self.playlist.is_some() {
             return;
         }
-        let (w, h) = (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H);
+        // Reopen at the last size (position cannot be restored on Wayland). The minimum stays the
+        // default so it can still be shrunk back down.
+        let (w, h) = self.pl_size;
+        let (min_w, min_h) = (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H);
         let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
         let surface = self.compositor.create_surface(&self.qh);
         let window = self
@@ -522,7 +529,7 @@ impl App {
         window.set_app_id("xubamp");
         // Resizable: a minimum (the default size) but no maximum, so the compositor lets it grow when
         // the user drags the bottom-right grip. The pool auto-grows as larger buffers are requested.
-        window.set_min_size(Some((w as u32, h as u32)));
+        window.set_min_size(Some((min_w as u32, min_h as u32)));
         window.commit();
         let pool = SlotPool::new(w as usize * h as usize * 4, &self.shm).expect("playlist pool");
         self.playlist = Some(PlaylistWin {
@@ -785,16 +792,21 @@ impl WindowHandler for App {
             self.configured = true;
             self.draw();
         } else if self.playlist.as_ref().is_some_and(|pl| *window == pl.window) {
-            if let Some(pl) = &mut self.playlist {
-                // Render exactly the size the compositor asks for (clamped to the minimum), so the
-                // buffer always matches the configured geometry. A (None, None) suggestion (the
-                // initial map, or an un-minimize that keeps the size) leaves the current size.
-                // Snapping to a coarser grid here made the window drift on minimize/restore: the
-                // compositor re-sent its remembered size and we snapped it to a different one.
-                if let (Some(w), Some(h)) = configure.new_size {
-                    pl.width = (w.get() as i32).max(xubamp_skin::sprites::PLEDIT_W);
-                    pl.height = (h.get() as i32).max(xubamp_skin::sprites::PLEDIT_H);
+            // Render exactly the size the compositor asks for (clamped to the minimum), so the
+            // buffer always matches the configured geometry, and remember it so a reopen restores
+            // the size. A (None, None) suggestion (the initial map, or an un-minimize that keeps the
+            // size) leaves the current size. Snapping to a coarser grid here made the window drift
+            // on minimize/restore, so we do not.
+            if let (Some(w), Some(h)) = configure.new_size {
+                let w = (w.get() as i32).max(xubamp_skin::sprites::PLEDIT_W);
+                let h = (h.get() as i32).max(xubamp_skin::sprites::PLEDIT_H);
+                self.pl_size = (w, h);
+                if let Some(pl) = &mut self.playlist {
+                    pl.width = w;
+                    pl.height = h;
                 }
+            }
+            if let Some(pl) = &mut self.playlist {
                 pl.configured = true;
             }
             self.redraw_playlist();

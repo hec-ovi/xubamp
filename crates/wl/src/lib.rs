@@ -58,9 +58,15 @@ use wayland_client::protocol::wl_keyboard;
 /// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
 
-/// Redraw cadence while the visualizer is animating (~30 fps), fast enough for smooth bars but
-/// far cheaper than the display refresh rate.
+/// Redraw cadence while the visualizer is settling to baseline (paused/stopped), where there is no
+/// frame-callback loop. While actually playing the visualizer renders off the compositor's frame
+/// callbacks at the display's refresh rate instead (see [`App::draw`]/[`App::on_frame`]), which is
+/// far smoother than a fixed timer.
 const VIS_TICK: Duration = Duration::from_millis(33);
+
+/// While the frame-callback loop drives the visualizer, the timer only needs to poll the clock and
+/// re-arm the loop if it ever stalls; a slow cadence keeps that cheap.
+const FRAME_FALLBACK: Duration = Duration::from_millis(250);
 
 /// Fills a caller-owned buffer with the most recent output samples (mono, oldest first) for the
 /// visualizer to read each frame.
@@ -137,6 +143,9 @@ pub fn run(
         sample_source: Box::new(sample_source),
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
+        qh: qh.clone(),
+        frame_pending: false,
+        playing: false,
         pointer: None,
         seat: None,
         armed_move: None,
@@ -220,6 +229,15 @@ struct App {
     /// repeat when the seat advertises the capability. The `'static` here pins the loop's lifetime.
     #[cfg(feature = "keyboard")]
     loop_handle: LoopHandle<'static, App>,
+    /// A queue handle, kept so a redraw can request the next frame callback (the visualizer renders
+    /// off the compositor's frame callbacks while playing, for display-rate smoothness).
+    qh: QueueHandle<App>,
+    /// Whether a frame callback has been requested and not yet delivered, so we request at most one
+    /// in flight (a second request without a callback would stall the loop).
+    frame_pending: bool,
+    /// Whether audio is playing, from the last playback poll. Gates the frame-callback loop: the
+    /// visualizer only animates from live audio while this holds.
+    playing: bool,
     /// Set once the window has had its first `configure`, so the timer never attaches a buffer
     /// before the surface is mapped.
     configured: bool,
@@ -255,31 +273,30 @@ impl App {
         }
     }
 
-    /// Redraw-timer tick: poll the playback clock, step the marquee and the visualizer, and
-    /// recompose only if something moved. Returns how long to wait before the next tick: the fast
-    /// [`VIS_TICK`] while the visualizer animates, [`MARQUEE_TICK`] while a title scrolls, else a
-    /// second (just the clock). Does nothing before the first configure (nothing to draw into yet).
-    fn tick(&mut self) -> Duration {
-        if !self.configured {
-            // Nothing to draw into yet; retry soon so scrolling begins right after the first
-            // configure instead of waiting out a full second.
-            return MARQUEE_TICK;
-        }
-        let pb = (self.playback_source)();
-        let playing = pb.playing;
-        let mut changed = hit::on_tick(&mut self.state, pb);
+    /// Whether the visualizer should be animating from live audio right now: configured, a palette
+    /// present, a mode other than Off, and audio playing. While this holds the visualizer renders
+    /// off frame callbacks; otherwise the timer settles it to baseline.
+    fn animating(&self) -> bool {
+        self.configured
+            && self.playing
+            && self.skin.viscolor.is_some()
+            && self.state.vis.mode != VisMode::Off
+    }
 
-        // Step the marquee on its own ~100ms wall clock, NOT once per redraw tick: the visualizer
-        // can drive the timer at 33ms, and stepping the title every tick would scroll it ~3x too
-        // fast while playing. `is_scrolling` reports the scroll state independently of stepping.
-        // Only skins with text.bmp render a marquee.
-        let title_scrolls = self.skin.text.is_some() && marquee::is_scrolling(&self.state.title);
-        if title_scrolls {
+    /// Poll the playback clock (updating [`Self::playing`]) and step the marquee on its own ~100 ms
+    /// wall clock. Returns whether anything the display shows (time, marquee) changed. Does NOT step
+    /// the visualizer; callers do that when appropriate.
+    fn step_clock_and_marquee(&mut self) -> bool {
+        let pb = (self.playback_source)();
+        self.playing = pb.playing;
+        let mut changed = hit::on_tick(&mut self.state, pb);
+        // The marquee steps on its OWN 100 ms clock, not once per redraw: the frame-callback loop
+        // redraws at the display rate, and stepping the title every frame would scroll it far too
+        // fast. Only skins with text.bmp render a marquee.
+        if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
             let elapsed = self.last_marquee.elapsed();
             if elapsed >= MARQUEE_TICK {
                 changed |= marquee::advance(&mut self.state);
-                // Keep the phase accurate across fast ticks; resync (do not burst to catch up) if
-                // the window sat idle a while between steps.
                 self.last_marquee = if elapsed < MARQUEE_TICK * 2 {
                     self.last_marquee + MARQUEE_TICK
                 } else {
@@ -287,32 +304,68 @@ impl App {
                 };
             }
         }
+        changed
+    }
 
-        // Step the visualizer from the latest samples (or silence when not playing, so it settles),
-        // but only when the skin ships a palette and the mode is not Off. `advance` reports whether
-        // the drawing changed, so the settle-to-baseline frame is drawn and an idle vis stops.
-        let vis_active = self.skin.viscolor.is_some() && self.state.vis.mode != VisMode::Off;
-        let mut vis_changed = false;
-        if vis_active {
-            if playing {
-                (self.sample_source)(&mut self.vis_samples);
-            } else {
-                self.vis_samples.iter_mut().for_each(|s| *s = 0.0);
-            }
-            vis_changed = self.state.vis.advance(&self.vis_samples);
-            changed |= vis_changed;
+    /// Step the visualizer from the latest output samples (or silence when not playing, so it
+    /// settles), returning whether its drawing changed. No-op when the skin ships no palette or the
+    /// mode is Off.
+    fn step_vis(&mut self) -> bool {
+        if self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off {
+            return false;
         }
-        if changed {
-            self.redraw();
-        }
-        // Fast while the visualizer is live (playing) or still changing; otherwise the marquee or
-        // clock cadence, so an idle window barely wakes.
-        if (vis_active && playing) || vis_changed {
-            VIS_TICK
-        } else if title_scrolls {
-            MARQUEE_TICK
+        if self.playing {
+            (self.sample_source)(&mut self.vis_samples);
         } else {
-            Duration::from_secs(1)
+            self.vis_samples.iter_mut().for_each(|s| *s = 0.0);
+        }
+        self.state.vis.advance(&self.vis_samples)
+    }
+
+    /// A compositor frame callback: the display is ready for the next frame. Step the clock, marquee
+    /// and visualizer and redraw. The redraw re-arms the next frame callback while still animating,
+    /// so this self-sustains at the display's refresh rate; when playback stops it does not re-arm
+    /// and the timer takes over the (settling) visualizer.
+    fn on_frame(&mut self) {
+        self.frame_pending = false;
+        if !self.configured {
+            return;
+        }
+        self.step_clock_and_marquee();
+        self.step_vis();
+        self.redraw();
+    }
+
+    /// Redraw-timer tick: keeps the clock and marquee moving, and either drives the settling
+    /// visualizer directly (when not animating, since there are no frame callbacks then) or just
+    /// re-arms the frame-callback loop (when animating). Returns the next timer delay.
+    fn tick(&mut self) -> Duration {
+        if !self.configured {
+            // Nothing to draw into yet; retry soon so scrolling begins right after the first
+            // configure instead of waiting out a full second.
+            return MARQUEE_TICK;
+        }
+        let changed = self.step_clock_and_marquee();
+        if self.animating() {
+            // The frame-callback loop renders the visualizer. Kick it off (or restart it if it
+            // stalled) with a redraw, which re-arms the callback; otherwise just poll again soon.
+            if changed || !self.frame_pending {
+                self.redraw();
+            }
+            FRAME_FALLBACK
+        } else {
+            // Paused/stopped/vis-off: no frame callbacks, so the timer settles the visualizer.
+            let vis_changed = self.step_vis();
+            if changed || vis_changed {
+                self.redraw();
+            }
+            if vis_changed {
+                VIS_TICK
+            } else if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
+                MARQUEE_TICK
+            } else {
+                Duration::from_secs(1)
+            }
         }
     }
 
@@ -332,9 +385,18 @@ impl App {
             dst[3] = src[3];
         }
 
-        let surface = self.window.wl_surface();
+        // Own the surface handle so setting `frame_pending` below does not clash with a borrow of
+        // `self.window`.
+        let surface = self.window.wl_surface().clone();
         surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(surface).expect("attach buffer");
+        // While the visualizer is animating, ask to be woken for the next frame so it renders at the
+        // display's refresh rate. Guarded so exactly one callback is in flight; the callback and the
+        // commit below are what make it fire.
+        if self.animating() && !self.frame_pending {
+            surface.frame(&self.qh, surface.clone());
+            self.frame_pending = true;
+        }
+        buffer.attach_to(&surface).expect("attach buffer");
         surface.commit();
     }
 }
@@ -357,7 +419,7 @@ impl CompositorHandler for App {
     ) {
     }
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.draw();
+        self.on_frame();
     }
     fn surface_enter(
         &mut self,

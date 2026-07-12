@@ -61,14 +61,10 @@ use wayland_client::protocol::wl_keyboard;
 /// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
 
-/// Redraw cadence while the visualizer is settling to baseline (paused/stopped), where there is no
-/// frame-callback loop. While actually playing the visualizer renders off the compositor's frame
-/// callbacks at the display's refresh rate instead (see [`App::draw`]/[`App::on_frame`]), which is
-/// far smoother than a fixed timer.
-const VIS_TICK: Duration = Duration::from_millis(33);
-
-/// While the frame-callback loop drives the visualizer, the timer only needs to poll the clock and
-/// re-arm the loop if it ever stalls; a slow cadence keeps that cheap.
+/// While the frame-callback loop drives the visualizer at the display's refresh rate (see
+/// [`App::draw`]/[`App::on_frame`]), the timer only needs to poll the clock and re-arm the loop if
+/// it ever stalls; a slow cadence keeps that cheap. When paused the visualizer is frozen, so the
+/// timer just keeps the clock and marquee moving.
 const FRAME_FALLBACK: Duration = Duration::from_millis(250);
 
 /// Fills a caller-owned buffer with the most recent output samples (mono, oldest first) for the
@@ -315,18 +311,15 @@ impl App {
         changed
     }
 
-    /// Step the visualizer from the latest output samples (or silence when not playing, so it
-    /// settles), returning whether its drawing changed. No-op when the skin ships no palette or the
-    /// mode is Off.
+    /// Step the visualizer from the latest output samples, returning whether its drawing changed.
+    /// No-op (returns `false`) when the skin ships no palette, the mode is Off, or playback is
+    /// paused/stopped: pausing FREEZES the visualizer on its last frame rather than feeding it
+    /// silence (which would decay it to the baseline).
     fn step_vis(&mut self) -> bool {
-        if self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off {
+        if self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off || !self.playing {
             return false;
         }
-        if self.playing {
-            (self.sample_source)(&mut self.vis_samples);
-        } else {
-            self.vis_samples.iter_mut().for_each(|s| *s = 0.0);
-        }
+        (self.sample_source)(&mut self.vis_samples);
         self.state.vis.advance(&self.vis_samples)
     }
 
@@ -362,14 +355,12 @@ impl App {
             }
             FRAME_FALLBACK
         } else {
-            // Paused/stopped/vis-off: no frame callbacks, so the timer settles the visualizer.
-            let vis_changed = self.step_vis();
-            if changed || vis_changed {
+            // Paused/stopped/vis-off: no frame callbacks. The visualizer is frozen on its last frame
+            // (step_vis is a no-op when not playing), so only the clock and marquee move here.
+            if changed {
                 self.redraw();
             }
-            if vis_changed {
-                VIS_TICK
-            } else if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
+            if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
                 MARQUEE_TICK
             } else {
                 Duration::from_secs(1)

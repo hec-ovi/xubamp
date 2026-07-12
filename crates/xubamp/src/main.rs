@@ -14,6 +14,10 @@ use xubamp_skin::bmp::Image;
 use xubamp_skin::container::SkinArchive;
 use xubamp_skin::{default_skin, Skin};
 
+/// The playlist-to-engine player. Only with the audio feature (it owns the PipeWire-backed engine).
+#[cfg(feature = "audio")]
+mod player;
+
 /// A local skin used only during development. It lives under `skins/`, which is gitignored
 /// (third-party art, never committed or shipped), so a released binary never finds it and
 /// falls through to the built-in default. This is the "use the XMMS skin for now" hook.
@@ -40,17 +44,18 @@ fn track_title(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Split CLI arguments into an optional skin path and an optional media path, by extension.
-/// The first of each kind wins; anything unrecognized is ignored. Kept pure and iterator-based
-/// so it is unit-testable without a real argv.
-fn classify<I: IntoIterator<Item = String>>(args: I) -> (Option<String>, Option<String>) {
+/// Split CLI arguments into an optional skin path and the media playlist, by extension. The first
+/// skin wins; every media file is kept, in order, so `xubamp a.mp3 b.mp3` (or a shell glob) builds a
+/// playlist. Anything unrecognized is ignored. Pure and iterator-based, so it is unit-testable
+/// without a real argv.
+fn classify<I: IntoIterator<Item = String>>(args: I) -> (Option<String>, Vec<String>) {
     let mut skin = None;
-    let mut media = None;
+    let mut media = Vec::new();
     for arg in args {
         if has_ext(&arg, "wsz") || has_ext(&arg, "zip") {
             skin.get_or_insert(arg);
         } else if AUDIO_EXTS.iter().any(|e| has_ext(&arg, e)) {
-            media.get_or_insert(arg);
+            media.push(arg);
         }
     }
     (skin, media)
@@ -132,11 +137,12 @@ fn transport_ops(t: xubamp_render::hit::Transport, playing: bool, finished: bool
 }
 
 fn main() {
-    let (skin_arg, media_arg) = classify(std::env::args().skip(1));
+    let (skin_arg, media_args) = classify(std::env::args().skip(1));
     let skin = resolve_skin(skin_arg.as_deref());
 
-    // The marquee shows the track's file name (tag-based titles arrive with the playlist).
-    let title = media_arg.as_deref().map(track_title).unwrap_or_default();
+    // The marquee shows the first track's file name (tag-based titles arrive later); it updates per
+    // track as the playlist advances.
+    let title = media_args.first().map(|p| track_title(p)).unwrap_or_default();
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
     // window would display, then exit without opening a window. `XUBAMP_TITLE` overrides the
@@ -163,126 +169,67 @@ fn main() {
         return;
     }
 
-    // Start playback if built with audio and given a track. The engine runs on its own threads,
-    // so the window loop below is unaffected; keeping `_engine` in scope until after `run`
-    // returns means dropping it (window closed) stops playback and joins its threads cleanly.
+    // Play the media playlist (with the audio feature). The Player owns the current AudioEngine and
+    // switches tracks on prev/next and auto-advance; it lives on this (the UI) thread and is shared
+    // with the window's callbacks through Rc<RefCell>, which the calloop event loop borrows one at a
+    // time (all on this thread, so no locking).
     #[cfg(feature = "audio")]
-    let _engine = media_arg.as_deref().and_then(|path| {
-        match xubamp_audio::engine::AudioEngine::play(Path::new(path)) {
-            Ok(engine) => {
-                eprintln!("xubamp: playing {path}");
-                Some(engine)
+    {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let tracks: Vec<std::path::PathBuf> =
+            media_args.iter().map(std::path::PathBuf::from).collect();
+        let player = Rc::new(RefCell::new(player::Player::new(tracks)));
+        player.borrow_mut().start(); // begin the first track
+
+        let on_command = {
+            let player = Rc::clone(&player);
+            move |command: xubamp_render::hit::Command| {
+                use xubamp_render::hit::Command;
+                let mut player = player.borrow_mut();
+                match command {
+                    Command::Transport(t) => player.transport(t),
+                    Command::Volume(v) => player.set_volume(v),
+                    Command::Balance(b) => player.set_balance(b),
+                    Command::Seek(fraction) => player.seek_fraction(fraction),
+                    Command::Restart => player.restart(),
+                }
             }
-            Err(e) => {
-                eprintln!("xubamp: cannot play {path}: {e}");
-                None
+        };
+        let playback_source = {
+            let player = Rc::clone(&player);
+            move || {
+                let mut player = player.borrow_mut();
+                player.poll(); // auto-advance to the next track when the current one ends
+                player.playback()
             }
+        };
+        let sample_source = {
+            let player = Rc::clone(&player);
+            move |out: &mut [f32]| player.borrow().read_scope(out)
+        };
+
+        if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source, sample_source) {
+            eprintln!("xubamp: {e}");
+            std::process::exit(1);
         }
-    });
-    #[cfg(not(feature = "audio"))]
-    if media_arg.is_some() {
-        eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
     }
 
-    // Bridge UI commands from the window to the engine. Transport (Play/Pause/Stop) goes through the
-    // pure `transport_ops` policy: Play forces the track from the top, Pause toggles pause/resume,
-    // Stop halts and rewinds; Prev/Next/Eject wait for a playlist. Volume and balance retune the
-    // realtime gains live; Seek repositions playback to the target fraction. Without the audio
-    // feature, commands are just logged.
-    #[cfg(feature = "audio")]
-    let on_command = {
-        let handle = _engine.as_ref().map(|engine| engine.handle());
-        move |command: xubamp_render::hit::Command| {
-            use xubamp_render::hit::Command;
-            match command {
-                Command::Transport(t) => {
-                    use xubamp_render::hit::Transport;
-                    // Play/Pause depend on the live state (resume vs restart, pause vs unpause).
-                    let playing = handle.as_ref().is_some_and(|h| h.is_playing());
-                    let finished = handle.as_ref().is_some_and(|h| h.is_finished());
-                    let ops = transport_ops(t, playing, finished);
-                    // Prev/Next/Eject map to nothing because there is no playlist yet; log that.
-                    // Play-while-playing also maps to nothing, but that is the intended no-op.
-                    if ops.is_empty() && matches!(t, Transport::Prev | Transport::Next | Transport::Eject) {
-                        eprintln!("xubamp: {t:?} not wired yet (needs a playlist)");
-                    }
-                    if let Some(h) = &handle {
-                        for op in ops {
-                            match op {
-                                EngineOp::SeekToStart => h.seek_to_start(),
-                                EngineOp::SetActive(active) => h.set_active(active),
-                            }
-                        }
-                    }
-                }
-                Command::Volume(v) => {
-                    if let Some(h) = &handle {
-                        h.set_volume(v);
-                    }
-                }
-                Command::Balance(b) => {
-                    if let Some(h) = &handle {
-                        h.set_balance(b);
-                    }
-                }
-                Command::Seek(fraction) => {
-                    if let Some(h) = &handle {
-                        h.seek_fraction(fraction);
-                    }
-                }
-                Command::Restart => {
-                    // The `x` hotkey: force the track from the top regardless of play state.
-                    if let Some(h) = &handle {
-                        h.seek_to_start();
-                        h.set_active(true);
-                    }
-                }
-            }
-        }
-    };
+    // Without the audio feature: no playback, commands are logged, the clock stays blank.
     #[cfg(not(feature = "audio"))]
-    let on_command = |command: xubamp_render::hit::Command| {
-        eprintln!("xubamp: command {command:?}");
-    };
-
-    // Feed the window's redraw tick a clock snapshot. With audio, report the engine's elapsed
-    // seconds, the 0..=1 seek-bar position, and the total duration (all `None` when nothing is
-    // playing, blanking the display and parking the thumb at the start); without it, always blank.
-    #[cfg(feature = "audio")]
-    let playback_source = {
-        let handle = _engine.as_ref().map(|engine| engine.handle());
-        move || match &handle {
-            Some(h) => xubamp_render::hit::Playback {
-                elapsed: Some(h.elapsed_secs()),
-                position: h.position_fraction(),
-                duration: h.duration_secs(),
-                playing: h.is_playing(),
-                kbps: h.bitrate_kbps(),
-                khz: h.khz(),
-                channels: h.channels(),
-            },
-            None => xubamp_render::hit::Playback::default(),
+    {
+        if !media_args.is_empty() {
+            eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
         }
-    };
-    #[cfg(not(feature = "audio"))]
-    let playback_source = xubamp_render::hit::Playback::default;
-
-    // Feed the visualizer the most recent output samples (silence without audio, so it shows the
-    // flat baseline). The window only pulls this while a visualization mode is active.
-    #[cfg(feature = "audio")]
-    let sample_source = {
-        let handle = _engine.as_ref().map(|engine| engine.handle());
-        move |out: &mut [f32]| match &handle {
-            Some(h) => h.read_scope(out),
-            None => out.iter_mut().for_each(|s| *s = 0.0),
+        let on_command =
+            |command: xubamp_render::hit::Command| eprintln!("xubamp: command {command:?}");
+        let playback_source = xubamp_render::hit::Playback::default;
+        let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
+        if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source, sample_source) {
+            eprintln!("xubamp: {e}");
+            std::process::exit(1);
         }
-    };
-    #[cfg(not(feature = "audio"))]
-    let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
-
-    if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source, sample_source) {
-        eprintln!("xubamp: {e}");
-        std::process::exit(1);
     }
 }
 
@@ -358,27 +305,27 @@ mod tests {
     fn classifies_skin_and_media_by_extension() {
         let (skin, media) = classify(s(&["My Skin.wsz", "song.mp3"]));
         assert_eq!(skin.as_deref(), Some("My Skin.wsz"));
-        assert_eq!(media.as_deref(), Some("song.mp3"));
+        assert_eq!(media, ["song.mp3"]);
     }
 
     #[test]
     fn order_independent_and_case_insensitive() {
         let (skin, media) = classify(s(&["track.MP3", "Base.WSZ"]));
         assert_eq!(skin.as_deref(), Some("Base.WSZ"));
-        assert_eq!(media.as_deref(), Some("track.MP3"));
+        assert_eq!(media, ["track.MP3"]);
     }
 
     #[test]
-    fn first_of_each_kind_wins_and_unknown_ignored() {
+    fn first_skin_wins_all_media_kept_in_order_unknown_ignored() {
         let (skin, media) = classify(s(&["notes.txt", "a.mp3", "b.wav", "one.wsz", "two.wsz"]));
-        assert_eq!(skin.as_deref(), Some("one.wsz"));
-        assert_eq!(media.as_deref(), Some("a.mp3"));
+        assert_eq!(skin.as_deref(), Some("one.wsz"), "the first skin wins");
+        assert_eq!(media, ["a.mp3", "b.wav"], "every media file is kept as a playlist, in order");
     }
 
     #[test]
     fn no_recognized_args_yields_none() {
         let (skin, media) = classify(s(&["readme.md"]));
         assert!(skin.is_none());
-        assert!(media.is_none());
+        assert!(media.is_empty());
     }
 }

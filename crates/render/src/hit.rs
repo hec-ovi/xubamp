@@ -246,7 +246,7 @@ impl Default for UiState {
 /// elapsed seconds (the MM:SS display), the 0..=1 position (the seek-bar thumb), and the total
 /// duration in seconds (so a seek-bar drag can preview the target time). All `None` when nothing
 /// is playing or the length is unknown. `Eq` is not derived because `position` is an `f32`.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Playback {
     pub elapsed: Option<u32>,
     pub position: Option<f32>,
@@ -259,6 +259,9 @@ pub struct Playback {
     pub kbps: Option<u32>,
     pub khz: Option<u32>,
     pub channels: u8,
+    /// The current track's marquee title, so switching tracks (a playlist) updates the marquee.
+    /// Empty when nothing is loaded. (Not `Copy` because of this; the string is short.)
+    pub title: String,
 }
 
 /// What the platform layer should do after handling a pointer event. Every field defaults to
@@ -566,6 +569,13 @@ fn seek_key(state: &mut UiState, delta_secs: f32) -> Outcome {
 pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
     let mut changed = state.duration != pb.duration;
     state.duration = pb.duration;
+    // The marquee title changes when the playlist moves to another track: adopt it and restart the
+    // scroll from the left so the new title reads from its start.
+    if state.title != pb.title {
+        state.title = pb.title;
+        state.marquee_offset = 0;
+        changed = true;
+    }
     // The kbps/kHz/channel indicators are constant per track; copy them and redraw on any change
     // (which is really just once, when a track loads or clears).
     if state.kbps != pb.kbps || state.khz != pb.khz || state.channels != pb.channels {

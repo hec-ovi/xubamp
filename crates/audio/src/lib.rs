@@ -7,6 +7,7 @@
 pub mod channels;
 pub mod command;
 pub mod decode;
+pub mod playlist;
 pub mod ring;
 
 // PipeWire realtime output + the engine that drives it. Behind the `output` feature so the

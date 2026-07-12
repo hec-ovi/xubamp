@@ -252,6 +252,10 @@ pub struct UiState {
     /// loaded or the length is unknown. Set from the clock each tick, except while the seek bar is
     /// being dragged, when it follows the cursor (a preview) until release commits the seek.
     pub position: Option<f32>,
+    /// A committed seek target (0..=1 fraction) whose landing the engine's clock has not yet caught
+    /// up to. While set, the display holds here and keyboard seeks accumulate from it, so a held
+    /// arrow ramps smoothly instead of fighting the lagging clock. Cleared once the clock arrives.
+    pub seek_target: Option<f32>,
     /// Total track length in whole seconds, or `None` when unknown. Kept so a seek-bar drag can
     /// preview the target time in the MM:SS display.
     pub duration: Option<u32>,
@@ -285,6 +289,7 @@ impl Default for UiState {
             balance: 0,
             dragging: None,
             position: None,
+            seek_target: None,
             duration: None,
             vis: VisState::default(),
             kbps: None,
@@ -493,8 +498,13 @@ pub fn on_motion(state: &mut UiState, x: i32, _y: i32) -> Outcome {
 pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
     if let Some(slider) = state.dragging.take() {
         let command = match slider {
-            // Volume and balance already emitted their value live; only the seek bar defers.
-            Slider::Position => state.position.map(Command::Seek),
+            // Volume and balance already emitted their value live; only the seek bar defers. Hold
+            // the released position as the seek target so the clock does not snap the thumb back to
+            // the pre-seek spot before the engine lands there.
+            Slider::Position => {
+                state.seek_target = state.position;
+                state.position.map(Command::Seek)
+            }
             Slider::Volume | Slider::Balance => None,
         };
         return Outcome {
@@ -563,6 +573,11 @@ const VOLUME_STEP: i32 = 2;
 
 /// Seek distance per Left/Right key, in seconds. Classic Winamp and Webamp both seek 5 seconds.
 const SEEK_STEP_SECS: f32 = 5.0;
+
+/// How close (in seconds) the engine's clock must get to a committed seek target before the display
+/// stops holding at the target and resumes following the clock. Smaller than one seek step so a
+/// single tap still holds until the seek lands, and large enough to absorb seek/clock granularity.
+const SEEK_SETTLE_SECS: f32 = 2.0;
 
 /// Map a decoded key press to its effect on `state`, returning the [`Outcome`] for the platform
 /// layer to carry out (emit a command, redraw). `is_repeat` is true when the key is auto-repeating
@@ -638,14 +653,20 @@ fn volume_key(state: &mut UiState, step: i32) -> Outcome {
 /// (the clock tick would otherwise lag up to a second); the engine's clock reconfirms them when
 /// the seek lands.
 fn seek_key(state: &mut UiState, delta_secs: f32) -> Outcome {
-    let (Some(pos), Some(dur)) = (state.position, state.duration) else {
+    let Some(dur) = state.duration else {
+        return Outcome::default();
+    };
+    // Accumulate from a pending seek target if we have one (so a held key ramps steadily) rather
+    // than the clock-driven position, which lags the seek and would make repeats flip-flop.
+    let Some(base) = state.seek_target.or(state.position) else {
         return Outcome::default();
     };
     if dur == 0 || state.dragging == Some(Slider::Position) {
         return Outcome::default();
     }
-    let target = (pos * dur as f32 + delta_secs).clamp(0.0, dur as f32);
+    let target = (base * dur as f32 + delta_secs).clamp(0.0, dur as f32);
     let fraction = target / dur as f32;
+    state.seek_target = Some(fraction);
     state.position = Some(fraction);
     state.elapsed = Some(target.round() as u32);
     Outcome {
@@ -685,7 +706,29 @@ pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
         state.repeat_on = pb.repeat;
         changed = true;
     }
-    if state.dragging != Some(Slider::Position) {
+    // The seek bar and time: a pointer drag owns them outright; after a committed seek (keyboard or
+    // drag-release) hold the target until the engine's clock reaches it, so the thumb does not snap
+    // back to the lagging pre-seek position (which made held-arrow seeks jitter back and forth).
+    if state.dragging == Some(Slider::Position) {
+        // The drag preview owns the thumb and time; nothing to sync from the clock here.
+    } else if let Some(target) = state.seek_target {
+        let reached = match (pb.position, state.duration) {
+            (Some(p), Some(d)) if d > 0 => ((p - target) * d as f32).abs() < SEEK_SETTLE_SECS,
+            // No usable clock (unseekable, ended, or unknown length): stop holding.
+            _ => true,
+        };
+        if reached {
+            state.seek_target = None;
+            if state.elapsed != pb.elapsed {
+                state.elapsed = pb.elapsed;
+                changed = true;
+            }
+            if state.position != pb.position {
+                state.position = pb.position;
+                changed = true;
+            }
+        }
+    } else {
         if state.elapsed != pb.elapsed {
             state.elapsed = pb.elapsed;
             changed = true;
@@ -1242,15 +1285,20 @@ mod tests {
         assert!((s.position.unwrap() - 0.55).abs() < 1e-6, "thumb moved optimistically");
         assert!(out.redraw);
 
+        // Reset the pending target too, to test an independent seek from the halfway point (a held
+        // key instead accumulates, which its own test covers).
+        s.seek_target = None;
         s.position = Some(0.5);
         let out = on_key(&mut s, KeyPress::Left, false);
         assert!((seek_frac(&out) - 0.45).abs() < 1e-6, "50s - 5s = 45%");
 
         // Near the ends, the target clamps into [0, duration] (0.0 and 1.0 are exact).
+        s.seek_target = None;
         s.position = Some(0.02); // 2s in
         let out = on_key(&mut s, KeyPress::Left, false);
         assert_eq!(out.command, Some(Command::Seek(0.0)), "clamps to the start, not negative");
         assert_eq!(s.elapsed, Some(0));
+        s.seek_target = None;
         s.position = Some(0.99); // 99s in
         let out = on_key(&mut s, KeyPress::Right, true); // repeat also seeks
         assert_eq!(out.command, Some(Command::Seek(1.0)), "clamps to the end");
@@ -1274,5 +1322,63 @@ mod tests {
         };
         assert_eq!(on_key(&mut d, KeyPress::Right, false), Outcome::default(), "yields to the drag");
         assert_eq!(d.position, Some(0.5), "preview untouched");
+    }
+
+    #[test]
+    fn held_seek_accumulates_against_the_target_not_the_lagging_clock() {
+        let mut s = UiState { duration: Some(200), position: Some(0.5), ..Default::default() };
+        // First Right: 100s -> 105s, and it records the target.
+        let o1 = on_key(&mut s, KeyPress::Right, false);
+        assert!(matches!(o1.command, Some(Command::Seek(f)) if (f - 105.0 / 200.0).abs() < 1e-4));
+        assert_eq!(s.seek_target, Some(105.0 / 200.0));
+        // A clock tick arrives still reporting the OLD position (the async seek has not landed): the
+        // display must hold at the target, not snap back to 100s.
+        on_tick(
+            &mut s,
+            Playback { position: Some(0.5), elapsed: Some(100), duration: Some(200), ..Default::default() },
+        );
+        assert_eq!(s.position, Some(105.0 / 200.0), "held at the target while the clock lags");
+        assert_eq!(s.seek_target, Some(105.0 / 200.0));
+        // Second Right (auto-repeat) accumulates from the target -> 110s, not from the lagging clock.
+        let o2 = on_key(&mut s, KeyPress::Right, true);
+        assert!(matches!(o2.command, Some(Command::Seek(f)) if (f - 110.0 / 200.0).abs() < 1e-4));
+    }
+
+    #[test]
+    fn the_display_resumes_the_clock_once_the_seek_lands() {
+        let mut s = UiState { duration: Some(200), position: Some(0.5), ..Default::default() };
+        on_key(&mut s, KeyPress::Right, false); // target 105s
+        // The engine lands near 105s: the hold clears and the clock takes over.
+        on_tick(
+            &mut s,
+            Playback { position: Some(105.0 / 200.0), elapsed: Some(105), duration: Some(200), ..Default::default() },
+        );
+        assert_eq!(s.seek_target, None, "cleared once the clock reached the target");
+        assert_eq!(s.position, Some(105.0 / 200.0));
+        // A normal tick now advances freely.
+        on_tick(
+            &mut s,
+            Playback { position: Some(106.0 / 200.0), elapsed: Some(106), duration: Some(200), ..Default::default() },
+        );
+        assert_eq!(s.position, Some(106.0 / 200.0));
+    }
+
+    #[test]
+    fn a_backward_seek_holds_until_the_clock_falls_back() {
+        let mut s = UiState { duration: Some(200), position: Some(0.5), ..Default::default() };
+        on_key(&mut s, KeyPress::Left, false); // 100s -> 95s
+        assert_eq!(s.seek_target, Some(95.0 / 200.0));
+        // Clock still at 100s: must NOT snap forward to 100.
+        on_tick(
+            &mut s,
+            Playback { position: Some(0.5), elapsed: Some(100), duration: Some(200), ..Default::default() },
+        );
+        assert_eq!(s.position, Some(95.0 / 200.0), "backward seek holds at the target");
+        // Engine falls back to 95s: resume the clock.
+        on_tick(
+            &mut s,
+            Playback { position: Some(95.0 / 200.0), elapsed: Some(95), duration: Some(200), ..Default::default() },
+        );
+        assert_eq!(s.seek_target, None);
     }
 }

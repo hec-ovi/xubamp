@@ -194,6 +194,7 @@ fn main() {
                     Command::Balance(b) => player.set_balance(b),
                     Command::Seek(fraction) => player.seek_fraction(fraction),
                     Command::Restart => player.restart(),
+                    Command::ToggleMode(mode) => player.toggle_mode(mode),
                 }
             }
         };

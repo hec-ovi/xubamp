@@ -10,13 +10,15 @@ pub struct Playlist {
     tracks: Vec<PathBuf>,
     /// Index of the current track, or `None` when the list is empty.
     current: Option<usize>,
+    /// When set, `next`/`prev` wrap around the ends instead of stopping (repeat-all).
+    repeat: bool,
 }
 
 impl Playlist {
     /// Build a playlist from `tracks`; the first track (if any) becomes current.
     pub fn new(tracks: Vec<PathBuf>) -> Self {
         let current = (!tracks.is_empty()).then_some(0);
-        Self { tracks, current }
+        Self { tracks, current, repeat: false }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -42,28 +44,51 @@ impl Playlist {
         self.current.map(|i| self.tracks[i].as_path())
     }
 
-    /// Advance to the next track and return it, or `None` at the end of the list (the current
-    /// selection is left unchanged, so the caller stops rather than wrapping).
+    /// Whether repeat-all is on.
+    pub fn repeat(&self) -> bool {
+        self.repeat
+    }
+
+    /// Turn repeat-all on/off. When on, `next`/`prev` wrap around the ends.
+    pub fn set_repeat(&mut self, on: bool) {
+        self.repeat = on;
+    }
+
+    /// Advance to the next track and return it. At the end of the list this returns `None` (the
+    /// caller stops), or wraps to the first track when repeat is on.
     #[allow(clippy::should_implement_trait)] // a playlist "next", not an iterator
     pub fn next(&mut self) -> Option<PathBuf> {
         let i = self.current?;
-        if i + 1 < self.tracks.len() {
-            self.current = Some(i + 1);
-            Some(self.tracks[i + 1].clone())
+        let n = self.tracks.len();
+        let j = if i + 1 < n {
+            Some(i + 1)
+        } else if self.repeat {
+            Some(0)
         } else {
             None
-        }
+        };
+        j.map(|j| {
+            self.current = Some(j);
+            self.tracks[j].clone()
+        })
     }
 
-    /// Go to the previous track and return it, or `None` at the start of the list (stays put).
+    /// Go to the previous track and return it. At the start this returns `None` (stays put), or
+    /// wraps to the last track when repeat is on.
     pub fn prev(&mut self) -> Option<PathBuf> {
         let i = self.current?;
-        if i > 0 {
-            self.current = Some(i - 1);
-            Some(self.tracks[i - 1].clone())
+        let n = self.tracks.len();
+        let j = if i > 0 {
+            Some(i - 1)
+        } else if self.repeat {
+            Some(n - 1)
         } else {
             None
-        }
+        };
+        j.map(|j| {
+            self.current = Some(j);
+            self.tracks[j].clone()
+        })
     }
 
     /// Select track `i` and return it, or `None` if `i` is out of range (selection unchanged).
@@ -133,6 +158,18 @@ mod tests {
         assert_eq!(p.current_index(), Some(2));
         // Out of range: no change.
         assert_eq!(p.select(9), None);
+        assert_eq!(p.current_index(), Some(2));
+    }
+
+    #[test]
+    fn repeat_wraps_at_both_ends() {
+        let mut p = pl(&["a", "b", "c"]);
+        p.set_repeat(true);
+        assert!(p.repeat());
+        p.select(2);
+        assert_eq!(p.next().as_deref(), Some(Path::new("a")), "end wraps to the first with repeat");
+        assert_eq!(p.current_index(), Some(0));
+        assert_eq!(p.prev().as_deref(), Some(Path::new("c")), "start wraps to the last with repeat");
         assert_eq!(p.current_index(), Some(2));
     }
 

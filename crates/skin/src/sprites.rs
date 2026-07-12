@@ -149,6 +149,18 @@ pub const PL_OFF_PRESSED: Placement = Placement::new(Rect::new(69, 61, 23, 12), 
 pub const PL_ON: Placement = Placement::new(Rect::new(23, 73, 23, 12), 242, 58);
 pub const PL_ON_PRESSED: Placement = Placement::new(Rect::new(69, 73, 23, 12), 242, 58);
 
+/// The shuffle (47x15) and repeat (28x15) mode buttons on the main window, from `shufrep.bmp`. The
+/// "on" variant is the lower rows (the mode is enabled); each has a pressed row just below it. Dests
+/// are the classic (164,89) for shuffle and (210,89) for repeat.
+pub const SHUFFLE_OFF: Placement = Placement::new(Rect::new(28, 0, 47, 15), 164, 89);
+pub const SHUFFLE_OFF_PRESSED: Placement = Placement::new(Rect::new(28, 15, 47, 15), 164, 89);
+pub const SHUFFLE_ON: Placement = Placement::new(Rect::new(28, 30, 47, 15), 164, 89);
+pub const SHUFFLE_ON_PRESSED: Placement = Placement::new(Rect::new(28, 45, 47, 15), 164, 89);
+pub const REPEAT_OFF: Placement = Placement::new(Rect::new(0, 0, 28, 15), 210, 89);
+pub const REPEAT_OFF_PRESSED: Placement = Placement::new(Rect::new(0, 15, 28, 15), 210, 89);
+pub const REPEAT_ON: Placement = Placement::new(Rect::new(0, 30, 28, 15), 210, 89);
+pub const REPEAT_ON_PRESSED: Placement = Placement::new(Rect::new(0, 45, 28, 15), 210, 89);
+
 // --- The playlist editor (PLEDIT) window, from pledit.bmp. Built from tiles so it can resize; we
 // draw the classic collapsed size for now. Coordinates cross-checked against Webamp. ---
 

@@ -39,6 +39,13 @@ pub enum WindowToggle {
     Playlist,
 }
 
+/// The two main-window mode buttons: shuffle and repeat. They light while their mode is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeButton {
+    Shuffle,
+    Repeat,
+}
+
 /// Title-button identity for each entry of [`sprites::TITLE_BUTTONS_PRESSED`], in the same order.
 pub const TITLE_BUTTON_ORDER: [TitleButton; 4] = [
     TitleButton::Options,
@@ -73,6 +80,8 @@ pub enum Command {
     /// Force the current track to restart from the top: the `x` hotkey, which (unlike the Play
     /// button) restarts even while already playing.
     Restart,
+    /// Toggle the shuffle or repeat playback mode (the main-window mode buttons).
+    ToggleMode(ModeButton),
 }
 
 /// A decoded key the main window responds to, produced by the platform layer from its keysym so
@@ -121,6 +130,8 @@ pub enum Region {
     Vis,
     /// The EQ or PL toggle button (opens/closes the equalizer or playlist window).
     Toggle(WindowToggle),
+    /// The shuffle or repeat mode button.
+    Mode(ModeButton),
     /// Not over any interactive element (the window body).
     None,
 }
@@ -188,6 +199,12 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     if in_button(&sprites::PL_OFF, x, y) {
         return Region::Toggle(WindowToggle::Playlist);
     }
+    if in_button(&sprites::SHUFFLE_OFF, x, y) {
+        return Region::Mode(ModeButton::Shuffle);
+    }
+    if in_button(&sprites::REPEAT_OFF, x, y) {
+        return Region::Mode(ModeButton::Repeat);
+    }
     if y < TITLEBAR_H {
         return Region::TitleBar;
     }
@@ -207,6 +224,11 @@ pub struct UiState {
     pub pl_open: bool,
     /// The EQ/PL toggle button currently held (drawn pressed), or `None`.
     pub pressed_toggle: Option<WindowToggle>,
+    /// Whether shuffle / repeat modes are on (their buttons light while on).
+    pub shuffle_on: bool,
+    pub repeat_on: bool,
+    /// The shuffle/repeat mode button currently held (drawn pressed), or `None`.
+    pub pressed_mode: Option<ModeButton>,
     /// Elapsed play time shown in the MM:SS display, in whole seconds, or `None` to blank it
     /// (nothing loaded or stopped). The platform timer refreshes it once a second via
     /// [`on_tick`], so composition can read it without touching the audio engine.
@@ -250,6 +272,9 @@ impl Default for UiState {
             eq_open: false,
             pl_open: false,
             pressed_toggle: None,
+            shuffle_on: false,
+            repeat_on: false,
+            pressed_mode: None,
             elapsed: None,
             title: String::new(),
             marquee_offset: 0,
@@ -278,6 +303,9 @@ pub struct Playback {
     /// Whether audio is actively playing (not paused/stopped). Gates the visualizer animation: the
     /// platform layer feeds live samples while playing and silence otherwise, so it settles.
     pub playing: bool,
+    /// Whether playback is STOPPED (as opposed to merely paused). Stop clears the visualizer to its
+    /// baseline (a reset), while a pause freezes it on its last frame.
+    pub stopped: bool,
     /// Bitrate in kbps, sample rate in kHz, and channel count, for the small indicators. `None`/0
     /// when nothing is loaded. Constant per track, but polled with the clock for simplicity.
     pub kbps: Option<u32>,
@@ -286,6 +314,9 @@ pub struct Playback {
     /// The current track's marquee title, so switching tracks (a playlist) updates the marquee.
     /// Empty when nothing is loaded. (Not `Copy` because of this; the string is short.)
     pub title: String,
+    /// Whether shuffle / repeat modes are on, so their main-window buttons light.
+    pub shuffle: bool,
+    pub repeat: bool,
 }
 
 /// What the platform layer should do after handling a pointer event. Every field defaults to
@@ -389,6 +420,13 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
                 ..Default::default()
             }
         }
+        Region::Mode(m) => {
+            state.pressed_mode = Some(m);
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
         Region::None => Outcome::default(),
     }
 }
@@ -480,6 +518,15 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
             ..Default::default()
         };
     }
+    if let Some(m) = state.pressed_mode.take() {
+        // The shuffle/repeat mode toggle fires only if released over the same button.
+        let fired = hit_test(x, y) == Region::Mode(m);
+        return Outcome {
+            command: fired.then_some(Command::ToggleMode(m)),
+            redraw: true,
+            ..Default::default()
+        };
+    }
     match state.pressed.take() {
         Some(b) => {
             let fired = hit_test(x, y) == Region::Transport(b);
@@ -498,11 +545,12 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
 /// and the release past the edge, so the drag should continue rather than abort here. Returns
 /// whether a redraw is needed.
 pub fn on_leave(state: &mut UiState) -> bool {
-    // Cancel any armed button (transport, title-bar, or EQ/PL toggle) so none stays stuck down.
+    // Cancel any armed button so none stays stuck down.
     let transport = state.pressed.take().is_some();
     let title = state.pressed_title.take().is_some();
     let toggle = state.pressed_toggle.take().is_some();
-    transport || title || toggle
+    let mode = state.pressed_mode.take().is_some();
+    transport || title || toggle || mode
 }
 
 /// Volume change per Up/Down key, in 0..=100 units. Webamp steps by 1 and real Winamp 2.x by a
@@ -626,6 +674,12 @@ pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
         state.kbps = pb.kbps;
         state.khz = pb.khz;
         state.channels = pb.channels;
+        changed = true;
+    }
+    // Shuffle/repeat mode lights.
+    if state.shuffle_on != pb.shuffle || state.repeat_on != pb.repeat {
+        state.shuffle_on = pb.shuffle;
+        state.repeat_on = pb.repeat;
         changed = true;
     }
     if state.dragging != Some(Slider::Position) {
@@ -787,6 +841,24 @@ mod tests {
         let out = on_release(&mut s2, 137, 45);
         assert_eq!(out.toggle, None, "off-button = no toggle");
         assert!(out.redraw);
+    }
+
+    #[test]
+    fn shuffle_and_repeat_buttons_arm_and_fire_toggle_mode() {
+        // From shufrep dests: shuffle at (164,89) 47x15, repeat at (210,89) 28x15.
+        assert_eq!(hit_test(164 + 10, 89 + 5), Region::Mode(ModeButton::Shuffle));
+        assert_eq!(hit_test(210 + 10, 89 + 5), Region::Mode(ModeButton::Repeat));
+        let mut s = UiState::default();
+        let out = on_press(&mut s, 164 + 10, 89 + 5);
+        assert_eq!(s.pressed_mode, Some(ModeButton::Shuffle));
+        assert!(out.redraw && out.command.is_none(), "arm only");
+        let out = on_release(&mut s, 164 + 10, 89 + 5);
+        assert_eq!(out.command, Some(Command::ToggleMode(ModeButton::Shuffle)), "fires on release");
+        assert_eq!(s.pressed_mode, None);
+        // Released off the button cancels.
+        let mut s2 = UiState { pressed_mode: Some(ModeButton::Repeat), ..Default::default() };
+        let out = on_release(&mut s2, 137, 45);
+        assert_eq!(out.command, None, "off-button = no toggle");
     }
 
     #[test]

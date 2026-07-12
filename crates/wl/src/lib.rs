@@ -67,6 +67,10 @@ const MARQUEE_TICK: Duration = Duration::from_millis(100);
 /// timer just keeps the clock and marquee moving.
 const FRAME_FALLBACK: Duration = Duration::from_millis(250);
 
+/// Redraw cadence while the visualizer settles to baseline after a Stop (~30 fps): a few frames of
+/// smooth decay, then it goes quiet.
+const VIS_SETTLE_TICK: Duration = Duration::from_millis(33);
+
 /// Fills a caller-owned buffer with the most recent output samples (mono, oldest first) for the
 /// visualizer to read each frame.
 type SampleSource = Box<dyn FnMut(&mut [f32])>;
@@ -167,6 +171,7 @@ pub fn run(
         qh: qh.clone(),
         frame_pending: false,
         playing: false,
+        stopped: false,
         pointer: None,
         seat: None,
         armed_move: None,
@@ -265,6 +270,9 @@ struct App {
     /// Whether audio is playing, from the last playback poll. Gates the frame-callback loop: the
     /// visualizer only animates from live audio while this holds.
     playing: bool,
+    /// Whether playback is stopped (vs paused), from the last poll. Stop settles the visualizer to
+    /// baseline; a pause freezes it on its last frame.
+    stopped: bool,
     /// The secondary playlist window (PLEDIT), or `None` when closed.
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
@@ -330,6 +338,7 @@ impl App {
     fn step_clock_and_marquee(&mut self) -> bool {
         let pb = (self.playback_source)();
         self.playing = pb.playing;
+        self.stopped = pb.stopped;
         let mut changed = hit::on_tick(&mut self.state, pb);
         // The marquee steps on its OWN 100 ms clock, not once per redraw: the frame-callback loop
         // redraws at the display rate, and stepping the title every frame would scroll it far too
@@ -348,16 +357,23 @@ impl App {
         changed
     }
 
-    /// Step the visualizer from the latest output samples, returning whether its drawing changed.
-    /// No-op (returns `false`) when the skin ships no palette, the mode is Off, or playback is
-    /// paused/stopped: pausing FREEZES the visualizer on its last frame rather than feeding it
-    /// silence (which would decay it to the baseline).
+    /// Step the visualizer, returning whether its drawing changed. No-op (returns `false`) when the
+    /// skin ships no palette or the mode is Off. While PLAYING it animates from live samples; while
+    /// STOPPED it advances with silence so it decays to the baseline (a reset); while merely PAUSED
+    /// it does nothing, freezing on its last frame.
     fn step_vis(&mut self) -> bool {
-        if self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off || !self.playing {
+        if self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off {
             return false;
         }
-        (self.sample_source)(&mut self.vis_samples);
-        self.state.vis.advance(&self.vis_samples)
+        if self.playing {
+            (self.sample_source)(&mut self.vis_samples);
+            self.state.vis.advance(&self.vis_samples)
+        } else if self.stopped {
+            self.vis_samples.iter_mut().for_each(|s| *s = 0.0);
+            self.state.vis.advance(&self.vis_samples)
+        } else {
+            false // paused: frozen
+        }
     }
 
     /// A compositor frame callback: the display is ready for the next frame. Step the clock, marquee
@@ -401,12 +417,16 @@ impl App {
             }
             FRAME_FALLBACK
         } else {
-            // Paused/stopped/vis-off: no frame callbacks. The visualizer is frozen on its last frame
-            // (step_vis is a no-op when not playing), so only the clock and marquee move here.
-            if changed {
+            // Not playing, so no frame callbacks. When STOPPED the visualizer settles to baseline
+            // (step_vis advances with silence and reports the change); when merely PAUSED it stays
+            // frozen. The clock and marquee keep moving regardless.
+            let vis_changed = self.step_vis();
+            if changed || vis_changed {
                 self.redraw();
             }
-            if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
+            if vis_changed {
+                VIS_SETTLE_TICK
+            } else if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
                 MARQUEE_TICK
             } else {
                 Duration::from_secs(1)

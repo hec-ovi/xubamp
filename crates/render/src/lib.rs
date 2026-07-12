@@ -130,7 +130,10 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         let held = state.dragging == Some(hit::Slider::Volume);
         slider::draw_volume(&mut fb, volume, state.volume, held);
     }
-    if let Some(balance) = &skin.balance {
+    // Balance slider. Skins without balance.bmp (this dev skin is one) fall back to the volume
+    // sheet, which shares the slider layout, so the pan control is still visible and draggable (its
+    // art then matches the volume slider rather than showing a centre-out bar).
+    if let Some(balance) = skin.balance.as_ref().or(skin.volume.as_ref()) {
         let held = state.dragging == Some(hit::Slider::Balance);
         slider::draw_balance(&mut fb, balance, state.balance, held);
     }
@@ -159,6 +162,22 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         };
         blit_placement(&mut fb, shufrep, eq);
         blit_placement(&mut fb, shufrep, pl);
+        // Shuffle + repeat mode buttons: lit while the mode is on, pressed while held.
+        let held_mode = |m| state.pressed_mode == Some(m);
+        let shuffle = match (state.shuffle_on, held_mode(hit::ModeButton::Shuffle)) {
+            (false, false) => sprites::SHUFFLE_OFF,
+            (false, true) => sprites::SHUFFLE_OFF_PRESSED,
+            (true, false) => sprites::SHUFFLE_ON,
+            (true, true) => sprites::SHUFFLE_ON_PRESSED,
+        };
+        let repeat = match (state.repeat_on, held_mode(hit::ModeButton::Repeat)) {
+            (false, false) => sprites::REPEAT_OFF,
+            (false, true) => sprites::REPEAT_OFF_PRESSED,
+            (true, false) => sprites::REPEAT_ON,
+            (true, true) => sprites::REPEAT_ON_PRESSED,
+        };
+        blit_placement(&mut fb, shufrep, shuffle);
+        blit_placement(&mut fb, shufrep, repeat);
     }
     // kbps (bitrate) and kHz (sample rate) readouts, in the small text.bmp font, blank when nothing
     // is loaded. They share the marquee's font sheet.

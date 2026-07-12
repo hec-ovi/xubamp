@@ -4,10 +4,11 @@
 //! different rates). It lives on the main/UI thread, so it needs no locking.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use xubamp_audio::engine::AudioEngine;
 use xubamp_audio::playlist::Playlist;
-use xubamp_render::hit::{Playback, Transport};
+use xubamp_render::hit::{ModeButton, Playback, Transport};
 use xubamp_render::pledit;
 
 use crate::{track_title, transport_ops, EngineOp};
@@ -20,6 +21,13 @@ pub struct Player {
     /// Volume and balance persist across tracks: a freshly loaded engine starts at these.
     volume: u8,
     balance: i8,
+    /// Whether the last transport was Stop (as opposed to Pause), so the visualizer can clear rather
+    /// than freeze. Reset by any action that (re)starts or changes the track.
+    stopped: bool,
+    /// Shuffle mode: when on, advancing plays a random track. (Repeat mode lives on the playlist.)
+    shuffle: bool,
+    /// xorshift PRNG state for shuffle, seeded once at startup.
+    rng: u64,
 }
 
 impl Player {
@@ -29,6 +37,14 @@ impl Player {
             engine: None,
             volume: 100,
             balance: 0,
+            stopped: false,
+            shuffle: false,
+            // Seed the PRNG from the wall clock; `| 1` avoids the all-zero state xorshift can't leave.
+            rng: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9_7F4A_7C15)
+                | 1,
         }
     }
 
@@ -40,6 +56,7 @@ impl Player {
     /// Drop the old engine (joining its threads and freeing its stream) and start a fresh one for
     /// the current track, applying the persisted volume/balance. A load failure leaves no engine.
     fn load_current(&mut self) {
+        self.stopped = false; // a (re)loaded track is playing, not stopped
         self.engine = None; // drop first: join the old threads before opening a new stream
         let Some(path) = self.playlist.current().map(Path::to_path_buf) else {
             return;
@@ -66,13 +83,11 @@ impl Player {
                     self.load_current();
                 }
             }
-            Transport::Next => {
-                if self.playlist.next().is_some() {
-                    self.load_current();
-                }
-            }
+            Transport::Next => self.advance(),
             Transport::Eject => eprintln!("xubamp: Eject (load file) not implemented yet"),
             Transport::Play | Transport::Pause | Transport::Stop => {
+                // Stop clears the visualizer (a reset); Play/Pause do not.
+                self.stopped = matches!(t, Transport::Stop);
                 if let Some(engine) = &self.engine {
                     let h = engine.handle();
                     for op in transport_ops(t, h.is_playing(), h.is_finished()) {
@@ -86,8 +101,55 @@ impl Player {
         }
     }
 
+    /// Advance to the next track: a random one in shuffle mode, otherwise the next in order (which
+    /// wraps when repeat is on). Loads and plays whatever it lands on; a no-op at a hard end.
+    fn advance(&mut self) {
+        if self.shuffle && self.playlist.len() > 1 {
+            let i = self.next_random();
+            if self.playlist.select(i).is_some() {
+                self.load_current();
+            }
+        } else if self.playlist.next().is_some() {
+            self.load_current();
+        }
+    }
+
+    /// Toggle shuffle or repeat mode.
+    pub fn toggle_mode(&mut self, mode: ModeButton) {
+        match mode {
+            ModeButton::Shuffle => self.shuffle = !self.shuffle,
+            ModeButton::Repeat => {
+                let on = !self.playlist.repeat();
+                self.playlist.set_repeat(on);
+            }
+        }
+    }
+
+    /// A xorshift step.
+    fn rand(&mut self) -> u64 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        x
+    }
+
+    /// A random track index that is not the current one (so shuffle does not replay in place).
+    fn next_random(&mut self) -> usize {
+        let n = self.playlist.len();
+        let cur = self.playlist.current_index();
+        loop {
+            let i = (self.rand() % n as u64) as usize;
+            if n == 1 || Some(i) != cur {
+                return i;
+            }
+        }
+    }
+
     /// The `x` hotkey: force the current track from the top regardless of play state.
     pub fn restart(&mut self) {
+        self.stopped = false;
         if let Some(engine) = &self.engine {
             let h = engine.handle();
             h.seek_to_start();
@@ -117,9 +179,8 @@ impl Player {
 
     /// Called each UI tick: auto-advance to the next track when the current one has played out.
     pub fn poll(&mut self) {
-        if self.engine.as_ref().is_some_and(AudioEngine::is_finished) && self.playlist.next().is_some()
-        {
-            self.load_current();
+        if self.engine.as_ref().is_some_and(AudioEngine::is_finished) {
+            self.advance();
         }
     }
 
@@ -157,13 +218,21 @@ impl Player {
                     position: h.position_fraction(),
                     duration: h.duration_secs(),
                     playing: h.is_playing(),
+                    stopped: self.stopped,
                     kbps: h.bitrate_kbps(),
                     khz: h.khz(),
                     channels: h.channels(),
                     title: self.title(),
+                    shuffle: self.shuffle,
+                    repeat: self.playlist.repeat(),
                 }
             }
-            None => Playback::default(),
+            // Nothing loaded, but shuffle/repeat modes still light their buttons.
+            None => Playback {
+                shuffle: self.shuffle,
+                repeat: self.playlist.repeat(),
+                ..Default::default()
+            },
         }
     }
 

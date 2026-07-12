@@ -169,9 +169,10 @@ pub const REPEAT_ON_PRESSED: Placement = Placement::new(Rect::new(0, 45, 28, 15)
 pub const PLEDIT_W: i32 = 275;
 pub const PLEDIT_H: i32 = 116;
 
-/// The playlist resizes in whole segments: 25px wider or 29px taller at a time (Winamp's model,
-/// `WINDOW_RESIZE_SEGMENT_WIDTH`/`_HEIGHT` in Webamp). A compositor-suggested size is snapped to
-/// this grid so the tiled frame always lands on a seam.
+/// Classic Winamp resizes the playlist in whole segments: 25px wider or 29px taller at a time
+/// (`WINDOW_RESIZE_SEGMENT_WIDTH`/`_HEIGHT` in Webamp). We render at whatever size the Wayland
+/// compositor hands us (the tiles clip cleanly to any size), so these document the classic segment
+/// dimensions rather than gating the resize.
 pub const PLEDIT_SEGMENT_W: i32 = 25;
 pub const PLEDIT_SEGMENT_H: i32 = 29;
 

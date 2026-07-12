@@ -195,6 +195,7 @@ fn main() {
                     Command::Seek(fraction) => player.seek_fraction(fraction),
                     Command::Restart => player.restart(),
                     Command::ToggleMode(mode) => player.toggle_mode(mode),
+                    Command::PlayIndex(i) => player.play_index(i),
                 }
             }
         };

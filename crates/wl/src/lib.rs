@@ -72,6 +72,12 @@ const FRAME_FALLBACK: Duration = Duration::from_millis(250);
 /// smooth decay, then it goes quiet.
 const VIS_SETTLE_TICK: Duration = Duration::from_millis(33);
 
+/// Two playlist clicks on the same row within this window count as a double-click, which plays it.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Tracks scrolled per mouse-wheel notch over the playlist list.
+const WHEEL_TRACKS_PER_NOTCH: f32 = 3.0;
+
 /// Fills a caller-owned buffer with the most recent output samples (mono, oldest first) for the
 /// visualizer to read each frame.
 type SampleSource = Box<dyn FnMut(&mut [f32])>;
@@ -88,9 +94,9 @@ struct PlaylistWin {
     pool: SlotPool,
     fb: Framebuffer,
     configured: bool,
-    /// Current window size in px, snapped to the resize grid (25px wide / 29px tall segments) and at
-    /// least the default. Grown by dragging the bottom-right grip; the compositor drives the change
-    /// via `configure` events, and the tiled frame is recomposed to match.
+    /// Current window size in px (at least the default). Grown by dragging the bottom-right grip; the
+    /// compositor drives the change via `configure` events, and the tiled frame is recomposed to
+    /// match whatever size it hands us.
     width: i32,
     height: i32,
     /// A title-bar press deferred into a compositor move (same threshold as the main window).
@@ -106,17 +112,6 @@ const PLEDIT_GRIP: i32 = 20;
 /// Whether (`x`, `y`) (window-local) is over the playlist's bottom-right resize grip.
 fn over_resize_grip(pl: &PlaylistWin, x: i32, y: i32) -> bool {
     x >= pl.width - PLEDIT_GRIP && y >= pl.height - PLEDIT_GRIP
-}
-
-/// Snap a compositor-suggested playlist size to the resize grid (25px wide / 29px tall segments),
-/// rounding to the nearest seam, and clamp to at least the default size so the frame always tiles
-/// onto a whole segment.
-fn snap_playlist_size(w: i32, h: i32) -> (i32, i32) {
-    use xubamp_skin::sprites::{PLEDIT_H, PLEDIT_SEGMENT_H, PLEDIT_SEGMENT_W, PLEDIT_W};
-    let snap = |v: i32, base: i32, seg: i32| {
-        base + ((v - base).max(0) + seg / 2) / seg * seg
-    };
-    (snap(w, PLEDIT_W, PLEDIT_SEGMENT_W), snap(h, PLEDIT_H, PLEDIT_SEGMENT_H))
 }
 
 /// Open the main window for `skin` and run until the user closes it. `title` is the song title
@@ -194,6 +189,9 @@ pub fn run(
         playlist: None,
         playlist_state: pledit::PlState::default(),
         playlist_source: Box::new(playlist_source),
+        mod_ctrl: false,
+        mod_shift: false,
+        last_click: None,
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
         qh: qh.clone(),
@@ -305,6 +303,13 @@ struct App {
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
     playlist_state: pledit::PlState,
+    /// Latest Ctrl/Shift state, mirrored from `update_modifiers`. Always present (unlike the
+    /// keyboard-gated `modifiers`) so the pointer handler can read them for ctrl/shift-click
+    /// selection; they simply stay false in a build without the keyboard feature.
+    mod_ctrl: bool,
+    mod_shift: bool,
+    /// The last playlist row clicked and when, to detect a double-click (which plays the row).
+    last_click: Option<(usize, Instant)>,
     /// Polled each tick for the current track rows + playing index, to keep the playlist in sync.
     playlist_source: PlaylistSource,
     /// Set once the main window has had its first `configure`, so the timer never attaches a buffer
@@ -493,6 +498,14 @@ impl App {
         surface.commit();
     }
 
+    /// Whether `surface` is one of our windows (the main window or the playlist window). Used only by
+    /// the keyboard-focus handlers, so it is gated with them.
+    #[cfg(feature = "keyboard")]
+    fn is_our_surface(&self, surface: &wl_surface::WlSurface) -> bool {
+        surface == self.window.wl_surface()
+            || self.playlist.as_ref().is_some_and(|pl| surface == pl.window.wl_surface())
+    }
+
     /// Open the playlist window (a second toplevel) if it is not already open, and light the PL
     /// button on the main window. No-op if already open.
     fn open_playlist(&mut self) {
@@ -579,6 +592,26 @@ impl App {
                     if let Some(pl) = &mut self.playlist {
                         pl.armed_move = Some((x, y, *serial));
                     }
+                    return;
+                }
+                // Otherwise it is a click in the list body: select the row (or clear), play on a
+                // double-click.
+                self.playlist_press_row(x, y);
+            }
+            PointerEventKind::Axis { vertical, .. } => {
+                // Mouse wheel (or trackpad) over the list scrolls it. A mouse reports discrete
+                // notches; a trackpad a continuous pixel delta. Positive scrolls toward the end.
+                let Some(ph) = self.playlist.as_ref().map(|pl| pl.height) else {
+                    return;
+                };
+                let tracks = if vertical.discrete != 0 {
+                    vertical.discrete as f32 * WHEEL_TRACKS_PER_NOTCH
+                } else {
+                    vertical.absolute as f32 / xubamp_skin::sprites::PLEDIT_ROW_H as f32
+                };
+                if tracks != 0.0 {
+                    self.playlist_state.scroll_by_tracks(tracks, ph);
+                    self.redraw_playlist();
                 }
             }
             PointerEventKind::Motion { .. } => {
@@ -618,6 +651,51 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Handle a left-press in the playlist list body (below the title bar, not on the grip): select
+    /// the clicked row honoring Ctrl/Shift, clear the selection on an empty-area click, and play the
+    /// row on a double-click.
+    fn playlist_press_row(&mut self, x: i32, y: i32) {
+        let Some((pw, ph)) = self.playlist.as_ref().map(|pl| (pl.width, pl.height)) else {
+            return;
+        };
+        // The right edge is the scrollbar column (thumb-drag is a later addition); ignore presses
+        // there so they neither select nor clear.
+        if x >= pw - xubamp_skin::sprites::PLEDIT_RIGHT_TILE.w {
+            return;
+        }
+        match self.playlist_state.row_at(x, y, ph) {
+            Some(i) => {
+                if self.mod_shift {
+                    self.playlist_state.shift_select(i);
+                } else if self.mod_ctrl {
+                    self.playlist_state.ctrl_select(i);
+                } else {
+                    self.playlist_state.click_select(i);
+                }
+                // A second click on the same row within the double-click window plays it.
+                let now = Instant::now();
+                let double = self
+                    .last_click
+                    .is_some_and(|(row, at)| row == i && now.duration_since(at) < DOUBLE_CLICK);
+                if double {
+                    (self.on_command)(hit::Command::PlayIndex(i));
+                    self.last_click = None;
+                } else {
+                    self.last_click = Some((i, now));
+                }
+                self.redraw_playlist();
+            }
+            None => {
+                // A click in the empty area below the last track clears the selection.
+                self.last_click = None;
+                if !self.playlist_state.selected.is_empty() {
+                    self.playlist_state.clear_selection();
+                    self.redraw_playlist();
+                }
+            }
         }
     }
 }
@@ -708,12 +786,14 @@ impl WindowHandler for App {
             self.draw();
         } else if self.playlist.as_ref().is_some_and(|pl| *window == pl.window) {
             if let Some(pl) = &mut self.playlist {
-                // Adopt the compositor-suggested size, snapped to the resize grid. A (None, None)
-                // suggestion (the initial map) keeps the current size.
+                // Render exactly the size the compositor asks for (clamped to the minimum), so the
+                // buffer always matches the configured geometry. A (None, None) suggestion (the
+                // initial map, or an un-minimize that keeps the size) leaves the current size.
+                // Snapping to a coarser grid here made the window drift on minimize/restore: the
+                // compositor re-sent its remembered size and we snapped it to a different one.
                 if let (Some(w), Some(h)) = configure.new_size {
-                    let (w, h) = snap_playlist_size(w.get() as i32, h.get() as i32);
-                    pl.width = w;
-                    pl.height = h;
+                    pl.width = (w.get() as i32).max(xubamp_skin::sprites::PLEDIT_W);
+                    pl.height = (h.get() as i32).max(xubamp_skin::sprites::PLEDIT_H);
                 }
                 pl.configured = true;
             }
@@ -895,7 +975,9 @@ impl KeyboardHandler for App {
         _raw: &[u32],
         _keysyms: &[Keysym],
     ) {
-        if surface == self.window.wl_surface() {
+        // Focus on EITHER of our windows enables shortcuts (Winamp's hotkeys are global), and lets
+        // the jump-to-file query keep receiving keys after the playlist window is what's focused.
+        if self.is_our_surface(surface) {
             self.keyboard_focus = true;
         }
     }
@@ -907,7 +989,7 @@ impl KeyboardHandler for App {
         surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        if surface == self.window.wl_surface() {
+        if self.is_our_surface(surface) {
             self.keyboard_focus = false;
         }
     }
@@ -940,6 +1022,9 @@ impl KeyboardHandler for App {
         _layout: u32,
     ) {
         self.modifiers = modifiers;
+        // Mirror into the always-present bools the pointer handler reads for ctrl/shift-click.
+        self.mod_ctrl = modifiers.ctrl;
+        self.mod_shift = modifiers.shift;
     }
 }
 
@@ -955,6 +1040,11 @@ impl App {
         if !self.keyboard_focus {
             return;
         }
+        // Jump-to-file mode captures every key (text, Backspace, Enter, Escape) until it closes.
+        if self.playlist_state.jump.is_some() {
+            self.jump_key(event);
+            return;
+        }
         // Plain shortcuts only (Shift/Caps merely change letter case). A Ctrl/Alt/Super chord is
         // left for the compositor or a later binding, so e.g. Ctrl+X never triggers Play.
         let m = self.modifiers;
@@ -964,8 +1054,65 @@ impl App {
         let Some(key) = decode_key(event) else {
             return;
         };
+        // J opens jump-to-file mode (rather than being a main-window shortcut).
+        if key == hit::KeyPress::Char('j') {
+            self.enter_jump_mode();
+            return;
+        }
         let outcome = hit::on_key(&mut self.state, key, is_repeat);
         self.apply(outcome);
+    }
+
+    /// Enter "jump to file" mode: open the playlist if closed and start an empty query. Subsequent
+    /// keys route to [`Self::jump_key`] until Enter plays the match or Escape cancels.
+    fn enter_jump_mode(&mut self) {
+        self.playlist_state.jump = Some(String::new());
+        if self.playlist.is_none() {
+            self.open_playlist();
+        } else {
+            self.redraw_playlist();
+        }
+    }
+
+    /// Handle a key while in jump-to-file mode: printable characters and Backspace edit the query
+    /// (re-selecting and scrolling to the first match), Enter plays the match and closes, Escape
+    /// closes without changing playback.
+    fn jump_key(&mut self, event: &KeyEvent) {
+        let ph = self
+            .playlist
+            .as_ref()
+            .map_or(xubamp_skin::sprites::PLEDIT_H, |pl| pl.height);
+        match event.keysym {
+            Keysym::Escape => {
+                self.playlist_state.jump = None;
+                self.redraw_playlist();
+            }
+            Keysym::Return | Keysym::KP_Enter => {
+                if let Some(i) = self.playlist_state.jump_match() {
+                    (self.on_command)(hit::Command::PlayIndex(i));
+                }
+                self.playlist_state.jump = None;
+                self.redraw_playlist();
+            }
+            Keysym::BackSpace => {
+                if let Some(q) = self.playlist_state.jump.as_mut() {
+                    q.pop();
+                }
+                self.playlist_state.jump_refresh(ph);
+                self.redraw_playlist();
+            }
+            _ => {
+                if let Some(c) = event.utf8.as_deref().and_then(|s| s.chars().next()) {
+                    if !c.is_control() {
+                        if let Some(q) = self.playlist_state.jump.as_mut() {
+                            q.push(c);
+                        }
+                        self.playlist_state.jump_refresh(ph);
+                        self.redraw_playlist();
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -82,6 +82,9 @@ pub enum Command {
     Restart,
     /// Toggle the shuffle or repeat playback mode (the main-window mode buttons).
     ToggleMode(ModeButton),
+    /// Play the playlist track at this index (a double-click on a playlist row, or the J
+    /// jump-to-file confirming a match).
+    PlayIndex(usize),
 }
 
 /// A decoded key the main window responds to, produced by the platform layer from its keysym so

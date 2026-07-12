@@ -114,6 +114,14 @@ impl Player {
         }
     }
 
+    /// Play the playlist track at index `i` (a double-click in the playlist window). No-op if the
+    /// index is out of range; the selection is left unchanged in that case.
+    pub fn play_index(&mut self, i: usize) {
+        if self.playlist.select(i).is_some() {
+            self.load_current();
+        }
+    }
+
     /// Toggle shuffle or repeat mode.
     pub fn toggle_mode(&mut self, mode: ModeButton) {
         match mode {

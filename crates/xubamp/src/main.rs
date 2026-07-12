@@ -228,6 +228,13 @@ fn main() {
                         h.seek_fraction(fraction);
                     }
                 }
+                Command::Restart => {
+                    // The `x` hotkey: force the track from the top regardless of play state.
+                    if let Some(h) = &handle {
+                        h.seek_to_start();
+                        h.set_active(true);
+                    }
+                }
             }
         }
     };

@@ -219,6 +219,7 @@ fn main() {
                 elapsed: Some(h.elapsed_secs()),
                 position: h.position_fraction(),
                 duration: h.duration_secs(),
+                playing: h.is_playing(),
             },
             None => xubamp_render::hit::Playback::default(),
         }
@@ -226,7 +227,20 @@ fn main() {
     #[cfg(not(feature = "audio"))]
     let playback_source = xubamp_render::hit::Playback::default;
 
-    if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source) {
+    // Feed the visualizer the most recent output samples (silence without audio, so it shows the
+    // flat baseline). The window only pulls this while a visualization mode is active.
+    #[cfg(feature = "audio")]
+    let sample_source = {
+        let handle = _engine.as_ref().map(|engine| engine.handle());
+        move |out: &mut [f32]| match &handle {
+            Some(h) => h.read_scope(out),
+            None => out.iter_mut().for_each(|s| *s = 0.0),
+        }
+    };
+    #[cfg(not(feature = "audio"))]
+    let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
+
+    if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source, sample_source) {
         eprintln!("xubamp: {e}");
         std::process::exit(1);
     }

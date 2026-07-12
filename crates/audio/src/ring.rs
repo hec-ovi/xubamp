@@ -7,12 +7,20 @@
 //! syscall, so it is safe on the audio RT thread. The ring itself (rtrb) allocates once at
 //! construction and never again.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Interleaved stereo: two samples per frame. The whole engine works in this fixed layout.
 pub const CHANNELS: usize = 2;
+
+/// Length of the visualizer scope ring, a power of two so the write index masks cheaply. The RT
+/// callback appends each quantum's downmixed-mono output here and the UI reads the most recent
+/// window to draw the spectrum/oscilloscope. ~43 ms at 48 kHz: ample for a 512-point FFT and far
+/// more than the UI reads between frames, so the reader never sees the writer lap it.
+pub const SCOPE_LEN: usize = 2048;
 
 /// Per-channel linear gains (left, right) for a volume and balance setting. Volume scales both
 /// channels linearly (0..=100 -> 0.0..=1.0, matching classic Winamp's linear taper); balance
@@ -62,6 +70,10 @@ pub struct SharedState {
     /// Producer -> app: the track fully drained after a clean end of decode. Set once, so the
     /// UI can show the stopped state and a future playlist can advance to the next track.
     pub finished: AtomicBool,
+    /// Loop thread -> app: whether the output stream is currently active (playing) rather than
+    /// paused/stopped. The visualizer animates from live audio only while this is set and settles
+    /// to baseline otherwise; also a basis for a play indicator. Written on the loop thread.
+    pub playing: AtomicBool,
     /// The current volume (0..=100) and balance (-100..=100), written by the UI thread. Kept so
     /// setting one recomputes the mix from both; not read on the RT path.
     pub volume: AtomicU32,
@@ -75,6 +87,12 @@ pub struct SharedState {
     /// (a newer request overwrites an unhandled older one, coalescing), the producer thread reads
     /// and clears it. Not on the RT path.
     pub seek_request: AtomicI64,
+    /// RT -> UI: a [`SCOPE_LEN`] ring of the most recent downmixed-mono output samples (as `f32`
+    /// bits) for the visualizer, `scope_write` the running write index. The RT appends each
+    /// quantum (post-gain, so the scope shows what is heard); the UI reads the newest window. A
+    /// torn read is invisible in a visualizer, so it is unsynchronised (Relaxed, no lock).
+    pub scope: Box<[AtomicU32]>,
+    pub scope_write: AtomicUsize,
 }
 
 impl SharedState {
@@ -85,6 +103,8 @@ impl SharedState {
             flush: AtomicBool::new(false),
             stream_rate: AtomicU32::new(0),
             finished: AtomicBool::new(false),
+            // Set true once the stream connects (it starts active); toggled by pause/resume.
+            playing: AtomicBool::new(false),
             // Default to full volume, centered: unity gains, so playback is at full level before
             // the UI ever touches a slider (and it never opens silent).
             volume: AtomicU32::new(100),
@@ -93,6 +113,41 @@ impl SharedState {
             gain_r: AtomicU32::new(1.0f32.to_bits()),
             // No seek pending until the UI requests one.
             seek_request: AtomicI64::new(-1),
+            // The scope ring starts silent; the single allocation here never repeats.
+            scope: (0..SCOPE_LEN).map(|_| AtomicU32::new(0)).collect::<Vec<_>>().into_boxed_slice(),
+            scope_write: AtomicUsize::new(0),
+        }
+    }
+
+    /// RT: append this quantum's output (interleaved stereo, post-gain) to the scope ring as
+    /// downmixed mono `(L + R) / 2`. Wait-free and RT-safe: a bounded loop of Relaxed atomic
+    /// stores, no allocation, lock, or syscall. Silence (a padded underrun) writes zeros, so the
+    /// visualizer falls to the baseline when nothing plays.
+    pub fn push_scope(&self, interleaved: &[f32]) {
+        let mask = SCOPE_LEN - 1;
+        let mut w = self.scope_write.load(Ordering::Relaxed);
+        for frame in interleaved.chunks_exact(CHANNELS) {
+            let mono = (frame[0] + frame[1]) * 0.5;
+            self.scope[w & mask].store(mono.to_bits(), Ordering::Relaxed);
+            w = w.wrapping_add(1);
+        }
+        self.scope_write.store(w, Ordering::Relaxed);
+    }
+
+    /// UI: copy the most recent `out.len()` scope samples into `out`, oldest first (so `out` reads
+    /// left-to-right in time). Reads behind the RT's write index; a torn sample is harmless for a
+    /// visualizer. `out` longer than [`SCOPE_LEN`] has its excess head zero-filled.
+    pub fn read_scope(&self, out: &mut [f32]) {
+        let mask = SCOPE_LEN - 1;
+        let n = out.len().min(SCOPE_LEN);
+        let w = self.scope_write.load(Ordering::Relaxed);
+        let start = w.wrapping_sub(n);
+        let head = out.len() - n;
+        for o in out.iter_mut().take(head) {
+            *o = 0.0;
+        }
+        for (i, o) in out.iter_mut().skip(head).enumerate() {
+            *o = f32::from_bits(self.scope[start.wrapping_add(i) & mask].load(Ordering::Relaxed));
         }
     }
 

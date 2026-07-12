@@ -156,6 +156,15 @@ pub const POSBAR_THUMB_H: i32 = 10;
 pub const POSBAR_THUMB_NORMAL: Rect = Rect::new(248, 0, POSBAR_THUMB_W, POSBAR_THUMB_H);
 pub const POSBAR_THUMB_PRESSED: Rect = Rect::new(278, 0, POSBAR_THUMB_W, POSBAR_THUMB_H);
 
+/// The visualizer region on the main window: a 76x16 recess at (24, 43), between the title bar and
+/// the transport buttons, where MAIN.BMP leaves a dark panel. The spectrum/oscilloscope draw the
+/// left 75 columns (the 76th stays background), coloured from `viscolor.txt`. Coordinates
+/// cross-checked against Webamp.
+pub const VIS_X: i32 = 24;
+pub const VIS_Y: i32 = 43;
+pub const VIS_W: i32 = 76;
+pub const VIS_H: i32 = 16;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +226,17 @@ mod tests {
         assert_eq!(SLIDER_THUMB_NORMAL.y, 422);
         assert_eq!(SLIDER_THUMB_PRESSED.y, 422);
         assert_ne!(SLIDER_THUMB_NORMAL.x, SLIDER_THUMB_PRESSED.x, "held thumb is a distinct cell");
+    }
+
+    #[test]
+    fn visualizer_region_sits_between_the_title_bar_and_transport() {
+        // Inside the window, below the title-bar band, above the transport buttons (y 88).
+        const { assert!(VIS_X + VIS_W <= MAIN_W, "visualizer stays inside the window") };
+        const { assert!(VIS_Y >= 14, "below the title-bar band") };
+        const { assert!(VIS_Y + VIS_H <= 88, "above the transport button row") };
+        // It does not overlap the volume slider's column (they share rows but not x).
+        const { assert!(VIS_X + VIS_W <= VOLUME_X, "clear of the volume slider in x") };
+        assert_eq!((VIS_X, VIS_Y, VIS_W, VIS_H), (24, 43, 76, 16));
     }
 
     #[test]

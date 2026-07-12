@@ -152,6 +152,23 @@ in the repo and git history, nothing important lives only in chat.
     duration, and restart-from-finish paths are checked end to end against a real null sink (all five
     ignored engine tests pass). A clean gapless flush (dropping the stale tail without underrunning)
     is a later polish item.
+  - (i) done: the main-window visualizer (spectrum analyzer, oscilloscope, off), cycled by clicking
+    the panel. The realtime callback taps the post-gain output into a wait-free scope ring
+    (`SharedState::push_scope`, a lock-free ring of atomics, downmixed mono, no allocation) that the
+    UI reads (`read_scope`); `render::vis` holds the pure DSP and drawing: a hand-rolled radix-2 FFT
+    (no external crate) with a Hann window, a log-frequency dB-scaled spectrum mapped to 75 columns
+    as classic "wide" 3px bars over a fixed 16-colour gradient (bars rise instantly and fall
+    gradually with gravity peak dots), and an oscilloscope drawn as a centre-out coloured line, all
+    from the skin's `viscolor.txt` palette (`skin::viscolor` now falls back to the classic 24-colour
+    default for missing entries, and `Skin` loads the file). The engine publishes an `is_playing`
+    flag so the `wl` redraw timer animates at ~30fps from live audio while playing and settles the
+    bars to baseline otherwise; the marquee was decoupled onto its own ~100ms wall clock so it no
+    longer scrolls fast under the vis cadence. Geometry (region 24,43,76x16), the VISCOLOR role
+    mapping, and the bar/peak/oscilloscope behaviour are cross-checked against Webamp and unit-tested
+    (the FFT peaks a tone in its bin, the scope tap round-trips with a no-allocation proof, and draw
+    is pixel-asserted); verified live on the real GNOME session (the bars respond to music). An
+    adversarial correctness/RT-safety review of the diff was applied (the marquee cadence coupling,
+    an oscilloscope cast-overflow guard, the settle-frame redraw, and four test gaps).
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -186,13 +203,14 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): in-window hotkeys (needs keyboard input, i.e. re-enabling xkbcommon) and
-  the spectrum/oscilloscope. Polish: a gapless seek flush (drop the stale tail without underrunning
-  the stream, e.g. deactivate then flush then refill), pause-blink, the click-to-toggle
-  remaining-time display, a center detent on the balance slider, and button drag-off un-press.
-  Plus a real skin. (The built-in default skin ships no volume.bmp/balance.bmp, text.bmp, or
-  posbar.bmp, so it shows none of the sliders, the seek bar, or a live marquee; those await an
-  authored default sheet set.)
+- Phase 4 (continued): the title-bar buttons (close, minimize, and the windowshade toggle; geometry
+  cross-checked against Webamp: close 264,3,9x9 and minimize 244,3,9x9, both taking priority over
+  the drag) and in-window hotkeys (needs keyboard input, i.e. re-enabling xkbcommon). Polish: a
+  gapless seek flush (drop the stale tail without underrunning the stream, e.g. deactivate then
+  flush then refill), pause-blink, the click-to-toggle remaining-time display, a center detent on
+  the balance slider, and button drag-off un-press. Plus a real skin. (The built-in default skin
+  ships no volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt, so it shows none of the
+  sliders, the seek bar, the marquee, or the visualizer; those await an authored default sheet set.)
 
 ## Working rules
 

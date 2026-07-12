@@ -6,6 +6,7 @@
 
 use xubamp_skin::sprites;
 
+use crate::vis::VisState;
 use crate::{posbar, slider};
 
 /// The six classic transport buttons, in the order they appear on the main window.
@@ -68,6 +69,8 @@ pub enum Region {
     Balance,
     /// The position (seek) bar.
     Position,
+    /// The visualizer panel. Clicking it cycles the visualization mode.
+    Vis,
     /// Not over any interactive element (the window body).
     None,
 }
@@ -109,6 +112,9 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     if in_rect(x, y, sprites::POSBAR_X, sprites::POSBAR_Y, sprites::POSBAR_W, sprites::POSBAR_H) {
         return Region::Position;
     }
+    if in_rect(x, y, sprites::VIS_X, sprites::VIS_Y, sprites::VIS_W, sprites::VIS_H) {
+        return Region::Vis;
+    }
     if y < TITLEBAR_H {
         return Region::TitleBar;
     }
@@ -144,6 +150,9 @@ pub struct UiState {
     /// Total track length in whole seconds, or `None` when unknown. Kept so a seek-bar drag can
     /// preview the target time in the MM:SS display.
     pub duration: Option<u32>,
+    /// The visualizer: its mode plus the per-frame spectrum/oscilloscope decay state. Stepped by
+    /// the platform layer each frame from the audio scope tap; clicking the panel cycles the mode.
+    pub vis: VisState,
 }
 
 impl Default for UiState {
@@ -160,6 +169,7 @@ impl Default for UiState {
             dragging: None,
             position: None,
             duration: None,
+            vis: VisState::default(),
         }
     }
 }
@@ -173,6 +183,9 @@ pub struct Playback {
     pub elapsed: Option<u32>,
     pub position: Option<f32>,
     pub duration: Option<u32>,
+    /// Whether audio is actively playing (not paused/stopped). Gates the visualizer animation: the
+    /// platform layer feeds live samples while playing and silence otherwise, so it settles.
+    pub playing: bool,
 }
 
 /// What the platform layer should do after handling a pointer event. Every field defaults to
@@ -242,6 +255,15 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
             }
             state.dragging = Some(Slider::Position);
             preview_seek(state, posbar::position_from_x(x));
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Vis => {
+            // Clicking the panel cycles Bars -> Oscilloscope -> Off. Purely a display change, so no
+            // command is emitted; the platform layer keeps stepping the (new) mode each frame.
+            state.vis.cycle();
             Outcome {
                 redraw: true,
                 ..Default::default()
@@ -592,7 +614,7 @@ mod tests {
     /// A clock snapshot carrying only an elapsed value (no position/duration), for the tick tests
     /// that predate the seek bar.
     fn elapsed(secs: Option<u32>) -> Playback {
-        Playback { elapsed: secs, position: None, duration: None }
+        Playback { elapsed: secs, ..Default::default() }
     }
 
     #[test]
@@ -617,6 +639,27 @@ mod tests {
         );
         // One row below the bar is the body.
         assert_eq!(hit_test(sprites::POSBAR_X, sprites::POSBAR_Y + sprites::POSBAR_H), Region::None);
+    }
+
+    #[test]
+    fn vis_region_click_cycles_the_mode() {
+        use crate::vis::VisMode;
+        // The panel is its own region.
+        assert_eq!(hit_test(sprites::VIS_X, sprites::VIS_Y), Region::Vis, "vis top-left");
+        assert_eq!(
+            hit_test(sprites::VIS_X + sprites::VIS_W - 1, sprites::VIS_Y + sprites::VIS_H - 1),
+            Region::Vis,
+            "vis bottom-right",
+        );
+        // Clicking it cycles the mode and redraws, emitting no command (a display-only change).
+        let mut s = UiState::default();
+        assert_eq!(s.vis.mode, VisMode::Bars);
+        let out = on_press(&mut s, sprites::VIS_X + 10, sprites::VIS_Y + 8);
+        assert_eq!(s.vis.mode, VisMode::Oscilloscope, "one click advances the mode");
+        assert!(out.redraw && out.command.is_none() && !out.start_move);
+        on_press(&mut s, sprites::VIS_X + 10, sprites::VIS_Y + 8);
+        on_press(&mut s, sprites::VIS_X + 10, sprites::VIS_Y + 8);
+        assert_eq!(s.vis.mode, VisMode::Bars, "three clicks wrap back to bars");
     }
 
     #[test]
@@ -685,7 +728,10 @@ mod tests {
     fn tick_updates_the_posbar_position_but_yields_to_a_drag() {
         let mut s = UiState::default();
         // Normal tick: the clock sets elapsed, position, and duration.
-        assert!(on_tick(&mut s, Playback { elapsed: Some(30), position: Some(0.25), duration: Some(120) }));
+        assert!(on_tick(
+            &mut s,
+            Playback { elapsed: Some(30), position: Some(0.25), duration: Some(120), playing: true }
+        ));
         assert_eq!((s.elapsed, s.position, s.duration), (Some(30), Some(0.25), Some(120)));
 
         // During a seek-bar drag the clock must not fight the preview: elapsed and position hold.
@@ -694,12 +740,18 @@ mod tests {
         s.dragging = Some(Slider::Position);
         s.elapsed = Some(90);
         s.position = Some(0.75);
-        let changed = on_tick(&mut s, Playback { elapsed: Some(31), position: Some(0.26), duration: Some(130) });
+        let changed = on_tick(
+            &mut s,
+            Playback { elapsed: Some(31), position: Some(0.26), duration: Some(130), playing: true },
+        );
         assert!(changed, "a changed duration still redraws mid-drag");
         assert_eq!(s.duration, Some(130), "duration refreshes during the drag");
         assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview held against the clock");
         // With the duration unchanged, a drag-phase tick changes nothing at all.
-        let changed = on_tick(&mut s, Playback { elapsed: Some(32), position: Some(0.27), duration: Some(130) });
+        let changed = on_tick(
+            &mut s,
+            Playback { elapsed: Some(32), position: Some(0.27), duration: Some(130), playing: true },
+        );
         assert!(!changed, "no redraw: the drag owns the display and duration was unchanged");
         assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview still held");
     }

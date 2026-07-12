@@ -12,15 +12,54 @@
 
 use crate::color::Rgb;
 
+/// The classic default visualization palette (Winamp's built-in / Webamp `baseSkin`), used as the
+/// base so a missing or partial `viscolor.txt` keeps sensible colours rather than going black. A
+/// well-formed skin overwrites all 24; a skin with no `viscolor.txt` still renders a real spectrum.
+pub const DEFAULT: [Rgb; 24] = [
+    Rgb::new(0, 0, 0),       // 0  background
+    Rgb::new(24, 33, 41),    // 1  grid dots
+    Rgb::new(239, 49, 16),   // 2  spectrum top (hottest)
+    Rgb::new(206, 41, 16),   // 3
+    Rgb::new(214, 90, 0),    // 4
+    Rgb::new(214, 102, 0),   // 5
+    Rgb::new(214, 115, 0),   // 6
+    Rgb::new(198, 123, 8),   // 7
+    Rgb::new(222, 165, 24),  // 8
+    Rgb::new(214, 181, 33),  // 9
+    Rgb::new(189, 222, 41),  // 10
+    Rgb::new(148, 222, 33),  // 11
+    Rgb::new(41, 206, 16),   // 12
+    Rgb::new(50, 190, 16),   // 13
+    Rgb::new(57, 181, 16),   // 14
+    Rgb::new(49, 156, 8),    // 15
+    Rgb::new(41, 148, 0),    // 16
+    Rgb::new(24, 132, 8),    // 17 spectrum bottom
+    Rgb::new(255, 255, 255), // 18 oscilloscope centre
+    Rgb::new(214, 214, 222), // 19
+    Rgb::new(181, 189, 189), // 20
+    Rgb::new(160, 170, 175), // 21
+    Rgb::new(148, 156, 165), // 22 oscilloscope edge
+    Rgb::new(150, 150, 150), // 23 analyzer peak dot
+];
+
 /// The parsed visualization palette: 24 colours indexed by their fixed role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisColor {
     pub colors: [Rgb; 24],
 }
 
+impl Default for VisColor {
+    /// The classic default palette, for a skin that ships no `viscolor.txt`.
+    fn default() -> Self {
+        VisColor { colors: DEFAULT }
+    }
+}
+
 impl VisColor {
+    /// Parse `viscolor.txt`. Each successfully parsed line overwrites the next role index, starting
+    /// from [`DEFAULT`], so a partial file keeps defaults for the indices it omits.
     pub fn parse(text: &str) -> VisColor {
-        let mut colors = [Rgb::BLACK; 24];
+        let mut colors = DEFAULT;
         let mut i = 0;
         for line in text.lines() {
             if i >= 24 {
@@ -87,12 +126,23 @@ mod tests {
     }
 
     #[test]
-    fn short_file_leaves_rest_black() {
+    fn short_file_keeps_defaults_for_omitted_roles() {
         let vc = VisColor::parse("10,20,30\n40,50,60\n");
+        // The two parsed lines override roles 0 and 1...
         assert_eq!(vc.colors[0], Rgb::new(10, 20, 30));
         assert_eq!(vc.colors[1], Rgb::new(40, 50, 60));
-        assert_eq!(vc.colors[2], Rgb::BLACK);
-        assert_eq!(vc.peak(), Rgb::BLACK);
+        // ...and the rest keep the classic defaults rather than going black.
+        assert_eq!(vc.colors[2], DEFAULT[2], "spectrum top keeps its default");
+        assert_eq!(vc.peak(), DEFAULT[23], "peak dot keeps its default");
+    }
+
+    #[test]
+    fn default_palette_is_the_classic_one() {
+        let vc = VisColor::default();
+        assert_eq!(vc.background(), Rgb::new(0, 0, 0));
+        assert_eq!(vc.analyzer()[0], Rgb::new(239, 49, 16), "hottest bar colour");
+        assert_eq!(vc.oscilloscope()[0], Rgb::new(255, 255, 255), "oscilloscope centre");
+        assert_eq!(vc.peak(), Rgb::new(150, 150, 150));
     }
 
     #[test]

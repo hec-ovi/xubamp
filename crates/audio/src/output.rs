@@ -75,13 +75,17 @@ pub fn run_loop(
     )?;
 
     // Marshal pause/resume/quit onto this loop thread. `attach` returns a `#[must_use]` guard
-    // whose drop detaches the receiver, so keep it alive until `run()` returns.
+    // whose drop detaches the receiver, so keep it alive until `run()` returns. The Active handler
+    // also publishes the play/pause state for the visualizer and a play indicator.
+    let shared = Arc::clone(&rt.shared);
     let _control = rx.attach(mainloop.loop_(), {
         let mainloop = mainloop.clone();
         let stream = stream.clone();
+        let shared = Arc::clone(&shared);
         move |c| match c {
             Control::Active(active) => {
                 let _ = stream.set_active(active);
+                shared.playing.store(active, Ordering::Relaxed);
             }
             Control::Quit => mainloop.quit(),
         }
@@ -129,6 +133,8 @@ pub fn run_loop(
                         // short-circuits, so the common case adds nothing to the RT path.
                         let (gl, gr) = ud.shared.gains();
                         apply_gain(out, gl, gr);
+                        // Tap the post-gain output for the visualizer (wait-free, no alloc).
+                        ud.shared.push_scope(out);
                     }
                     Err(_) => usable.fill(0),
                 }
@@ -172,6 +178,8 @@ pub fn run_loop(
             | pw::stream::StreamFlags::RT_PROCESS, // process runs on the realtime data thread
         &mut params,
     )?;
+    // The stream connects active, so playback is on until the app pauses it.
+    shared.playing.store(true, Ordering::Relaxed);
 
     mainloop.run(); // blocks until Control::Quit -> mainloop.quit(); keeps listeners alive
     Ok(())

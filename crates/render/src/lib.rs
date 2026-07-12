@@ -13,6 +13,7 @@ pub mod hit;
 pub mod marquee;
 pub mod posbar;
 pub mod slider;
+pub mod vis;
 
 /// A top-down `RGBA8888` framebuffer, 4 bytes per pixel.
 pub struct Framebuffer {
@@ -132,6 +133,11 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     if let Some(posbar) = &skin.posbar {
         let held = state.dragging == Some(hit::Slider::Position);
         posbar::draw(&mut fb, posbar, state.position.unwrap_or(0.0), held);
+    }
+    // The visualizer: spectrum bars, oscilloscope, or off, over the recessed panel, coloured from
+    // viscolor.txt. Skins without that palette (the built-in default) show no visualizer.
+    if let Some(viscolor) = &skin.viscolor {
+        vis::draw(&mut fb, viscolor, &state.vis);
     }
     fb
 }

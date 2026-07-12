@@ -3,7 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use xubamp_audio::ring::{apply_gain, fill_output, mix_gains, new_ring, push_block, SharedState};
+use xubamp_audio::ring::{
+    apply_gain, fill_output, mix_gains, new_ring, push_block, SharedState, SCOPE_LEN,
+};
 
 #[test]
 fn round_trips_samples_in_order() {
@@ -211,6 +213,41 @@ fn begin_seek_rebases_the_clock_and_clears_finished() {
     assert_eq!(s.position_frames(), 0, "rebased to the start");
     s.frames_consumed.store(5_960, Ordering::Relaxed);
     assert_eq!(s.position_frames(), 480, "advances from 0 as new-position frames play");
+}
+
+#[test]
+fn scope_tap_writes_mono_and_reads_the_latest_window() {
+    let s = SharedState::new();
+    // Fresh: the scope reads back silence.
+    let mut out = [9.9f32; 8];
+    s.read_scope(&mut out);
+    assert_eq!(out, [0.0; 8], "an untouched scope is silent");
+    // Push interleaved stereo; the tap stores per-frame mono (L+R)/2.
+    s.push_scope(&[2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0]); // frames -> 3, 7, 11, 15
+    let mut out4 = [0.0f32; 4];
+    s.read_scope(&mut out4);
+    assert_eq!(out4, [3.0, 7.0, 11.0, 15.0], "mono of the four frames, oldest first");
+    // Reading fewer than written returns the most recent, oldest first.
+    let mut out2 = [0.0f32; 2];
+    s.read_scope(&mut out2);
+    assert_eq!(out2, [11.0, 15.0], "the two most recent frames");
+    // Reading more history than has been written returns the ring's silence before the samples.
+    let mut out6 = [0.0f32; 6];
+    s.read_scope(&mut out6);
+    assert_eq!(out6, [0.0, 0.0, 3.0, 7.0, 11.0, 15.0], "unwritten history reads as silence");
+}
+
+#[test]
+fn scope_tap_wraps_around_the_ring() {
+    let s = SharedState::new();
+    // Write more than SCOPE_LEN frames so the index wraps; only the last SCOPE_LEN survive.
+    let total = SCOPE_LEN + 100;
+    let block: Vec<f32> = (0..total).flat_map(|i| [i as f32, i as f32]).collect(); // L==R so mono==i
+    s.push_scope(&block);
+    let mut out = [0.0f32; 4];
+    s.read_scope(&mut out);
+    let base = (total - 4) as f32; // the last four frames
+    assert_eq!(out, [base, base + 1.0, base + 2.0, base + 3.0], "reads the newest across a wrap");
 }
 
 #[test]

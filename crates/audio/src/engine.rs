@@ -199,6 +199,13 @@ impl EngineHandle {
         Some((self.shared.position_frames() as f64 / total as f64).clamp(0.0, 1.0) as f32)
     }
 
+    /// Copy the most recent output samples (downmixed mono, oldest first) into `out` for the
+    /// visualizer. Reads a lock-free snapshot of the RT scope ring; while paused or stopped the
+    /// tap holds its last values (the RT is not writing), which the visualizer decays to baseline.
+    pub fn read_scope(&self, out: &mut [f32]) {
+        self.shared.read_scope(out);
+    }
+
     /// Elapsed whole seconds of playback, for the MM:SS time display. Derived from the same
     /// position clock as [`AudioEngine::position_frames`], so it holds while paused and is 0
     /// before any frame has played.
@@ -215,6 +222,12 @@ impl EngineHandle {
     /// advance to the next track.
     pub fn is_finished(&self) -> bool {
         self.shared.is_finished()
+    }
+
+    /// Whether the output stream is currently active (playing) rather than paused or stopped. The
+    /// visualizer animates from live audio only while this holds.
+    pub fn is_playing(&self) -> bool {
+        self.shared.playing.load(Ordering::Relaxed)
     }
 }
 

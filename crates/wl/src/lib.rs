@@ -7,7 +7,7 @@
 //! on Ubuntu 26.04 rather than by unit tests.
 
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::reexports::calloop::{
     timer::{TimeoutAction, Timer},
@@ -39,6 +39,7 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
+use xubamp_render::vis::{VisMode, FFT_N};
 use xubamp_render::{compose_main_window, hit, marquee, Framebuffer};
 use xubamp_skin::Skin;
 
@@ -46,17 +47,28 @@ use xubamp_skin::Skin;
 /// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
 
+/// Redraw cadence while the visualizer is animating (~30 fps), fast enough for smooth bars but
+/// far cheaper than the display refresh rate.
+const VIS_TICK: Duration = Duration::from_millis(33);
+
+/// Fills a caller-owned buffer with the most recent output samples (mono, oldest first) for the
+/// visualizer to read each frame.
+type SampleSource = Box<dyn FnMut(&mut [f32])>;
+
 /// Open the main window for `skin` and run until the user closes it. `title` is the song title
 /// shown in the marquee (empty for none). `on_command` is called on the event-loop thread for
 /// every UI command: a transport button click, a volume/balance change as its slider is dragged,
 /// or a seek when the position bar is released; the caller bridges it to the audio engine.
-/// `playback_source` is polled each redraw tick for the clock snapshot (elapsed seconds, seek-bar
-/// position, and duration), so the display ticks without this layer knowing anything about audio.
+/// `playback_source` is polled each redraw tick for the clock snapshot (elapsed, seek-bar position,
+/// duration, and whether audio is playing). `sample_source` fills a buffer with the most recent
+/// output samples (mono, oldest first) for the visualizer, so this layer animates it without
+/// knowing anything about audio.
 pub fn run(
     skin: Skin,
     title: String,
     on_command: impl FnMut(hit::Command) + 'static,
     playback_source: impl FnMut() -> hit::Playback + 'static,
+    sample_source: impl FnMut(&mut [f32]) + 'static,
 ) -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -97,6 +109,9 @@ pub fn run(
         fb,
         on_command: Box::new(on_command),
         playback_source: Box::new(playback_source),
+        sample_source: Box::new(sample_source),
+        vis_samples: vec![0.0; FFT_N],
+        last_marquee: Instant::now(),
         pointer: None,
         seat: None,
         configured: false,
@@ -149,8 +164,16 @@ struct App {
     /// Sink for UI commands (transport clicks, slider drags, seek), called on the event-loop
     /// thread.
     on_command: Box<dyn FnMut(hit::Command)>,
-    /// Polled each redraw tick for the clock snapshot (elapsed, seek-bar position, duration).
+    /// Polled each redraw tick for the clock snapshot (elapsed, seek-bar position, duration,
+    /// playing).
     playback_source: Box<dyn FnMut() -> hit::Playback>,
+    /// Fills `vis_samples` with the most recent output samples for the visualizer, per tick.
+    sample_source: SampleSource,
+    /// Scratch buffer of recent samples the visualizer reads (reused each frame, no per-tick alloc).
+    vis_samples: Vec<f32>,
+    /// When the marquee last stepped, so it advances on its own ~100ms wall clock independent of
+    /// how fast the visualizer drives the redraw timer.
+    last_marquee: Instant,
     /// The pointer, once the seat reports the capability. `None` on a seat with no mouse.
     pointer: Option<wl_pointer::WlPointer>,
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
@@ -181,26 +204,61 @@ impl App {
         }
     }
 
-    /// Redraw-timer tick: step the marquee, poll the playback clock, and recompose only if
-    /// something moved. Returns how long to wait before the next tick: [`MARQUEE_TICK`] while a
-    /// title is scrolling, else a second (just the clock). Does nothing before the first
-    /// configure (nothing to draw into yet).
+    /// Redraw-timer tick: poll the playback clock, step the marquee and the visualizer, and
+    /// recompose only if something moved. Returns how long to wait before the next tick: the fast
+    /// [`VIS_TICK`] while the visualizer animates, [`MARQUEE_TICK`] while a title scrolls, else a
+    /// second (just the clock). Does nothing before the first configure (nothing to draw into yet).
     fn tick(&mut self) -> Duration {
         if !self.configured {
             // Nothing to draw into yet; retry soon so scrolling begins right after the first
             // configure instead of waiting out a full second.
             return MARQUEE_TICK;
         }
-        let mut changed = hit::on_tick(&mut self.state, (self.playback_source)());
-        // Only animate when the skin actually renders a marquee. A skin without text.bmp (the
-        // built-in default) shows no title strip, so it must not spin a 10 fps redraw loop over
-        // a title it never draws.
-        let scrolling = self.skin.text.is_some() && marquee::advance(&mut self.state);
-        changed |= scrolling;
+        let pb = (self.playback_source)();
+        let playing = pb.playing;
+        let mut changed = hit::on_tick(&mut self.state, pb);
+
+        // Step the marquee on its own ~100ms wall clock, NOT once per redraw tick: the visualizer
+        // can drive the timer at 33ms, and stepping the title every tick would scroll it ~3x too
+        // fast while playing. `is_scrolling` reports the scroll state independently of stepping.
+        // Only skins with text.bmp render a marquee.
+        let title_scrolls = self.skin.text.is_some() && marquee::is_scrolling(&self.state.title);
+        if title_scrolls {
+            let elapsed = self.last_marquee.elapsed();
+            if elapsed >= MARQUEE_TICK {
+                changed |= marquee::advance(&mut self.state);
+                // Keep the phase accurate across fast ticks; resync (do not burst to catch up) if
+                // the window sat idle a while between steps.
+                self.last_marquee = if elapsed < MARQUEE_TICK * 2 {
+                    self.last_marquee + MARQUEE_TICK
+                } else {
+                    Instant::now()
+                };
+            }
+        }
+
+        // Step the visualizer from the latest samples (or silence when not playing, so it settles),
+        // but only when the skin ships a palette and the mode is not Off. `advance` reports whether
+        // the drawing changed, so the settle-to-baseline frame is drawn and an idle vis stops.
+        let vis_active = self.skin.viscolor.is_some() && self.state.vis.mode != VisMode::Off;
+        let mut vis_changed = false;
+        if vis_active {
+            if playing {
+                (self.sample_source)(&mut self.vis_samples);
+            } else {
+                self.vis_samples.iter_mut().for_each(|s| *s = 0.0);
+            }
+            vis_changed = self.state.vis.advance(&self.vis_samples);
+            changed |= vis_changed;
+        }
         if changed {
             self.redraw();
         }
-        if scrolling {
+        // Fast while the visualizer is live (playing) or still changing; otherwise the marquee or
+        // clock cadence, so an idle window barely wakes.
+        if (vis_active && playing) || vis_changed {
+            VIS_TICK
+        } else if title_scrolls {
             MARQUEE_TICK
         } else {
             Duration::from_secs(1)

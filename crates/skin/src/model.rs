@@ -2,6 +2,7 @@
 
 use crate::bmp::{self, Image};
 use crate::container::SkinArchive;
+use crate::viscolor::VisColor;
 
 /// Decoded skin sheets. Each is `None` when the skin omits it (the renderer then falls
 /// back to the bundled default). Sheets are added here as later phases render them.
@@ -25,6 +26,10 @@ pub struct Skin {
     /// The position/seek bar sheet (`posbar.bmp`): the 248x10 groove background plus the two
     /// thumb states. `None` skips drawing the seek bar (the main background groove shows through).
     pub posbar: Option<Image>,
+    /// The visualization palette (`viscolor.txt`): the 24 fixed colours for the spectrum and
+    /// oscilloscope. `None` when the skin omits it; the visualizer then draws nothing (it needs a
+    /// palette), though a caller could substitute [`VisColor::default`].
+    pub viscolor: Option<VisColor>,
 }
 
 impl Skin {
@@ -44,6 +49,9 @@ impl Skin {
             volume: sheet("volume.bmp"),
             balance: sheet("balance.bmp"),
             posbar: sheet("posbar.bmp"),
+            viscolor: archive
+                .get("viscolor.txt")
+                .map(|b| VisColor::parse(&String::from_utf8_lossy(b))),
         }
     }
 }
@@ -71,6 +79,20 @@ mod tests {
         assert!(skin.volume.is_none());
         assert!(skin.balance.is_none());
         assert!(skin.posbar.is_none());
+        assert!(skin.viscolor.is_none());
+    }
+
+    #[test]
+    fn parses_viscolor_txt_when_present() {
+        // A minimal viscolor.txt: role 0 (background) and role 2 (spectrum top) set, rest default.
+        let vis = b"0,0,0 // bg\n1,1,1\n255,0,0 // top\n";
+        let wsz = wsz_stored(&[("VISCOLOR.TXT", vis)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let vc = skin.viscolor.expect("viscolor parsed");
+        assert_eq!(vc.background(), crate::color::Rgb::new(0, 0, 0));
+        assert_eq!(vc.analyzer()[0], crate::color::Rgb::new(255, 0, 0), "spectrum top from the file");
     }
 
     #[test]

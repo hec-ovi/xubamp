@@ -11,6 +11,8 @@ use xubamp_skin::Skin;
 
 pub mod hit;
 pub mod marquee;
+pub mod posbar;
+pub mod slider;
 
 /// A top-down `RGBA8888` framebuffer, 4 bytes per pixel.
 pub struct Framebuffer {
@@ -113,6 +115,23 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     // without that sheet (including the built-in default) simply show no marquee here.
     if let Some(text) = &skin.text {
         marquee::draw(&mut fb, text, &state.title, state.marquee_offset);
+    }
+    // Volume and balance sliders: each drawn from its own sheet at the current value, with the
+    // thumb shown pressed while that slider is being dragged. Skins without the sheet skip it.
+    if let Some(volume) = &skin.volume {
+        let held = state.dragging == Some(hit::Slider::Volume);
+        slider::draw_volume(&mut fb, volume, state.volume, held);
+    }
+    if let Some(balance) = &skin.balance {
+        let held = state.dragging == Some(hit::Slider::Balance);
+        slider::draw_balance(&mut fb, balance, state.balance, held);
+    }
+    // Position (seek) bar: the groove and a thumb at the current playback position (0 when nothing
+    // is loaded), drawn pressed while the user scrubs. Skins without posbar.bmp show the main
+    // background groove instead.
+    if let Some(posbar) = &skin.posbar {
+        let held = state.dragging == Some(hit::Slider::Position);
+        posbar::draw(&mut fb, posbar, state.position.unwrap_or(0.0), held);
     }
     fb
 }
@@ -278,6 +297,61 @@ mod tests {
         };
         let fb = compose_main_window(&no_font, &playing);
         assert_eq!(px(&fb, mx, my), RED, "no text sheet, no marquee");
+    }
+
+    #[test]
+    fn sliders_draw_over_the_panel_only_when_their_sheets_are_present() {
+        use xubamp_skin::sprites;
+        // GREEN volume + balance sheets over a RED main; the background column and thumb are all
+        // GREEN, so any slider pixel reads GREEN and the untouched background stays RED.
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            volume: Some(solid(68, 433, GREEN)),
+            balance: Some(solid(47, 433, GREEN)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&fb, sprites::VOLUME_X as u32, sprites::VOLUME_Y as u32), GREEN, "volume drawn");
+        assert_eq!(px(&fb, sprites::BALANCE_X as u32, sprites::BALANCE_Y as u32), GREEN, "balance drawn");
+        // Between the two sliders the main background shows through.
+        assert_eq!(px(&fb, (sprites::VOLUME_X + sprites::VOLUME_W) as u32, sprites::VOLUME_Y as u32), RED);
+
+        // A skin without the slider sheets draws neither.
+        let bare = Skin {
+            main: Some(solid(275, 116, RED)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&bare, &hit::UiState::default());
+        assert_eq!(px(&fb, sprites::VOLUME_X as u32, sprites::VOLUME_Y as u32), RED, "no volume sheet");
+        assert_eq!(px(&fb, sprites::BALANCE_X as u32, sprites::BALANCE_Y as u32), RED, "no balance sheet");
+    }
+
+    #[test]
+    fn posbar_draws_over_the_panel_only_when_its_sheet_is_present() {
+        use xubamp_skin::sprites;
+        // A GREEN posbar sheet over a RED main. The whole sheet is GREEN, so any seek-bar pixel
+        // (groove or thumb) reads GREEN and the untouched background stays RED.
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            posbar: Some(solid(307, 10, GREEN)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&fb, sprites::POSBAR_X as u32, sprites::POSBAR_Y as u32), GREEN, "posbar drawn");
+        // Just below the 10px-tall bar the main background shows through.
+        assert_eq!(
+            px(&fb, sprites::POSBAR_X as u32, (sprites::POSBAR_Y + sprites::POSBAR_H) as u32),
+            RED,
+            "nothing drawn below the bar",
+        );
+
+        // A skin without posbar.bmp draws no seek bar.
+        let bare = Skin {
+            main: Some(solid(275, 116, RED)),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&bare, &hit::UiState::default());
+        assert_eq!(px(&fb, sprites::POSBAR_X as u32, sprites::POSBAR_Y as u32), RED, "no posbar sheet");
     }
 
     #[test]

@@ -23,7 +23,7 @@ use pw::spa::sys as spa_sys;
 use rtrb::Consumer;
 
 use crate::command::Control;
-use crate::ring::{fill_output, SharedState, CHANNELS};
+use crate::ring::{apply_gain, fill_output, SharedState, CHANNELS};
 
 /// Bytes per interleaved stereo f32 frame (8): the negotiated stride of the output buffer.
 const STRIDE: usize = std::mem::size_of::<f32>() * CHANNELS;
@@ -125,6 +125,10 @@ pub fn run_loop(
                 match bytemuck::try_cast_slice_mut::<u8, f32>(usable) {
                     Ok(out) => {
                         fill_output(&mut ud.consumer, out, &ud.shared.flush, &ud.shared.frames_consumed);
+                        // Scale by the current volume/balance gains. Unity (full volume, centered)
+                        // short-circuits, so the common case adds nothing to the RT path.
+                        let (gl, gr) = ud.shared.gains();
+                        apply_gain(out, gl, gr);
                     }
                     Err(_) => usable.fill(0),
                 }

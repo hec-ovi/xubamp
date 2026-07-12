@@ -1,10 +1,12 @@
 //! Input mapping and UI state: turn a pointer position into the interactive region under it,
-//! and turn press/release events into state changes and commands. All pure (no platform
+//! and turn press/motion/release events into state changes and commands. All pure (no platform
 //! types), so the interaction policy is unit-testable without a compositor. The `wl` crate
 //! owns the event loop and calls these; it does the side effects (redraw, window move, emit
 //! command) that the outcomes describe.
 
 use xubamp_skin::sprites;
+
+use crate::{posbar, slider};
 
 /// The six classic transport buttons, in the order they appear on the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +17,31 @@ pub enum Transport {
     Stop,
     Next,
     Eject,
+}
+
+/// The three draggable sliders on the main window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slider {
+    Volume,
+    Balance,
+    /// The position (seek) bar. It differs from the other two: dragging it only previews (moves
+    /// the thumb and the time display); the seek commits once, on release.
+    Position,
+}
+
+/// A command the window emits to the caller (the binary bridges these to the audio engine). A
+/// transport button fires one on a completed click; the volume/balance sliders fire one whenever
+/// their value moves (press and drag); the seek bar fires one `Seek` on release. `Eq` is not
+/// derived because `Seek` carries an `f32` fraction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Command {
+    Transport(Transport),
+    /// New volume level, 0..=100.
+    Volume(u8),
+    /// New balance, -100..=100 (negative pans left, positive right).
+    Balance(i8),
+    /// Seek to `fraction` (0..=1) of the track, emitted once when the seek-bar drag is released.
+    Seek(f32),
 }
 
 /// Transport identity for each entry of [`sprites::CBUTTONS`] (and `CBUTTONS_PRESSED`), in the
@@ -35,7 +62,13 @@ pub enum Region {
     TitleBar,
     /// One of the six transport buttons.
     Transport(Transport),
-    /// Not over any interactive element (the window body, for now).
+    /// The volume slider.
+    Volume,
+    /// The balance slider.
+    Balance,
+    /// The position (seek) bar.
+    Position,
+    /// Not over any interactive element (the window body).
     None,
 }
 
@@ -49,9 +82,15 @@ fn in_button(b: &sprites::Placement, x: i32, y: i32) -> bool {
     x >= b.dst_x && x < b.dst_x + b.src.w && y >= b.dst_y && y < b.dst_y + b.src.h
 }
 
+/// Is (`x`, `y`) inside the axis-aligned rectangle at (`rx`, `ry`) of size `rw`x`rh`?
+fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
 /// Which region of the main window is at window-local pixel (`x`, `y`)? Points outside the
-/// window map to [`Region::None`]. Transport buttons win over the body; the title-bar band is
-/// the top strip. (Buttons live well below the band, so the two never overlap.)
+/// window map to [`Region::None`]. Transport buttons and sliders win over the body; the
+/// title-bar band is the top strip. The interactive elements occupy disjoint rows, so their
+/// order here does not matter.
 pub fn hit_test(x: i32, y: i32) -> Region {
     if x < 0 || y < 0 || x >= sprites::MAIN_W || y >= sprites::MAIN_H {
         return Region::None;
@@ -61,15 +100,24 @@ pub fn hit_test(x: i32, y: i32) -> Region {
             return Region::Transport(id);
         }
     }
+    if in_rect(x, y, sprites::VOLUME_X, sprites::VOLUME_Y, sprites::VOLUME_W, sprites::SLIDER_BG_H) {
+        return Region::Volume;
+    }
+    if in_rect(x, y, sprites::BALANCE_X, sprites::BALANCE_Y, sprites::BALANCE_W, sprites::SLIDER_BG_H) {
+        return Region::Balance;
+    }
+    if in_rect(x, y, sprites::POSBAR_X, sprites::POSBAR_Y, sprites::POSBAR_W, sprites::POSBAR_H) {
+        return Region::Position;
+    }
     if y < TITLEBAR_H {
         return Region::TitleBar;
     }
     Region::None
 }
 
-/// Mutable UI state that drives composition. Grows as controls are added (position, volume,
-/// title, playback state). For now: which transport button, if any, is held down.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Mutable UI state that drives composition: which button is held, the clock, the marquee, and
+/// the slider values and in-progress drag. `Eq` is not derived because `position` is an `f32`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     /// The transport button currently pressed (drawn depressed), or `None`.
     pub pressed: Option<Transport>,
@@ -83,76 +131,236 @@ pub struct UiState {
     /// Horizontal scroll offset of the marquee, in pixels, wrapped over the looping title.
     /// Only meaningful while the title scrolls; held at 0 for a title that fits.
     pub marquee_offset: u32,
+    /// Volume level, 0..=100. Defaults to full so a fresh window matches the engine's unity gain.
+    pub volume: u8,
+    /// Stereo balance, -100..=100 (negative pans left). Defaults to centered.
+    pub balance: i8,
+    /// The slider currently being dragged (its thumb drawn pressed), or `None`.
+    pub dragging: Option<Slider>,
+    /// Playback position as a 0..=1 fraction for the seek-bar thumb, or `None` when nothing is
+    /// loaded or the length is unknown. Set from the clock each tick, except while the seek bar is
+    /// being dragged, when it follows the cursor (a preview) until release commits the seek.
+    pub position: Option<f32>,
+    /// Total track length in whole seconds, or `None` when unknown. Kept so a seek-bar drag can
+    /// preview the target time in the MM:SS display.
+    pub duration: Option<u32>,
 }
 
-/// What the platform layer should do after a left-button press. Returned by [`on_press`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PressOutcome {
-    /// The press was on the title bar: start an interactive window move.
-    StartMove,
-    /// UI state changed (a button went down): recompose and redraw.
-    Redraw,
-    /// Nothing to do.
-    Ignore,
+impl Default for UiState {
+    fn default() -> Self {
+        // Volume defaults to full (not 0) so a freshly opened window plays at unity, matching the
+        // audio engine's default gain, and shows the volume thumb flush-right; balance centered.
+        Self {
+            pressed: None,
+            elapsed: None,
+            title: String::new(),
+            marquee_offset: 0,
+            volume: 100,
+            balance: 0,
+            dragging: None,
+            position: None,
+            duration: None,
+        }
+    }
 }
 
-/// What the platform layer should do after a left-button release. Returned by [`on_release`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReleaseOutcome {
-    /// The transport command to run, if a button was pressed and released over itself.
-    pub command: Option<Transport>,
+/// A snapshot of the playback clock for the display, polled once per redraw tick. Carries the
+/// elapsed seconds (the MM:SS display), the 0..=1 position (the seek-bar thumb), and the total
+/// duration in seconds (so a seek-bar drag can preview the target time). All `None` when nothing
+/// is playing or the length is unknown. `Eq` is not derived because `position` is an `f32`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Playback {
+    pub elapsed: Option<u32>,
+    pub position: Option<f32>,
+    pub duration: Option<u32>,
+}
+
+/// What the platform layer should do after handling a pointer event. Every field defaults to
+/// "nothing", so a handler sets only what applies. `Eq` is not derived because a `Seek` command
+/// carries an `f32`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Outcome {
+    /// Start an interactive window move (a title-bar press): hand the drag to the compositor.
+    pub start_move: bool,
+    /// A command to emit to the caller, if any.
+    pub command: Option<Command>,
     /// Whether UI state changed and the window should be recomposed and redrawn.
     pub redraw: bool,
 }
 
-/// Handle a left-button press at window-local (`x`, `y`), updating `state`.
-pub fn on_press(state: &mut UiState, x: i32, y: i32) -> PressOutcome {
+/// While dragging the seek bar, show the drag target without seeking: move the thumb to `fraction`
+/// and, when the duration is known, preview the target time in the MM:SS display. The real seek is
+/// deferred to release, so this only touches display state.
+fn preview_seek(state: &mut UiState, fraction: f32) {
+    state.position = Some(fraction);
+    if let Some(dur) = state.duration {
+        state.elapsed = Some((fraction * dur as f32).round() as u32);
+    }
+}
+
+/// Handle a left-button press at window-local (`x`, `y`), updating `state`. A title-bar press
+/// asks for a move; a transport press arms the button; a volume/balance press begins a drag and
+/// jumps the value to the click, emitting it immediately; a seek-bar press begins a drag and
+/// previews the target (thumb + time) but emits nothing yet (the seek commits on release).
+pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
     match hit_test(x, y) {
-        Region::TitleBar => PressOutcome::StartMove,
+        Region::TitleBar => Outcome {
+            start_move: true,
+            ..Default::default()
+        },
         Region::Transport(b) => {
             state.pressed = Some(b);
-            PressOutcome::Redraw
-        }
-        Region::None => PressOutcome::Ignore,
-    }
-}
-
-/// Handle a left-button release at window-local (`x`, `y`), updating `state`. A transport
-/// command fires only when the release lands on the same button that was pressed (releasing
-/// off the button cancels), matching classic button behavior.
-pub fn on_release(state: &mut UiState, x: i32, y: i32) -> ReleaseOutcome {
-    match state.pressed.take() {
-        Some(b) => {
-            let command = (hit_test(x, y) == Region::Transport(b)).then_some(b);
-            ReleaseOutcome {
-                command,
+            Outcome {
                 redraw: true,
+                ..Default::default()
             }
         }
-        None => ReleaseOutcome {
-            command: None,
-            redraw: false,
-        },
+        Region::Volume => {
+            state.dragging = Some(Slider::Volume);
+            state.volume = slider::volume_from_x(x);
+            Outcome {
+                command: Some(Command::Volume(state.volume)),
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Balance => {
+            state.dragging = Some(Slider::Balance);
+            state.balance = slider::balance_from_x(x);
+            Outcome {
+                command: Some(Command::Balance(state.balance)),
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Position => {
+            // Inert when the track length is unknown (an unseekable stream): without a duration a
+            // click can't map to a seek target, so the bar doesn't respond, matching classic
+            // Winamp. `duration` is set from the playback clock each tick.
+            if state.duration.is_none() {
+                return Outcome::default();
+            }
+            state.dragging = Some(Slider::Position);
+            preview_seek(state, posbar::position_from_x(x));
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::None => Outcome::default(),
     }
 }
 
-/// Handle the pointer leaving the window: cancel any in-progress press so a button never
-/// stays stuck down. Returns whether a redraw is needed.
+/// Handle pointer motion at window-local (`x`, `y`). Only meaningful while a slider is being
+/// dragged: it tracks the cursor, emitting the new value (and redrawing) when it changes.
+/// Wayland keeps delivering motion during the implicit button grab even past the window edge,
+/// and [`slider::volume_from_x`]/[`slider::balance_from_x`] clamp to the track, so dragging off
+/// the side pins to an extreme rather than jumping.
+pub fn on_motion(state: &mut UiState, x: i32, _y: i32) -> Outcome {
+    match state.dragging {
+        Some(Slider::Volume) => {
+            let v = slider::volume_from_x(x);
+            if v == state.volume {
+                return Outcome::default();
+            }
+            state.volume = v;
+            Outcome {
+                command: Some(Command::Volume(v)),
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Some(Slider::Balance) => {
+            let b = slider::balance_from_x(x);
+            if b == state.balance {
+                return Outcome::default();
+            }
+            state.balance = b;
+            Outcome {
+                command: Some(Command::Balance(b)),
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Some(Slider::Position) => {
+            let f = posbar::position_from_x(x);
+            // Preview only; the seek fires on release. Skip the redraw when the thumb would not
+            // move (same pixel offset) so a jittery cursor does not recompose needlessly.
+            if posbar::position_thumb_offset(f)
+                == state.position.map_or(-1, posbar::position_thumb_offset)
+            {
+                return Outcome::default();
+            }
+            preview_seek(state, f);
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        None => Outcome::default(),
+    }
+}
+
+/// Handle a left-button release at window-local (`x`, `y`), updating `state`. Ending a
+/// volume/balance drag just swaps the thumb back to its normal sprite (the value was committed
+/// live during the drag). Ending a seek-bar drag commits the seek now, once, to the previewed
+/// position (so we issue one seek per drag, not one per pixel). Otherwise a transport command
+/// fires only when the release lands on the same button that was pressed (releasing off the
+/// button cancels), matching classic button behavior.
+pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
+    if let Some(slider) = state.dragging.take() {
+        let command = match slider {
+            // Volume and balance already emitted their value live; only the seek bar defers.
+            Slider::Position => state.position.map(Command::Seek),
+            Slider::Volume | Slider::Balance => None,
+        };
+        return Outcome {
+            command,
+            redraw: true,
+            ..Default::default()
+        };
+    }
+    match state.pressed.take() {
+        Some(b) => {
+            let fired = hit_test(x, y) == Region::Transport(b);
+            Outcome {
+                command: fired.then_some(Command::Transport(b)),
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        None => Outcome::default(),
+    }
+}
+
+/// Handle the pointer leaving the window: cancel any in-progress button press so a button never
+/// stays stuck down. A slider drag is left alone: Wayland's implicit grab keeps sending motion
+/// and the release past the edge, so the drag should continue rather than abort here. Returns
+/// whether a redraw is needed.
 pub fn on_leave(state: &mut UiState) -> bool {
     state.pressed.take().is_some()
 }
 
-/// Refresh the displayed elapsed time from the latest playback clock (whole seconds, or `None`
-/// when nothing is playing), updating `state`. Returns whether the shown value changed and a
-/// redraw is needed, so the timer recomposes only when the display actually moves (not while
-/// paused, where the clock holds and this returns `false`).
-pub fn on_tick(state: &mut UiState, elapsed: Option<u32>) -> bool {
-    if state.elapsed == elapsed {
-        false
-    } else {
-        state.elapsed = elapsed;
-        true
+/// Refresh the display from the latest playback snapshot (elapsed seconds and seek-bar position,
+/// both `None` when nothing is playing), updating `state`. Returns whether anything shown changed
+/// and a redraw is needed, so the timer recomposes only when the display actually moves (not while
+/// paused, where the clock holds and this returns `false`). While the user is dragging the seek
+/// bar, the drag owns the thumb and the time preview, so the clock does not overwrite them; the
+/// duration is still refreshed (it is constant per track and feeds the drag preview).
+pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
+    let mut changed = state.duration != pb.duration;
+    state.duration = pb.duration;
+    if state.dragging != Some(Slider::Position) {
+        if state.elapsed != pb.elapsed {
+            state.elapsed = pb.elapsed;
+            changed = true;
+        }
+        if state.position != pb.position {
+            state.position = pb.position;
+            changed = true;
+        }
     }
+    changed
 }
 
 #[cfg(test)]
@@ -170,7 +378,7 @@ mod tests {
     #[test]
     fn below_the_band_is_not_draggable() {
         assert_eq!(hit_test(0, 14), Region::None, "first row under the title bar");
-        assert_eq!(hit_test(137, 60), Region::None, "window body");
+        assert_eq!(hit_test(137, 45), Region::None, "window body above the sliders");
         assert_eq!(hit_test(274, 115), Region::None, "bottom-right of the window");
     }
 
@@ -209,10 +417,34 @@ mod tests {
     }
 
     #[test]
+    fn sliders_have_their_own_regions() {
+        // Inside each slider's background rectangle.
+        assert_eq!(hit_test(sprites::VOLUME_X, sprites::VOLUME_Y), Region::Volume, "volume top-left");
+        assert_eq!(
+            hit_test(sprites::VOLUME_X + sprites::VOLUME_W - 1, sprites::VOLUME_Y + sprites::SLIDER_BG_H - 1),
+            Region::Volume,
+            "volume bottom-right",
+        );
+        assert_eq!(hit_test(sprites::BALANCE_X, sprites::BALANCE_Y), Region::Balance, "balance top-left");
+        // The gap between the two sliders belongs to neither.
+        assert_eq!(hit_test(sprites::VOLUME_X + sprites::VOLUME_W, sprites::VOLUME_Y), Region::None);
+        // One row below the sliders is the body.
+        assert_eq!(hit_test(sprites::VOLUME_X, sprites::VOLUME_Y + sprites::SLIDER_BG_H), Region::None);
+    }
+
+    #[test]
+    fn default_volume_is_full_and_balance_centered() {
+        let s = UiState::default();
+        assert_eq!(s.volume, 100, "fresh window is at unity gain, not silent");
+        assert_eq!(s.balance, 0, "centered");
+        assert_eq!(s.dragging, None);
+    }
+
+    #[test]
     fn press_on_a_button_arms_it_and_asks_for_redraw() {
         let mut s = UiState::default();
         let out = on_press(&mut s, 39 + 11, 88 + 9); // play center
-        assert_eq!(out, PressOutcome::Redraw);
+        assert!(out.redraw && out.command.is_none() && !out.start_move);
         assert_eq!(s.pressed, Some(Transport::Play));
     }
 
@@ -220,8 +452,91 @@ mod tests {
     fn press_on_title_bar_starts_a_move_and_does_not_arm() {
         let mut s = UiState::default();
         let out = on_press(&mut s, 100, 5);
-        assert_eq!(out, PressOutcome::StartMove);
+        assert!(out.start_move);
         assert_eq!(s.pressed, None);
+        assert_eq!(s.dragging, None);
+    }
+
+    #[test]
+    fn press_on_volume_begins_a_drag_sets_the_value_and_emits() {
+        let mut s = UiState::default();
+        // Press near the far-left of the volume track: value pins low, drag begins.
+        let out = on_press(&mut s, sprites::VOLUME_X, sprites::VOLUME_Y + 2);
+        assert_eq!(s.dragging, Some(Slider::Volume));
+        assert_eq!(s.volume, slider::volume_from_x(sprites::VOLUME_X));
+        assert_eq!(out.command, Some(Command::Volume(s.volume)));
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn press_on_balance_center_sets_zero_and_drags() {
+        let mut s = UiState::default();
+        let x = sprites::BALANCE_X + sprites::BALANCE_W / 2;
+        let out = on_press(&mut s, x, sprites::BALANCE_Y + 2);
+        assert_eq!(s.dragging, Some(Slider::Balance));
+        assert_eq!(s.balance, 0, "clicking the middle centers the balance");
+        assert_eq!(out.command, Some(Command::Balance(0)));
+    }
+
+    #[test]
+    fn motion_while_dragging_volume_tracks_and_emits_only_on_change() {
+        let mut s = UiState {
+            dragging: Some(Slider::Volume),
+            volume: 0,
+            ..Default::default()
+        };
+        // Move to the far right: volume jumps to 100.
+        let out = on_motion(&mut s, sprites::VOLUME_X + 1000, sprites::VOLUME_Y);
+        assert_eq!(s.volume, 100);
+        assert_eq!(out.command, Some(Command::Volume(100)));
+        assert!(out.redraw);
+        // A second motion to the same place changes nothing: no command, no redraw.
+        let out = on_motion(&mut s, sprites::VOLUME_X + 1000, sprites::VOLUME_Y);
+        assert_eq!(out, Outcome::default());
+    }
+
+    #[test]
+    fn motion_while_dragging_balance_tracks_and_emits_only_on_change() {
+        let mut s = UiState {
+            dragging: Some(Slider::Balance),
+            balance: 0,
+            ..Default::default()
+        };
+        // Drag off the left edge: balance pins to -100 and emits a Balance command (not Volume,
+        // and mapped through balance_from_x, so a copy-paste of the volume arm would fail here).
+        let out = on_motion(&mut s, sprites::BALANCE_X - 1000, sprites::BALANCE_Y);
+        assert_eq!(s.balance, -100);
+        assert_eq!(out.command, Some(Command::Balance(-100)));
+        assert!(out.redraw);
+        // Staying at the same value emits nothing (the de-dup path).
+        let out = on_motion(&mut s, sprites::BALANCE_X - 1000, sprites::BALANCE_Y);
+        assert_eq!(out, Outcome::default());
+        // Drag off the right edge: balance pins to +100.
+        let out = on_motion(&mut s, sprites::BALANCE_X + 1000, sprites::BALANCE_Y);
+        assert_eq!(s.balance, 100);
+        assert_eq!(out.command, Some(Command::Balance(100)));
+    }
+
+    #[test]
+    fn motion_without_a_drag_is_inert() {
+        let mut s = UiState::default();
+        let out = on_motion(&mut s, 137, 60);
+        assert_eq!(out, Outcome::default());
+        assert_eq!(s.volume, 100, "hover does not touch the value");
+    }
+
+    #[test]
+    fn release_ends_a_slider_drag_and_redraws() {
+        let mut s = UiState {
+            dragging: Some(Slider::Volume),
+            volume: 42,
+            ..Default::default()
+        };
+        let out = on_release(&mut s, 500, 500); // released anywhere
+        assert_eq!(s.dragging, None, "drag ended");
+        assert_eq!(s.volume, 42, "value held from the drag");
+        assert_eq!(out.command, None, "no new command on release; value already emitted");
+        assert!(out.redraw, "redraw to restore the normal thumb sprite");
     }
 
     #[test]
@@ -231,7 +546,7 @@ mod tests {
             ..Default::default()
         };
         let out = on_release(&mut s, 39 + 11, 88 + 9);
-        assert_eq!(out.command, Some(Transport::Play));
+        assert_eq!(out.command, Some(Command::Transport(Transport::Play)));
         assert!(out.redraw);
         assert_eq!(s.pressed, None, "button released");
     }
@@ -242,7 +557,7 @@ mod tests {
             pressed: Some(Transport::Play),
             ..Default::default()
         };
-        let out = on_release(&mut s, 200, 40); // released over the body
+        let out = on_release(&mut s, 137, 45); // released over the body
         assert_eq!(out.command, None, "dragged off = cancel");
         assert!(out.redraw, "still redraw to un-press");
         assert_eq!(s.pressed, None);
@@ -252,12 +567,11 @@ mod tests {
     fn release_with_nothing_pressed_is_a_no_op() {
         let mut s = UiState::default();
         let out = on_release(&mut s, 39 + 11, 88 + 9);
-        assert_eq!(out.command, None);
-        assert!(!out.redraw);
+        assert_eq!(out, Outcome::default());
     }
 
     #[test]
-    fn leave_clears_a_pressed_button() {
+    fn leave_clears_a_pressed_button_but_not_a_drag() {
         let mut s = UiState {
             pressed: Some(Transport::Stop),
             ..Default::default()
@@ -265,17 +579,128 @@ mod tests {
         assert!(on_leave(&mut s), "needs redraw to un-press");
         assert_eq!(s.pressed, None);
         assert!(!on_leave(&mut s), "nothing pressed now");
+
+        // A drag survives a leave (the implicit grab keeps delivering motion past the edge).
+        let mut d = UiState {
+            dragging: Some(Slider::Volume),
+            ..Default::default()
+        };
+        assert!(!on_leave(&mut d), "leaving mid-drag needs no redraw");
+        assert_eq!(d.dragging, Some(Slider::Volume), "drag continues");
+    }
+
+    /// A clock snapshot carrying only an elapsed value (no position/duration), for the tick tests
+    /// that predate the seek bar.
+    fn elapsed(secs: Option<u32>) -> Playback {
+        Playback { elapsed: secs, position: None, duration: None }
     }
 
     #[test]
     fn tick_redraws_only_when_the_shown_time_changes() {
         let mut s = UiState::default();
-        assert!(on_tick(&mut s, Some(0)), "blank -> 00:00 is a change");
+        assert!(on_tick(&mut s, elapsed(Some(0))), "blank -> 00:00 is a change");
         assert_eq!(s.elapsed, Some(0));
-        assert!(!on_tick(&mut s, Some(0)), "same second (e.g. paused): no redraw");
-        assert!(on_tick(&mut s, Some(1)), "next second: redraw");
-        assert!(on_tick(&mut s, None), "stop blanks the display: redraw");
+        assert!(!on_tick(&mut s, elapsed(Some(0))), "same second (e.g. paused): no redraw");
+        assert!(on_tick(&mut s, elapsed(Some(1))), "next second: redraw");
+        assert!(on_tick(&mut s, elapsed(None)), "stop blanks the display: redraw");
         assert_eq!(s.elapsed, None);
-        assert!(!on_tick(&mut s, None), "still blank: no redraw");
+        assert!(!on_tick(&mut s, elapsed(None)), "still blank: no redraw");
+    }
+
+    #[test]
+    fn posbar_has_its_own_region() {
+        assert_eq!(hit_test(sprites::POSBAR_X, sprites::POSBAR_Y), Region::Position, "posbar top-left");
+        assert_eq!(
+            hit_test(sprites::POSBAR_X + sprites::POSBAR_W - 1, sprites::POSBAR_Y + sprites::POSBAR_H - 1),
+            Region::Position,
+            "posbar bottom-right",
+        );
+        // One row below the bar is the body.
+        assert_eq!(hit_test(sprites::POSBAR_X, sprites::POSBAR_Y + sprites::POSBAR_H), Region::None);
+    }
+
+    #[test]
+    fn press_on_posbar_begins_a_drag_previews_and_does_not_seek_yet() {
+        let mut s = UiState {
+            duration: Some(200), // 3:20 track, so the preview time is meaningful
+            ..Default::default()
+        };
+        // Press at the far-right edge of the track (still inside the window): the thumb pins to
+        // the end and the time previews the track length, but NO command fires (seek on release).
+        let out = on_press(&mut s, sprites::POSBAR_X + sprites::POSBAR_W - 1, sprites::POSBAR_Y + 5);
+        assert_eq!(s.dragging, Some(Slider::Position));
+        assert_eq!(s.position, Some(1.0), "thumb pinned to the end");
+        assert_eq!(s.elapsed, Some(200), "time preview at the end of a 200s track");
+        assert_eq!(out.command, None, "no seek on press; it commits on release");
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn posbar_is_inert_when_the_track_length_is_unknown() {
+        // No duration (an unseekable / headerless stream): a press starts no drag, previews
+        // nothing, and emits nothing, so the bar cannot phantom-scrub and then snap back.
+        let mut s = UiState { duration: None, ..Default::default() };
+        let out = on_press(&mut s, sprites::POSBAR_X + 50, sprites::POSBAR_Y + 5);
+        assert_eq!(s.dragging, None, "no drag begins without a known length");
+        assert_eq!(s.position, None, "the thumb is not moved");
+        assert_eq!(out, Outcome::default(), "no redraw and no command");
+    }
+
+    #[test]
+    fn dragging_the_posbar_tracks_but_only_release_seeks() {
+        let mut s = UiState {
+            dragging: Some(Slider::Position),
+            duration: Some(100),
+            position: Some(0.0),
+            ..Default::default()
+        };
+        // Motion to mid-track moves the thumb and previews ~50s, but emits nothing.
+        let out = on_motion(&mut s, sprites::POSBAR_X + posbar::POSBAR_TRAVEL / 2 + 14, sprites::POSBAR_Y);
+        assert!((s.position.unwrap() - 0.5).abs() < 0.02, "thumb near mid (got {:?})", s.position);
+        assert_eq!(s.elapsed, Some((s.position.unwrap() * 100.0).round() as u32), "time previews the target");
+        assert_eq!(out.command, None, "still no seek during the drag");
+        assert!(out.redraw);
+
+        // Release commits exactly one Seek to the previewed fraction, and ends the drag.
+        let previewed = s.position.unwrap();
+        let out = on_release(&mut s, 0, 0);
+        assert_eq!(s.dragging, None, "drag ended");
+        assert_eq!(out.command, Some(Command::Seek(previewed)), "seek commits on release");
+        assert!(out.redraw);
+    }
+
+    #[test]
+    fn releasing_volume_or_balance_still_emits_no_command() {
+        // The seek bar's release-to-commit must not leak into the other sliders, which committed
+        // live during their drag.
+        for slider in [Slider::Volume, Slider::Balance] {
+            let mut s = UiState { dragging: Some(slider), ..Default::default() };
+            let out = on_release(&mut s, 500, 500);
+            assert_eq!(out.command, None, "{slider:?} release emits nothing");
+            assert!(out.redraw, "{slider:?} release still restores the normal thumb");
+        }
+    }
+
+    #[test]
+    fn tick_updates_the_posbar_position_but_yields_to_a_drag() {
+        let mut s = UiState::default();
+        // Normal tick: the clock sets elapsed, position, and duration.
+        assert!(on_tick(&mut s, Playback { elapsed: Some(30), position: Some(0.25), duration: Some(120) }));
+        assert_eq!((s.elapsed, s.position, s.duration), (Some(30), Some(0.25), Some(120)));
+
+        // During a seek-bar drag the clock must not fight the preview: elapsed and position hold.
+        // The (normally constant) duration is still refreshed though, so feed a CHANGED duration
+        // to prove it updates mid-drag and forces a redraw while the preview is left untouched.
+        s.dragging = Some(Slider::Position);
+        s.elapsed = Some(90);
+        s.position = Some(0.75);
+        let changed = on_tick(&mut s, Playback { elapsed: Some(31), position: Some(0.26), duration: Some(130) });
+        assert!(changed, "a changed duration still redraws mid-drag");
+        assert_eq!(s.duration, Some(130), "duration refreshes during the drag");
+        assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview held against the clock");
+        // With the duration unchanged, a drag-phase tick changes nothing at all.
+        let changed = on_tick(&mut s, Playback { elapsed: Some(32), position: Some(0.27), duration: Some(130) });
+        assert!(!changed, "no redraw: the drag owns the display and duration was unchanged");
+        assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview still held");
     }
 }

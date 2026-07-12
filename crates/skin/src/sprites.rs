@@ -105,6 +105,57 @@ pub const MARQUEE_W: i32 = 154;
 /// (The countdown minus sign, added with a later remaining-time toggle, is a 9x13 cell at 39,26.)
 pub const TIME_DIGITS: [(i32, i32); 4] = [(48, 26), (60, 26), (78, 26), (90, 26)];
 
+/// Volume and balance sliders share a sheet layout: a column of `SLIDER_FRAMES` background
+/// frames stacked `SLIDER_FRAME_STRIDE` px apart (the level indicator), then the draggable
+/// thumb below them. The background is drawn `SLIDER_BG_H` px tall (the classic container
+/// height) even though the frame cells stride by 15, so only the top of each cell shows.
+pub const SLIDER_FRAME_STRIDE: i32 = 15;
+pub const SLIDER_FRAMES: i32 = 28;
+pub const SLIDER_BG_H: i32 = 13;
+
+/// The slider thumb sprite, 14x11, in the same two cells of both `volume.bmp` and `balance.bmp`:
+/// the normal state at x=15 and the pressed (held) state at x=0, both at y=422 (just below the
+/// 420px-tall background column).
+pub const SLIDER_THUMB_W: i32 = 14;
+pub const SLIDER_THUMB_H: i32 = 11;
+/// The thumb sits 1px below the background's top edge (the classic CSS `top: 1px`).
+pub const SLIDER_THUMB_DY: i32 = 1;
+pub const SLIDER_THUMB_NORMAL: Rect = Rect::new(15, 422, SLIDER_THUMB_W, SLIDER_THUMB_H);
+pub const SLIDER_THUMB_PRESSED: Rect = Rect::new(0, 422, SLIDER_THUMB_W, SLIDER_THUMB_H);
+
+/// The volume slider: a 68x13 background at (107, 57) drawn from `volume.bmp` (background column
+/// starts at x=0), with the thumb travelling `VOLUME_W - SLIDER_THUMB_W` px across it.
+pub const VOLUME_X: i32 = 107;
+pub const VOLUME_Y: i32 = 57;
+pub const VOLUME_W: i32 = 68;
+pub const VOLUME_BG_SRC_X: i32 = 0;
+
+/// The balance slider: a 38x13 background at (177, 57) drawn from `balance.bmp`, whose background
+/// column starts 9px in (`BALANCE_BG_SRC_X`), with the thumb travelling `BALANCE_W - thumb` px.
+pub const BALANCE_X: i32 = 177;
+pub const BALANCE_Y: i32 = 57;
+pub const BALANCE_W: i32 = 38;
+pub const BALANCE_BG_SRC_X: i32 = 9;
+
+/// The position (seek) bar from POSBAR.BMP (307x10): a 248x10 groove background on the left, then
+/// the two thumb states to its right. Unlike the volume/balance sheets (a column of level frames)
+/// this is a single row: one groove sprite with the thumb sliding over it. The container is at
+/// (16, 72) on the main window. Coordinates cross-checked against Webamp's classic main window.
+pub const POSBAR_X: i32 = 16;
+pub const POSBAR_Y: i32 = 72;
+pub const POSBAR_W: i32 = 248;
+pub const POSBAR_H: i32 = 10;
+
+/// The groove background: the left 248x10 of POSBAR.BMP, drawn at the container origin.
+pub const POSBAR_BG: Rect = Rect::new(0, 0, POSBAR_W, POSBAR_H);
+
+/// The 29x10 thumb in its normal (released) and pressed (held while scrubbing) cells, to the
+/// right of the groove. It travels `POSBAR_W - POSBAR_THUMB_W` (219) px across the groove.
+pub const POSBAR_THUMB_W: i32 = 29;
+pub const POSBAR_THUMB_H: i32 = 10;
+pub const POSBAR_THUMB_NORMAL: Rect = Rect::new(248, 0, POSBAR_THUMB_W, POSBAR_THUMB_H);
+pub const POSBAR_THUMB_PRESSED: Rect = Rect::new(278, 0, POSBAR_THUMB_W, POSBAR_THUMB_H);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,6 +198,40 @@ mod tests {
         assert_eq!(TIME_DIGITS[1].0 - TIME_DIGITS[0].0, 12, "step within the MM pair");
         assert_eq!(TIME_DIGITS[3].0 - TIME_DIGITS[2].0, 12, "step within the SS pair");
         assert_eq!(TIME_DIGITS[2].0 - TIME_DIGITS[1].0, 18, "MM->SS spans the colon gap");
+    }
+
+    #[test]
+    fn slider_geometry_fits_the_window_and_sheet() {
+        // Both sliders sit on the same row, inside the window, and their thumbs travel a
+        // positive distance across the background (background wider than the thumb).
+        assert_eq!(VOLUME_Y, BALANCE_Y, "volume and balance share a row");
+        // Geometry invariants over compile-time constants: static-assert them so a bad edit
+        // fails to compile rather than at test time.
+        const { assert!(VOLUME_X + VOLUME_W <= BALANCE_X, "volume ends before balance begins") };
+        const { assert!(BALANCE_X + BALANCE_W < MAIN_W, "balance stays inside the window") };
+        const { assert!(VOLUME_W - SLIDER_THUMB_W > 0, "volume thumb travels a positive distance") };
+        const { assert!(BALANCE_W - SLIDER_THUMB_W > 0, "balance thumb travels a positive distance") };
+        // The background column is exactly SLIDER_FRAMES frames of SLIDER_FRAME_STRIDE px, and
+        // the thumb sits just below it (y=422 = 28*15 + 2px gap).
+        assert_eq!(SLIDER_FRAMES * SLIDER_FRAME_STRIDE, 420);
+        assert_eq!(SLIDER_THUMB_NORMAL.y, 422);
+        assert_eq!(SLIDER_THUMB_PRESSED.y, 422);
+        assert_ne!(SLIDER_THUMB_NORMAL.x, SLIDER_THUMB_PRESSED.x, "held thumb is a distinct cell");
+    }
+
+    #[test]
+    fn position_bar_geometry_matches_the_classic_layout() {
+        // Sits inside the window with a groove wider than the thumb (a positive travel).
+        const { assert!(POSBAR_X + POSBAR_W <= MAIN_W, "position bar stays inside the window") };
+        const { assert!(POSBAR_W - POSBAR_THUMB_W > 0, "the thumb travels a positive distance") };
+        assert_eq!(POSBAR_W - POSBAR_THUMB_W, 219, "classic travel");
+        // The groove is the left edge of the sheet; the two thumb cells sit to its right, 30px
+        // apart, distinct, and together imply the classic 307px sheet width.
+        assert_eq!(POSBAR_BG, Rect::new(0, 0, 248, 10));
+        assert_eq!(POSBAR_THUMB_NORMAL, Rect::new(248, 0, 29, 10));
+        assert_eq!(POSBAR_THUMB_PRESSED, Rect::new(278, 0, 29, 10));
+        assert_ne!(POSBAR_THUMB_NORMAL.x, POSBAR_THUMB_PRESSED.x, "held thumb is a distinct cell");
+        assert_eq!(POSBAR_THUMB_PRESSED.x + POSBAR_THUMB_W, 307, "sheet is 307px wide");
     }
 
     #[test]

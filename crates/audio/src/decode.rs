@@ -24,6 +24,11 @@ pub struct Source {
     pub sample_rate: u32,
     /// Channel count of the most recently decoded packet.
     pub channels: usize,
+    /// Total playable length in frames, from the track header, or `None` when the format does
+    /// not report one (a headerless, non-seekable stream). WAV always has it; MP3 has it from a
+    /// Xing/Info/VBRI tag or a bitrate estimate on a seekable file. In gapless mode it is already
+    /// the delay/padding-trimmed length, matching the position clock. Drives the seek bar.
+    pub total_frames: Option<u64>,
 }
 
 impl Source {
@@ -62,6 +67,9 @@ impl Source {
         // WAV reports these up front; MP3 may leave them None until the first frame decodes.
         let sample_rate = track.codec_params.sample_rate.unwrap_or(0);
         let channels = track.codec_params.channels.map_or(0, |c| c.count());
+        // The header-reported length (frames). Present for WAV and most MP3s; used only for the
+        // seek bar and the total-time display, never for decode correctness.
+        let total_frames = track.codec_params.n_frames;
 
         Ok(Self {
             format,
@@ -71,6 +79,7 @@ impl Source {
             buf_cap_frames: 0,
             sample_rate,
             channels,
+            total_frames,
         })
     }
 
@@ -115,10 +124,15 @@ impl Source {
         }
     }
 
-    /// Seek to `seconds` from the start of the track.
-    pub fn seek(&mut self, seconds: f64) -> Result<(), Error> {
+    /// Seek so decoding resumes at `seconds` from the start of the track, returning the frame it
+    /// actually landed on. `SeekMode::Accurate` lands at or just before the request (at most one
+    /// packet early, which is imperceptible for a Winamp-style scrub), so the returned frame is
+    /// the true resume point and the caller rebases the position clock to it. The decoder is reset
+    /// afterwards, as the `FormatReader` contract requires: seeking invalidates the decoder's
+    /// carried state (for MP3, the bit reservoir and overlap buffers).
+    pub fn seek(&mut self, seconds: f64) -> Result<u64, Error> {
         let time = Time::new(seconds.trunc() as u64, seconds.fract());
-        self.format.seek(
+        let seeked = self.format.seek(
             SeekMode::Accurate,
             SeekTo::Time {
                 time,
@@ -126,6 +140,6 @@ impl Source {
             },
         )?;
         self.decoder.reset();
-        Ok(())
+        Ok(seeked.actual_ts)
     }
 }

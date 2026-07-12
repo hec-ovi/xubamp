@@ -16,6 +16,15 @@ pub struct Skin {
     /// The bitmap font sheet (`text.bmp`) for the song-title marquee. `None` when the skin
     /// omits it, in which case the marquee simply does not draw.
     pub text: Option<Image>,
+    /// The volume slider sheet (`volume.bmp`): a column of level-indicator frames plus the
+    /// thumb. `None` skips drawing the volume slider.
+    pub volume: Option<Image>,
+    /// The balance slider sheet (`balance.bmp`), same layout as `volume`. `None` skips the
+    /// balance slider.
+    pub balance: Option<Image>,
+    /// The position/seek bar sheet (`posbar.bmp`): the 248x10 groove background plus the two
+    /// thumb states. `None` skips drawing the seek bar (the main background groove shows through).
+    pub posbar: Option<Image>,
 }
 
 impl Skin {
@@ -32,6 +41,9 @@ impl Skin {
             // draws either the same way.
             numbers: sheet("nums_ex.bmp").or_else(|| sheet("numbers.bmp")),
             text: sheet("text.bmp"),
+            volume: sheet("volume.bmp"),
+            balance: sheet("balance.bmp"),
+            posbar: sheet("posbar.bmp"),
         }
     }
 }
@@ -56,6 +68,41 @@ mod tests {
         assert!(skin.titlebar.is_none());
         assert!(skin.numbers.is_none());
         assert!(skin.text.is_none());
+        assert!(skin.volume.is_none());
+        assert!(skin.balance.is_none());
+        assert!(skin.posbar.is_none());
+    }
+
+    #[test]
+    fn decodes_the_posbar_sheet_when_present() {
+        // A classic posbar.bmp is 307x10 (a 248px groove plus the two 29px thumb cells); here the
+        // exact size does not matter, only that it lands in `skin.posbar`.
+        let posbar = solid_bmp_24(307, 10, 7, 8, 9);
+        let wsz = wsz_stored(&[("POSBAR.BMP", &posbar)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let p = skin.posbar.expect("posbar sheet decoded");
+        assert_eq!((p.width, p.height), (307, 10));
+        assert_eq!(&p.rgba[0..4], &[7, 8, 9, 255]);
+    }
+
+    #[test]
+    fn decodes_the_slider_sheets_when_present() {
+        // Classic volume.bmp/balance.bmp are 68x433 (a 420px frame column plus the thumb row);
+        // here the exact size does not matter, only that each lands in its own field.
+        let volume = solid_bmp_24(68, 433, 1, 2, 3);
+        let balance = solid_bmp_24(47, 433, 4, 5, 6);
+        let wsz = wsz_stored(&[("VOLUME.BMP", &volume), ("BALANCE.BMP", &balance)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let v = skin.volume.expect("volume sheet decoded");
+        assert_eq!((v.width, v.height), (68, 433));
+        assert_eq!(&v.rgba[0..4], &[1, 2, 3, 255]);
+        let b = skin.balance.expect("balance sheet decoded");
+        assert_eq!((b.width, b.height), (47, 433));
+        assert_eq!(&b.rgba[0..4], &[4, 5, 6, 255]);
     }
 
     #[test]

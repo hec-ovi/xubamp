@@ -107,12 +107,23 @@ fn main() {
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
     // window would display, then exit without opening a window. `XUBAMP_TITLE` overrides the
-    // marquee text so the title strip can be diffed without a real media file.
+    // marquee text, `XUBAMP_VOLUME` (0-100) / `XUBAMP_BALANCE` (-100..100) the slider positions,
+    // and `XUBAMP_POSITION` (0.0-1.0) the seek-bar thumb, so those strips can be diffed without a
+    // real media file or live input.
     if let Ok(path) = std::env::var("XUBAMP_DUMP_RGBA") {
-        let state = xubamp_render::hit::UiState {
+        let mut state = xubamp_render::hit::UiState {
             title: std::env::var("XUBAMP_TITLE").unwrap_or_else(|_| title.clone()),
             ..Default::default()
         };
+        if let Some(v) = std::env::var("XUBAMP_VOLUME").ok().and_then(|s| s.parse().ok()) {
+            state.volume = v;
+        }
+        if let Some(b) = std::env::var("XUBAMP_BALANCE").ok().and_then(|s| s.parse().ok()) {
+            state.balance = b;
+        }
+        if let Some(p) = std::env::var("XUBAMP_POSITION").ok().and_then(|s| s.parse().ok()) {
+            state.position = Some(p);
+        }
         let fb = xubamp_render::compose_main_window(&skin, &state);
         std::fs::write(&path, &fb.rgba).expect("write rgba dump");
         println!("dumped {}x{} rgba to {path}", fb.width, fb.height);
@@ -140,45 +151,82 @@ fn main() {
         eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
     }
 
-    // Bridge transport commands from the window to the engine. Play resumes, Pause and Stop
-    // halt (Stop reset-to-start needs decoder seeking, which comes with the seek bar). Prev,
-    // Next and Eject wait for a playlist. Without the audio feature, commands are just logged.
+    // Bridge UI commands from the window to the engine. Play resumes (restarting from the top if
+    // the track already finished), Pause halts, Stop halts and rewinds to the start (classic
+    // Winamp Stop shows 00:00); Prev, Next and Eject wait for a playlist. Volume and balance
+    // retune the realtime gains live; Seek repositions playback to the released posbar fraction.
+    // Without the audio feature, commands are just logged.
     #[cfg(feature = "audio")]
     let on_command = {
         let handle = _engine.as_ref().map(|engine| engine.handle());
-        move |command: xubamp_render::hit::Transport| {
-            use xubamp_render::hit::Transport;
+        move |command: xubamp_render::hit::Command| {
+            use xubamp_render::hit::{Command, Transport};
             match command {
-                Transport::Play => {
+                Command::Transport(Transport::Play) => {
                     if let Some(h) = &handle {
+                        // A finished track restarts from the top on Play.
+                        if h.is_finished() {
+                            h.seek_to_start();
+                        }
                         h.set_active(true);
                     }
                 }
-                Transport::Pause | Transport::Stop => {
+                Command::Transport(Transport::Pause) => {
                     if let Some(h) = &handle {
                         h.set_active(false);
                     }
                 }
-                other => eprintln!("xubamp: {other:?} not wired yet (needs a playlist)"),
+                Command::Transport(Transport::Stop) => {
+                    if let Some(h) = &handle {
+                        h.set_active(false);
+                        h.seek_to_start();
+                    }
+                }
+                Command::Transport(other) => {
+                    eprintln!("xubamp: {other:?} not wired yet (needs a playlist)")
+                }
+                Command::Volume(v) => {
+                    if let Some(h) = &handle {
+                        h.set_volume(v);
+                    }
+                }
+                Command::Balance(b) => {
+                    if let Some(h) = &handle {
+                        h.set_balance(b);
+                    }
+                }
+                Command::Seek(fraction) => {
+                    if let Some(h) = &handle {
+                        h.seek_fraction(fraction);
+                    }
+                }
             }
         }
     };
     #[cfg(not(feature = "audio"))]
-    let on_command = |command: xubamp_render::hit::Transport| {
-        eprintln!("xubamp: transport command {command:?}");
+    let on_command = |command: xubamp_render::hit::Command| {
+        eprintln!("xubamp: command {command:?}");
     };
 
-    // Feed the window's once-a-second clock. With audio, report the engine's elapsed seconds
-    // (or `None` when nothing is playing, blanking the display); without it, always blank.
+    // Feed the window's redraw tick a clock snapshot. With audio, report the engine's elapsed
+    // seconds, the 0..=1 seek-bar position, and the total duration (all `None` when nothing is
+    // playing, blanking the display and parking the thumb at the start); without it, always blank.
     #[cfg(feature = "audio")]
-    let time_source = {
+    let playback_source = {
         let handle = _engine.as_ref().map(|engine| engine.handle());
-        move || handle.as_ref().map(|h| h.elapsed_secs())
+        move || match &handle {
+            Some(h) => xubamp_render::hit::Playback {
+                elapsed: Some(h.elapsed_secs()),
+                position: h.position_fraction(),
+                duration: h.duration_secs(),
+            },
+            None => xubamp_render::hit::Playback::default(),
+        }
     };
     #[cfg(not(feature = "audio"))]
-    let time_source = || None::<u32>;
+    let playback_source = xubamp_render::hit::Playback::default;
 
-    if let Err(e) = xubamp_wl::run(skin, title, on_command, time_source) {
+    if let Err(e) = xubamp_wl::run(skin, title, on_command, playback_source) {
         eprintln!("xubamp: {e}");
         std::process::exit(1);
     }

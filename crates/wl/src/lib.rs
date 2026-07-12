@@ -47,16 +47,16 @@ use xubamp_skin::Skin;
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
 
 /// Open the main window for `skin` and run until the user closes it. `title` is the song title
-/// shown in the marquee (empty for none). `on_command` is called on the event-loop thread
-/// whenever a transport button is clicked (pressed and released over itself); the caller bridges
-/// it to the audio engine. `time_source` is polled once a second for the elapsed play time
-/// (whole seconds, or `None` to blank the display), so the time digits tick without this layer
-/// knowing anything about audio.
+/// shown in the marquee (empty for none). `on_command` is called on the event-loop thread for
+/// every UI command: a transport button click, a volume/balance change as its slider is dragged,
+/// or a seek when the position bar is released; the caller bridges it to the audio engine.
+/// `playback_source` is polled each redraw tick for the clock snapshot (elapsed seconds, seek-bar
+/// position, and duration), so the display ticks without this layer knowing anything about audio.
 pub fn run(
     skin: Skin,
     title: String,
-    on_command: impl FnMut(hit::Transport) + 'static,
-    time_source: impl FnMut() -> Option<u32> + 'static,
+    on_command: impl FnMut(hit::Command) + 'static,
+    playback_source: impl FnMut() -> hit::Playback + 'static,
 ) -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -96,7 +96,7 @@ pub fn run(
         state,
         fb,
         on_command: Box::new(on_command),
-        time_source: Box::new(time_source),
+        playback_source: Box::new(playback_source),
         pointer: None,
         seat: None,
         configured: false,
@@ -146,10 +146,11 @@ struct App {
     state: hit::UiState,
     /// The composited frame for the current `state`, uploaded to the shm buffer by `draw`.
     fb: Framebuffer,
-    /// Sink for transport commands, called when a button click completes.
-    on_command: Box<dyn FnMut(hit::Transport)>,
-    /// Polled once a second for the elapsed play time that drives the clock display.
-    time_source: Box<dyn FnMut() -> Option<u32>>,
+    /// Sink for UI commands (transport clicks, slider drags, seek), called on the event-loop
+    /// thread.
+    on_command: Box<dyn FnMut(hit::Command)>,
+    /// Polled each redraw tick for the clock snapshot (elapsed, seek-bar position, duration).
+    playback_source: Box<dyn FnMut() -> hit::Playback>,
     /// The pointer, once the seat reports the capability. `None` on a seat with no mouse.
     pointer: Option<wl_pointer::WlPointer>,
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
@@ -169,6 +170,17 @@ impl App {
         self.draw();
     }
 
+    /// Carry out the redraw and command side effects of a pointer [`hit::Outcome`]. The
+    /// `start_move` side effect is handled at the press site (it needs the event serial).
+    fn apply(&mut self, outcome: hit::Outcome) {
+        if outcome.redraw {
+            self.redraw();
+        }
+        if let Some(command) = outcome.command {
+            (self.on_command)(command);
+        }
+    }
+
     /// Redraw-timer tick: step the marquee, poll the playback clock, and recompose only if
     /// something moved. Returns how long to wait before the next tick: [`MARQUEE_TICK`] while a
     /// title is scrolling, else a second (just the clock). Does nothing before the first
@@ -179,7 +191,7 @@ impl App {
             // configure instead of waiting out a full second.
             return MARQUEE_TICK;
         }
-        let mut changed = hit::on_tick(&mut self.state, (self.time_source)());
+        let mut changed = hit::on_tick(&mut self.state, (self.playback_source)());
         // Only animate when the skin actually renders a marquee. A skin without text.bmp (the
         // built-in default) shows no title strip, so it must not spin a 10 fps redraw loop over
         // a title it never draws.
@@ -328,29 +340,30 @@ impl PointerHandler for App {
             match event.kind {
                 PointerEventKind::Press {
                     button, serial, ..
-                } if button == BTN_LEFT => match hit::on_press(&mut self.state, x, y) {
-                    // Hand the drag to the compositor: it moves the window while the button
-                    // is held, then ends the grab on release. This is the classic title-bar
-                    // drag; Wayland has no client-set absolute position, so this is the way.
-                    hit::PressOutcome::StartMove => {
+                } if button == BTN_LEFT => {
+                    let outcome = hit::on_press(&mut self.state, x, y);
+                    // A title-bar press hands the drag to the compositor: it moves the window
+                    // while the button is held, then ends the grab on release. Wayland has no
+                    // client-set absolute position, so this is the classic title-bar drag.
+                    if outcome.start_move {
                         if let Some(seat) = &self.seat {
                             self.window.move_(seat, serial);
                         }
                     }
-                    hit::PressOutcome::Redraw => self.redraw(),
-                    hit::PressOutcome::Ignore => {}
-                },
+                    self.apply(outcome);
+                }
+                PointerEventKind::Motion { .. } => {
+                    // Drives slider dragging; inert otherwise. Wayland keeps delivering motion
+                    // during the implicit button grab, so a drag continues past the window edge.
+                    let outcome = hit::on_motion(&mut self.state, x, y);
+                    self.apply(outcome);
+                }
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                     let outcome = hit::on_release(&mut self.state, x, y);
-                    if outcome.redraw {
-                        self.redraw();
-                    }
-                    if let Some(command) = outcome.command {
-                        (self.on_command)(command);
-                    }
+                    self.apply(outcome);
                 }
                 PointerEventKind::Leave { .. } => {
-                    // Cancel any in-progress press so a button never stays stuck down.
+                    // Cancel any in-progress button press so a button never stays stuck down.
                     let needs_redraw = hit::on_leave(&mut self.state);
                     if needs_redraw {
                         self.redraw();

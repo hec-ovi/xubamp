@@ -135,6 +135,104 @@ fn pause_holds_the_clock_and_resume_advances_it() {
 
 #[test]
 #[ignore = "needs a running PipeWire session"]
+fn seek_jumps_the_clock_and_reports_duration() {
+    let path = std::env::temp_dir().join("xubamp_seek_test.wav");
+    write_wav(&path, 48_000, 4); // four seconds, so a mid-track seek has somewhere to land
+
+    let engine = AudioEngine::play(&path).expect("engine failed to start playback");
+    let handle = engine.handle();
+
+    // The WAV header gives an exact length.
+    assert_eq!(handle.duration_secs(), Some(4), "duration read from the WAV header");
+
+    // Let ~1 second play so there is a clear "before" position.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && engine.position_frames() <= 48_000 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(engine.position_frames() > 48_000, "playback did not reach one second");
+
+    // Seek to 75% (~3 s / 144_000 frames). The producer repositions and rebases the clock.
+    handle.seek_fraction(0.75);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && engine.position_frames() < 140_000 {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let after = engine.position_frames();
+    assert!(
+        (140_000..=176_000).contains(&after),
+        "seek did not land near 3 s (got {after} frames)"
+    );
+    // The clock keeps advancing from the new spot rather than freezing.
+    std::thread::sleep(Duration::from_millis(300));
+    let now = engine.position_frames();
+    assert!(
+        now > after,
+        "clock did not advance after the seek: after={after}, now={now}, finished={}",
+        handle.is_finished()
+    );
+
+    // Seek-to-start (Stop's rewind) returns the clock near 0 even while playing.
+    handle.seek_to_start();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && engine.position_frames() > 20_000 {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        engine.position_frames() < 20_000,
+        "seek-to-start did not rewind the clock (got {} frames)",
+        engine.position_frames()
+    );
+
+    drop(engine);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[ignore = "needs a running PipeWire session"]
+fn restarts_a_finished_track_from_the_start() {
+    let path = std::env::temp_dir().join("xubamp_restart_test.wav");
+    write_wav(&path, 48_000, 1); // one second, so it finishes quickly
+
+    let engine = AudioEngine::play(&path).expect("engine failed to start playback");
+    let handle = engine.handle();
+
+    // Play it through to the end.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !handle.is_finished() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(handle.is_finished(), "track never finished");
+    assert!(engine.position_frames() >= 47_000, "clock did not reach the end");
+
+    // Restart-on-play: seek to the start, then reactivate. The producer, parked at the end,
+    // revives, clears `finished`, and refills from 0; the RT plays again from the top.
+    handle.seek_to_start();
+    handle.set_active(true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && (handle.is_finished() || engine.position_frames() > 30_000) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!handle.is_finished(), "restart did not clear the finished flag");
+    assert!(
+        engine.position_frames() < 40_000,
+        "restart did not rewind and replay from the start (got {} frames)",
+        engine.position_frames()
+    );
+
+    // And it plays through to the end a second time.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !handle.is_finished() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(handle.is_finished(), "restarted track did not play through again");
+
+    drop(engine);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[ignore = "needs a running PipeWire session"]
 fn freezes_the_clock_at_end_of_track_and_reports_finished() {
     let path = std::env::temp_dir().join("xubamp_eos_test.wav");
     write_wav(&path, 48_000, 1); // exactly one second of audio

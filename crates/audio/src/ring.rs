@@ -7,12 +7,38 @@
 //! syscall, so it is safe on the audio RT thread. The ring itself (rtrb) allocates once at
 //! construction and never again.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Interleaved stereo: two samples per frame. The whole engine works in this fixed layout.
 pub const CHANNELS: usize = 2;
+
+/// Per-channel linear gains (left, right) for a volume and balance setting. Volume scales both
+/// channels linearly (0..=100 -> 0.0..=1.0, matching classic Winamp's linear taper); balance
+/// attenuates the *opposite* channel by `(100 - |balance|)/100` while the near channel stays
+/// full. At volume 100, balance 0 this is `(1.0, 1.0)` (unity), so the realtime fast path can
+/// skip scaling entirely.
+pub fn mix_gains(volume: u8, balance: i8) -> (f32, f32) {
+    let v = volume.min(100) as f32 / 100.0;
+    let b = balance.clamp(-100, 100) as f32;
+    let left = if b > 0.0 { (100.0 - b) / 100.0 } else { 1.0 };
+    let right = if b < 0.0 { (100.0 + b) / 100.0 } else { 1.0 };
+    (v * left, v * right)
+}
+
+/// Realtime side: scale an interleaved stereo buffer in place by per-channel gains. RT-safe (a
+/// bounded multiply, no alloc/lock/syscall). Unity gains short-circuit, so full-volume centered
+/// playback costs nothing. Scaling the trailing silence padding is harmless (`0 * g == 0`).
+pub fn apply_gain(out: &mut [f32], gain_l: f32, gain_r: f32) {
+    if gain_l == 1.0 && gain_r == 1.0 {
+        return;
+    }
+    for frame in out.chunks_exact_mut(CHANNELS) {
+        frame[0] *= gain_l;
+        frame[1] *= gain_r;
+    }
+}
 
 /// Counters shared between the app thread (reads position/state), the producer thread
 /// (writes seek/flush) and the RT callback (writes `frames_consumed`). All lock-free.
@@ -20,38 +46,124 @@ pub const CHANNELS: usize = 2;
 pub struct SharedState {
     /// Frames the RT callback has consumed. Written only by the callback (Relaxed).
     pub frames_consumed: AtomicU64,
-    /// Playback position in frames at the last seek or track start. Producer writes it.
-    pub seek_base: AtomicU64,
-    /// `frames_consumed` snapshot captured at that seek, so the clock does not jump.
-    pub consumed_base: AtomicU64,
-    /// Producer -> RT: drop any queued audio on the next callback (seek/stop/track change).
+    /// Position clock offset: `position = base_offset + frames_consumed`. It folds the seek target
+    /// and the `frames_consumed` snapshot at that seek into a single value (`seek_target -
+    /// consumed_at_seek`), so the producer publishes a rebase with ONE atomic store and the UI
+    /// reads the clock without a two-variable invariant that could tear mid-seek. Signed because a
+    /// backward seek makes it negative; the position is clamped at 0.
+    pub base_offset: AtomicI64,
+    /// Producer -> RT: when set, the callback drops all queued audio on its next quantum. A seek
+    /// deliberately leaves this unset (dropping the buffer underruns the stream, which some sinks
+    /// suspend on; see [`SharedState::begin_seek`]); it is kept for a future track change that can
+    /// deactivate the stream first.
     pub flush: AtomicBool,
     /// The graph rate PipeWire actually negotiated, published from `param_changed`.
     pub stream_rate: AtomicU32,
     /// Producer -> app: the track fully drained after a clean end of decode. Set once, so the
     /// UI can show the stopped state and a future playlist can advance to the next track.
     pub finished: AtomicBool,
+    /// The current volume (0..=100) and balance (-100..=100), written by the UI thread. Kept so
+    /// setting one recomputes the mix from both; not read on the RT path.
+    pub volume: AtomicU32,
+    pub balance: AtomicI32,
+    /// Left/right realtime gains as `f32` bits, derived from `volume`/`balance` by `refresh_mix`
+    /// and read by the RT callback. Default unity (1.0) so playback is full until the UI moves a
+    /// slider.
+    pub gain_l: AtomicU32,
+    pub gain_r: AtomicU32,
+    /// UI -> producer: a pending seek target in frames, or `-1` for none. The UI thread writes it
+    /// (a newer request overwrites an unhandled older one, coalescing), the producer thread reads
+    /// and clears it. Not on the RT path.
+    pub seek_request: AtomicI64,
 }
 
 impl SharedState {
     pub fn new() -> Self {
         Self {
             frames_consumed: AtomicU64::new(0),
-            seek_base: AtomicU64::new(0),
-            consumed_base: AtomicU64::new(0),
+            base_offset: AtomicI64::new(0),
             flush: AtomicBool::new(false),
             stream_rate: AtomicU32::new(0),
             finished: AtomicBool::new(false),
+            // Default to full volume, centered: unity gains, so playback is at full level before
+            // the UI ever touches a slider (and it never opens silent).
+            volume: AtomicU32::new(100),
+            balance: AtomicI32::new(0),
+            gain_l: AtomicU32::new(1.0f32.to_bits()),
+            gain_r: AtomicU32::new(1.0f32.to_bits()),
+            // No seek pending until the UI requests one.
+            seek_request: AtomicI64::new(-1),
         }
     }
 
-    /// Playback position in frames: the seek base plus frames consumed since that seek.
-    /// `saturating_sub` guards the brief window where the callback has not yet caught up to
-    /// a freshly written `consumed_base`.
+    /// UI -> producer: request a seek to `target_frames` from the start of the track. Coalescing:
+    /// a newer request overwrites an unhandled older one, since only the latest target matters.
+    /// The producer picks it up with [`take_seek`] between decode steps.
+    pub fn request_seek(&self, target_frames: u64) {
+        // Frame counts this large never occur (a track longer than the age of the universe), so
+        // the i64 cast cannot collide with the -1 sentinel.
+        self.seek_request.store(target_frames as i64, Ordering::Relaxed);
+    }
+
+    /// Producer: is a seek pending? A cheap non-consuming peek, so the push/drain loops can bail
+    /// out to handle it without swallowing the request.
+    pub fn has_seek(&self) -> bool {
+        self.seek_request.load(Ordering::Relaxed) >= 0
+    }
+
+    /// Producer: take the pending seek target in frames, clearing it, or `None` if none is set.
+    pub fn take_seek(&self) -> Option<u64> {
+        let v = self.seek_request.swap(-1, Ordering::Relaxed);
+        (v >= 0).then_some(v as u64)
+    }
+
+    /// Producer: after repositioning the decoder to `landed_frames`, republish the position clock
+    /// so it reports the new spot immediately and clear any end-of-track flag so a seek revives a
+    /// finished track. Called only from the producer thread, after the decoder seek succeeds.
+    ///
+    /// It deliberately does NOT drop the queued audio. Dropping it would empty the ring for a
+    /// cycle, and an output stream that underruns is suspended by some sinks (notably Bluetooth)
+    /// and never resumes, freezing playback. Instead the ~0.5 s already buffered plays out while
+    /// the decoder refills from the new position behind it, so a seek carries a short tail of the
+    /// previous position (bounded by the ring latency) before the new audio arrives. The clock
+    /// rebases immediately, so the display responds at once and the audio catches up within that
+    /// window. (The RT still honours the `flush` flag; it is just left unset here.)
+    pub fn begin_seek(&self, landed_frames: u64) {
+        // Rebase in a single store: base_offset = landed - consumed_now, so
+        // position = base_offset + frames_consumed reads back `landed` immediately and advances
+        // from there. One atomic means the UI can never observe a half-applied (target, snapshot)
+        // pair; a read racing this store sees either the old or the new position, never a spurious
+        // one, and `frames_consumed` is monotonic so the sum never goes below the seek target.
+        let consumed = self.frames_consumed.load(Ordering::Relaxed) as i64;
+        self.base_offset.store(landed_frames as i64 - consumed, Ordering::Relaxed);
+        self.finished.store(false, Ordering::Release);
+    }
+
+    /// The realtime left/right gains most recently published by [`refresh_mix`].
+    pub fn gains(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.gain_l.load(Ordering::Relaxed)),
+            f32::from_bits(self.gain_r.load(Ordering::Relaxed)),
+        )
+    }
+
+    /// Recompute the realtime gains from the current `volume` and `balance` and publish them for
+    /// the RT callback. Called after the UI changes either value; both are only written from the
+    /// single UI thread, so reading the pair here is race-free.
+    pub fn refresh_mix(&self) {
+        let volume = self.volume.load(Ordering::Relaxed).min(100) as u8;
+        let balance = self.balance.load(Ordering::Relaxed).clamp(-100, 100) as i8;
+        let (gl, gr) = mix_gains(volume, balance);
+        self.gain_l.store(gl.to_bits(), Ordering::Relaxed);
+        self.gain_r.store(gr.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Playback position in frames: `base_offset + frames_consumed`, clamped at 0. Both are single
+    /// atomic loads, so there is no multi-variable tear; `max(0)` covers the moment right after a
+    /// backward seek before the callback has advanced `frames_consumed` to the new base.
     pub fn position_frames(&self) -> u64 {
-        let consumed = self.frames_consumed.load(Ordering::Relaxed);
-        let base = self.consumed_base.load(Ordering::Relaxed);
-        self.seek_base.load(Ordering::Relaxed) + consumed.saturating_sub(base)
+        let consumed = self.frames_consumed.load(Ordering::Relaxed) as i64;
+        (self.base_offset.load(Ordering::Relaxed) + consumed).max(0) as u64
     }
 
     /// Whether the track has played to its end (the producer sets `finished` once the ring has
@@ -120,8 +232,8 @@ pub fn push_all(p: &mut Producer<f32>, mut block: &[f32]) -> bool {
 /// end. The count is published *before* the ring slots are freed (`commit_all`), so the producer
 /// draining the ring sees the final frames the instant it observes the ring empty; without that
 /// order it could flag end-of-track with the last quantum still uncounted and the clock would
-/// tick up afterward. If `flush` is set, drop all queued audio first (seek/stop/track change) and
-/// emit silence for this quantum (counting and returning 0).
+/// tick up afterward. If `flush` is set, drop all queued audio first and emit silence for this
+/// quantum (counting and returning 0).
 pub fn fill_output(
     c: &mut Consumer<f32>,
     out: &mut [f32],

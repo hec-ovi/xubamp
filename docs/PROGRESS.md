@@ -108,6 +108,50 @@ in the repo and git history, nothing important lives only in chat.
     Verified against the real XMMS skin (the title renders pixel-correctly in its panel with zero
     pixels leaking outside the strip); the glyph grid, the scroll threshold and seamless wrap, both
     edges of the clip, multibyte titles, and undersized-sheet safety are unit-tested.
+  - (g) done: the volume and balance sliders. Each draws a level-indicator background (one of 28
+    frames chosen by the value) with a draggable thumb from its own sheet (`volume.bmp` /
+    `balance.bmp`), at the classic destinations (volume 107,57,68x13; balance 177,57,38x13, its
+    background column 9px into the sheet). `render::slider` holds the pure value math (the frame
+    and thumb-offset formulas and their `*_from_x` inverses, cross-checked against Webamp: volume
+    frame `round(v/100*28)-1`, balance frame `floor(|b|/100*27)`, symmetric about center) plus a
+    clipping draw. `render::hit` gained a `Slider` enum, `Region::Volume`/`Balance`, and the
+    slider values with a `dragging` state on `UiState` (which now defaults to full volume so a
+    fresh window is not silent); a press jumps the value to the click and begins a drag, motion
+    tracks it (emitting only on a real change), release ends it, and the whole press/motion/release
+    policy is one uniform `Outcome`. Transport-only commands were generalised to a `Command` enum
+    (`Transport`/`Volume`/`Balance`), and the `wl` pointer handler now processes Motion for
+    dragging (Wayland's implicit grab keeps it going past the window edge). The gain lands in the
+    realtime path: `audio::ring::mix_gains` maps volume (linear) and balance (opposite-channel
+    attenuation) to per-channel gains, `apply_gain` scales the RT buffer in place (unity
+    short-circuits, no allocation), and `SharedState` carries the gains as atomics that
+    `EngineHandle::set_volume`/`set_balance` republish; the RT callback applies them after
+    `fill_output`. Verified against the real base-2.91 skin: dragging either slider changes only
+    its own rect (zero pixel leakage, zero cross-talk) and both render pixel-correctly; the value
+    math, the RT gain path (with a no-allocation proof), the drag transitions, and both
+    review-found test gaps (the `&&` short-circuit and the balance drag arm, each mutation-checked)
+    are unit-tested.
+  - (h) done: the position (seek) bar, and with it decoder seeking. The main window shows a groove
+    with a thumb at the playback position (from `posbar.bmp`: a 248x10 groove plus 29px thumb at
+    x=16,y=72, travel 219, coordinates cross-checked against Webamp). `render::posbar` holds the
+    pure math (fraction to thumb offset and the `position_from_x` inverse) and a clipping draw;
+    `render::hit` gained `Slider::Position`, `Region::Position`, a `Command::Seek(fraction)`, and a
+    `Playback` snapshot (elapsed, position, duration) polled each tick. Unlike volume/balance, the
+    seek bar commits on release (one seek per drag, not per pixel): a press/drag previews the thumb
+    and the target time in the MM:SS display, release emits `Seek`. On the audio side `decode.rs`
+    exposes the track length (`n_frames`) and `Source::seek` returns the landed frame; the engine
+    gained a lock-free `seek_request` atomic, `EngineHandle::seek_fraction`/`seek_to_start`/
+    `duration_secs`/`position_fraction`, and a producer thread reworked to service seeks between
+    decode steps and to survive end-of-track (it parks after finishing so a seek can scrub back in).
+    Seeking rebases the position clock immediately (`begin_seek`) but deliberately does NOT flush
+    the ring: dropping the ~0.5s buffered audio underruns the stream, and some sinks (notably
+    Bluetooth) suspend a stream on underrun and never resume (verified the hard way against the real
+    PipeWire daemon). So a seek carries a short tail of the previous position while the decoder
+    refills behind it; the clock jumps at once and the audio catches up within the ring latency.
+    This also unlocked Stop (halt + rewind to 00:00) and restart-on-Play after a finished track. The
+    value math, the drag-vs-clock interaction, and the posbar rendering are unit-tested; the seek,
+    duration, and restart-from-finish paths are checked end to end against a real null sink (all five
+    ignored engine tests pass). A clean gapless flush (dropping the stale tail without underrunning)
+    is a later polish item.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -142,11 +186,13 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): seek/volume/balance sliders, in-window hotkeys (needs keyboard input,
-  i.e. re-enabling xkbcommon), and the spectrum/oscilloscope. Polish: pause-blink and the
-  click-to-toggle remaining-time display. Plus a real skin. (The built-in default skin has no
-  text.bmp, so its song title is still the baked static one; a live marquee for it awaits an
-  authored default 5x6 text font.)
+- Phase 4 (continued): in-window hotkeys (needs keyboard input, i.e. re-enabling xkbcommon) and
+  the spectrum/oscilloscope. Polish: a gapless seek flush (drop the stale tail without underrunning
+  the stream, e.g. deactivate then flush then refill), pause-blink, the click-to-toggle
+  remaining-time display, a center detent on the balance slider, and button drag-off un-press.
+  Plus a real skin. (The built-in default skin ships no volume.bmp/balance.bmp, text.bmp, or
+  posbar.bmp, so it shows none of the sliders, the seek bar, or a live marquee; those await an
+  authored default sheet set.)
 
 ## Working rules
 

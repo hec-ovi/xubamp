@@ -5,7 +5,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use xubamp_audio::ring::{fill_output, new_ring, push_block};
+use xubamp_audio::ring::{apply_gain, fill_output, new_ring, push_block};
 
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -37,8 +37,9 @@ fn fill_output_does_not_allocate() {
     push_block(&mut p, &block);
 
     let before = ALLOCS.load(Ordering::Relaxed);
-    // Normal copy path.
+    // Normal copy path, then the gain stage (non-unity so it does real work).
     fill_output(&mut c, &mut out, &flush, &consumed);
+    apply_gain(&mut out, 0.5, 0.25);
     // Flush-drain path.
     flush.store(true, Ordering::Release);
     fill_output(&mut c, &mut out, &flush, &consumed);
@@ -46,5 +47,5 @@ fn fill_output_does_not_allocate() {
     fill_output(&mut c, &mut out, &flush, &consumed);
     let after = ALLOCS.load(Ordering::Relaxed);
 
-    assert_eq!(after, before, "fill_output allocated on the realtime path");
+    assert_eq!(after, before, "the realtime fill_output + apply_gain path allocated");
 }

@@ -46,6 +46,18 @@ pub const MAIN_BG: Placement = Placement::new(Rect::new(0, 0, MAIN_W, MAIN_H), 0
 pub const TITLEBAR_ACTIVE: Placement = Placement::new(Rect::new(27, 0, 275, 14), 0, 0);
 pub const TITLEBAR_INACTIVE: Placement = Placement::new(Rect::new(27, 15, 275, 14), 0, 0);
 
+/// The four title-bar buttons, 9x9 each at y=3, from TITLEBAR.BMP. Their released (up) graphics are
+/// baked into the title-bar strip above; only the pressed (down) sprite is blitted while a button
+/// is held, so these placements carry the DOWN source rect and the on-window destination. Order:
+/// options (main menu), minimize, windowshade, close. Source columns 0/9/18 at row 9 (down), except
+/// the windowshade down sprite at (9,18). Destinations and sources cross-checked against Webamp.
+pub const TITLE_BUTTONS_PRESSED: [Placement; 4] = [
+    Placement::new(Rect::new(0, 9, 9, 9), 6, 3),    // options
+    Placement::new(Rect::new(9, 9, 9, 9), 244, 3),  // minimize
+    Placement::new(Rect::new(9, 18, 9, 9), 254, 3), // windowshade
+    Placement::new(Rect::new(18, 9, 9, 9), 264, 3), // close
+];
+
 /// The six transport buttons from CBUTTONS.BMP (normal state, top row), in order:
 /// previous, play, pause, stop, next, eject.
 pub const CBUTTONS: [Placement; 6] = [
@@ -226,6 +238,22 @@ mod tests {
         assert_eq!(SLIDER_THUMB_NORMAL.y, 422);
         assert_eq!(SLIDER_THUMB_PRESSED.y, 422);
         assert_ne!(SLIDER_THUMB_NORMAL.x, SLIDER_THUMB_PRESSED.x, "held thumb is a distinct cell");
+    }
+
+    #[test]
+    fn title_bar_buttons_sit_in_the_top_strip() {
+        assert_eq!(TITLE_BUTTONS_PRESSED.len(), 4);
+        for p in &TITLE_BUTTONS_PRESSED {
+            // Each button is 9x9 within the 14px title-bar band.
+            assert_eq!((p.src.w, p.src.h), (9, 9));
+            assert!(p.dst_y >= 0 && p.dst_y + p.src.h <= TITLEBAR_ACTIVE.src.h, "inside the band");
+            assert!(p.dst_x >= 0 && p.dst_x + p.src.w <= MAIN_W, "inside the window");
+        }
+        // Close is the far-right button; options the far-left.
+        assert_eq!((TITLE_BUTTONS_PRESSED[3].dst_x, TITLE_BUTTONS_PRESSED[3].dst_y), (264, 3));
+        assert_eq!((TITLE_BUTTONS_PRESSED[0].dst_x, TITLE_BUTTONS_PRESSED[0].dst_y), (6, 3));
+        // Minimize sits just left of close.
+        assert_eq!(TITLE_BUTTONS_PRESSED[1].dst_x, 244);
     }
 
     #[test]

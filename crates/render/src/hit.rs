@@ -20,6 +20,25 @@ pub enum Transport {
     Eject,
 }
 
+/// The four title-bar buttons, left to right. A click carries out a window action (handled by the
+/// platform layer, not the audio engine); the up graphics are part of the title-bar strip and only
+/// the pressed sprite is drawn while one is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleButton {
+    Options,
+    Minimize,
+    Shade,
+    Close,
+}
+
+/// Title-button identity for each entry of [`sprites::TITLE_BUTTONS_PRESSED`], in the same order.
+pub const TITLE_BUTTON_ORDER: [TitleButton; 4] = [
+    TitleButton::Options,
+    TitleButton::Minimize,
+    TitleButton::Shade,
+    TitleButton::Close,
+];
+
 /// The three draggable sliders on the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slider {
@@ -61,6 +80,8 @@ pub const TRANSPORT_ORDER: [Transport; 6] = [
 pub enum Region {
     /// The title-bar strip. Pressing here starts an interactive window move (classic drag).
     TitleBar,
+    /// One of the four title-bar buttons (they take priority over the drag band).
+    TitleButton(TitleButton),
     /// One of the six transport buttons.
     Transport(Transport),
     /// The volume slider.
@@ -98,6 +119,12 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     if x < 0 || y < 0 || x >= sprites::MAIN_W || y >= sprites::MAIN_H {
         return Region::None;
     }
+    // Title-bar buttons win over the drag band (a click on a button never starts a move).
+    for (placement, id) in sprites::TITLE_BUTTONS_PRESSED.iter().zip(TITLE_BUTTON_ORDER) {
+        if in_button(placement, x, y) {
+            return Region::TitleButton(id);
+        }
+    }
     for (placement, id) in sprites::CBUTTONS.iter().zip(TRANSPORT_ORDER) {
         if in_button(placement, x, y) {
             return Region::Transport(id);
@@ -127,6 +154,8 @@ pub fn hit_test(x: i32, y: i32) -> Region {
 pub struct UiState {
     /// The transport button currently pressed (drawn depressed), or `None`.
     pub pressed: Option<Transport>,
+    /// The title-bar button currently pressed (drawn depressed), or `None`.
+    pub pressed_title: Option<TitleButton>,
     /// Elapsed play time shown in the MM:SS display, in whole seconds, or `None` to blank it
     /// (nothing loaded or stopped). The platform timer refreshes it once a second via
     /// [`on_tick`], so composition can read it without touching the audio engine.
@@ -161,6 +190,7 @@ impl Default for UiState {
         // audio engine's default gain, and shows the volume thumb flush-right; balance centered.
         Self {
             pressed: None,
+            pressed_title: None,
             elapsed: None,
             title: String::new(),
             marquee_offset: 0,
@@ -197,6 +227,9 @@ pub struct Outcome {
     pub start_move: bool,
     /// A command to emit to the caller, if any.
     pub command: Option<Command>,
+    /// A window action requested by a title-bar button (close, minimize, ...), for the platform
+    /// layer to carry out. Distinct from `command`, which drives the audio engine.
+    pub window: Option<TitleButton>,
     /// Whether UI state changed and the window should be recomposed and redrawn.
     pub redraw: bool,
 }
@@ -221,6 +254,13 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
             start_move: true,
             ..Default::default()
         },
+        Region::TitleButton(b) => {
+            state.pressed_title = Some(b);
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
         Region::Transport(b) => {
             state.pressed = Some(b);
             Outcome {
@@ -342,6 +382,15 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
             ..Default::default()
         };
     }
+    if let Some(b) = state.pressed_title.take() {
+        // A title-bar button carries out its window action only if released over the same button.
+        let fired = hit_test(x, y) == Region::TitleButton(b);
+        return Outcome {
+            window: fired.then_some(b),
+            redraw: true,
+            ..Default::default()
+        };
+    }
     match state.pressed.take() {
         Some(b) => {
             let fired = hit_test(x, y) == Region::Transport(b);
@@ -360,7 +409,10 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
 /// and the release past the edge, so the drag should continue rather than abort here. Returns
 /// whether a redraw is needed.
 pub fn on_leave(state: &mut UiState) -> bool {
-    state.pressed.take().is_some()
+    // Cancel any armed button (transport or title-bar) so none stays stuck down.
+    let transport = state.pressed.take().is_some();
+    let title = state.pressed_title.take().is_some();
+    transport || title
 }
 
 /// Refresh the display from the latest playback snapshot (elapsed seconds and seek-bar position,
@@ -477,6 +529,42 @@ mod tests {
         assert!(out.start_move);
         assert_eq!(s.pressed, None);
         assert_eq!(s.dragging, None);
+    }
+
+    #[test]
+    fn title_buttons_win_over_the_drag_band_and_fire_on_release() {
+        // Close (264,3) and minimize (244,3) are their own regions, not the drag band.
+        let (cx, cy) = (264 + 4, 3 + 4);
+        assert_eq!(hit_test(cx, cy), Region::TitleButton(TitleButton::Close));
+        assert_eq!(hit_test(244 + 4, 3 + 4), Region::TitleButton(TitleButton::Minimize));
+        // Bare title-bar area away from the buttons is still the drag band (no move suppressed).
+        assert_eq!(hit_test(137, 5), Region::TitleBar);
+
+        // Press arms the button (drawn pressed), starts no move, and fires no action yet.
+        let mut s = UiState::default();
+        let out = on_press(&mut s, cx, cy);
+        assert_eq!(s.pressed_title, Some(TitleButton::Close));
+        assert!(out.redraw && !out.start_move && out.window.is_none(), "arm only");
+        // Release over the same button carries out the window action.
+        let out = on_release(&mut s, cx, cy);
+        assert_eq!(out.window, Some(TitleButton::Close), "close fires on release over it");
+        assert_eq!(s.pressed_title, None);
+    }
+
+    #[test]
+    fn title_button_released_off_the_button_cancels() {
+        let mut s = UiState { pressed_title: Some(TitleButton::Close), ..Default::default() };
+        let out = on_release(&mut s, 137, 45); // released over the window body
+        assert_eq!(out.window, None, "dragged off the button = no action");
+        assert!(out.redraw, "still redraw to un-press");
+        assert_eq!(s.pressed_title, None);
+    }
+
+    #[test]
+    fn leave_clears_a_pressed_title_button() {
+        let mut s = UiState { pressed_title: Some(TitleButton::Minimize), ..Default::default() };
+        assert!(on_leave(&mut s), "needs redraw to un-press the title button");
+        assert_eq!(s.pressed_title, None);
     }
 
     #[test]

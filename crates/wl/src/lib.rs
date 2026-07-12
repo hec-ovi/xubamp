@@ -202,6 +202,16 @@ impl App {
         if let Some(command) = outcome.command {
             (self.on_command)(command);
         }
+        if let Some(action) = outcome.window {
+            match action {
+                hit::TitleButton::Close => self.exit = true,
+                hit::TitleButton::Minimize => self.window.set_minimized(),
+                // Windowshade mode and the main menu are later phases; the button still shows its
+                // pressed feedback, but the action is a no-op for now.
+                hit::TitleButton::Shade => eprintln!("xubamp: windowshade mode not implemented yet"),
+                hit::TitleButton::Options => eprintln!("xubamp: main menu not implemented yet"),
+            }
+        }
     }
 
     /// Redraw-timer tick: poll the playback clock, step the marquee and the visualizer, and

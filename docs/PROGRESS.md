@@ -169,6 +169,16 @@ in the repo and git history, nothing important lives only in chat.
     is pixel-asserted); verified live on the real GNOME session (the bars respond to music). An
     adversarial correctness/RT-safety review of the diff was applied (the marquee cadence coupling,
     an oscilloscope cast-overflow guard, the settle-frame redraw, and four test gaps).
+  - (j) done: the title-bar buttons. Close and minimize work (close exits the window, minimize calls
+    `xdg_toplevel.set_minimized`); the windowshade and options/menu buttons show pressed feedback but
+    their actions are later phases. `render::hit` gained a `TitleButton` enum, `Region::TitleButton`
+    (which takes priority over the title-bar drag band, so a button click never starts a window
+    move), a `pressed_title` state, and an `Outcome.window` action the `wl` layer carries out (the
+    audio `Command` path is untouched). A press arms the button (its pressed sprite from
+    `titlebar.bmp` drawn over the strip), and the action fires only when the release lands on the
+    same button (dragging off cancels), matching classic behaviour. Geometry (close 264,3,9x9;
+    minimize 244,3; shade 254,3; options 6,3) cross-checked against Webamp; the hit priority, the
+    press/release/cancel policy, and the pressed-sprite draw are unit-tested.
 
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
@@ -203,14 +213,13 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Next
 
-- Phase 4 (continued): the title-bar buttons (close, minimize, and the windowshade toggle; geometry
-  cross-checked against Webamp: close 264,3,9x9 and minimize 244,3,9x9, both taking priority over
-  the drag) and in-window hotkeys (needs keyboard input, i.e. re-enabling xkbcommon). Polish: a
-  gapless seek flush (drop the stale tail without underrunning the stream, e.g. deactivate then
-  flush then refill), pause-blink, the click-to-toggle remaining-time display, a center detent on
-  the balance slider, and button drag-off un-press. Plus a real skin. (The built-in default skin
-  ships no volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt, so it shows none of the
-  sliders, the seek bar, the marquee, or the visualizer; those await an authored default sheet set.)
+- Phase 4 (continued): in-window hotkeys (needs keyboard input, i.e. re-enabling xkbcommon), the
+  windowshade (compact) mode, and the options/main menu. Polish: a gapless seek flush (drop the
+  stale tail without underrunning the stream, e.g. deactivate then flush then refill), pause-blink,
+  the click-to-toggle remaining-time display, a center detent on the balance slider, and button
+  drag-off un-press. Plus a real skin. (The built-in default skin ships no
+  volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt, so it shows none of the sliders,
+  the seek bar, the marquee, or the visualizer; those await an authored default sheet set.)
 
 ## Working rules
 

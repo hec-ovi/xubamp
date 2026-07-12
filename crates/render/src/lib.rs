@@ -90,6 +90,12 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     }
     if let Some(titlebar) = &skin.titlebar {
         blit_placement(&mut fb, titlebar, sprites::TITLEBAR_ACTIVE);
+        // A held title-bar button shows its pressed sprite over the strip (its up graphic is
+        // already baked into the strip).
+        if let Some(b) = state.pressed_title {
+            let idx = hit::TITLE_BUTTON_ORDER.iter().position(|&t| t == b).unwrap();
+            blit_placement(&mut fb, titlebar, sprites::TITLE_BUTTONS_PRESSED[idx]);
+        }
     }
     if let Some(cbuttons) = &skin.cbuttons {
         for ((normal, pressed), id) in sprites::CBUTTONS
@@ -219,6 +225,33 @@ mod tests {
         assert_eq!(px(&fb, 39 + 11, 88 + 9), [255, 255, 255, 255], "play pressed");
         // Stop (dst 85,88) is not pressed -> still the BLUE normal row.
         assert_eq!(px(&fb, 85 + 11, 88 + 9), [0, 0, 255, 255], "stop normal");
+    }
+
+    #[test]
+    fn pressed_title_button_draws_its_down_sprite() {
+        // A title-bar sheet all BLUE, with the close DOWN sprite (18,9,9,9) painted WHITE.
+        let mut sheet = solid(344, 87, [0, 0, 255, 255]);
+        for y in 9..18u32 {
+            for x in 18..27u32 {
+                let o = ((y * 344 + x) * 4) as usize;
+                sheet.rgba[o..o + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            titlebar: Some(sheet),
+            ..Default::default()
+        };
+        // Idle: the close area shows the (blue) strip, no pressed sprite.
+        let idle = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&idle, 264 + 4, 3 + 4), [0, 0, 255, 255], "close area is the strip when idle");
+        // Held: the WHITE down sprite is drawn at the close destination (264,3,9,9).
+        let state = hit::UiState {
+            pressed_title: Some(hit::TitleButton::Close),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &state);
+        assert_eq!(px(&fb, 264 + 4, 3 + 4), [255, 255, 255, 255], "held close shows its pressed sprite");
     }
 
     #[test]

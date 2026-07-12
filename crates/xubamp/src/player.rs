@@ -79,7 +79,11 @@ impl Player {
     pub fn transport(&mut self, t: Transport) {
         match t {
             Transport::Prev => {
-                if self.playlist.prev().is_some() {
+                // Back retraces the real play order (the history stack), so it returns to the track
+                // you actually just heard, not merely index-1. This is what makes Prev correct under
+                // shuffle. Falls back to the linear previous when there is no history.
+                let fresh = self.playlist.peek_prev();
+                if self.playlist.back(fresh).is_some() {
                     self.load_current();
                 }
             }
@@ -101,23 +105,25 @@ impl Player {
         }
     }
 
-    /// Advance to the next track: a random one in shuffle mode, otherwise the next in order (which
-    /// wraps when repeat is on). Loads and plays whatever it lands on; a no-op at a hard end.
+    /// Advance to the next track (Next button or auto-advance): redo a stepped-back track if any,
+    /// else a random one in shuffle mode or the next in order (wrapping when repeat is on). Loads and
+    /// plays whatever it lands on; a no-op at a hard end. Remembers the departing track for Back.
     fn advance(&mut self) {
-        if self.shuffle && self.playlist.len() > 1 {
-            let i = self.next_random();
-            if self.playlist.select(i).is_some() {
-                self.load_current();
-            }
-        } else if self.playlist.next().is_some() {
+        let fresh = if self.shuffle && self.playlist.len() > 1 {
+            Some(self.next_random())
+        } else {
+            self.playlist.peek_next()
+        };
+        if self.playlist.forward(fresh).is_some() {
             self.load_current();
         }
     }
 
-    /// Play the playlist track at index `i` (a double-click in the playlist window). No-op if the
-    /// index is out of range; the selection is left unchanged in that case.
+    /// Play the playlist track at index `i` (a double-click in the playlist window). Remembers the
+    /// current track for Back and clears the forward stack (a fresh navigation). No-op if the index
+    /// is out of range.
     pub fn play_index(&mut self, i: usize) {
-        if self.playlist.select(i).is_some() {
+        if self.playlist.jump_to(i).is_some() {
             self.load_current();
         }
     }

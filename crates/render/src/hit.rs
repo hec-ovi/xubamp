@@ -31,6 +31,14 @@ pub enum TitleButton {
     Close,
 }
 
+/// The two main-window toggle buttons that open/close a secondary window: the equalizer and the
+/// playlist editor. They light while their window is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowToggle {
+    Equalizer,
+    Playlist,
+}
+
 /// Title-button identity for each entry of [`sprites::TITLE_BUTTONS_PRESSED`], in the same order.
 pub const TITLE_BUTTON_ORDER: [TitleButton; 4] = [
     TitleButton::Options,
@@ -111,6 +119,8 @@ pub enum Region {
     Position,
     /// The visualizer panel. Clicking it cycles the visualization mode.
     Vis,
+    /// The EQ or PL toggle button (opens/closes the equalizer or playlist window).
+    Toggle(WindowToggle),
     /// Not over any interactive element (the window body).
     None,
 }
@@ -172,6 +182,12 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     if in_rect(x, y, sprites::VIS_X, sprites::VIS_Y, sprites::VIS_W, sprites::VIS_H) {
         return Region::Vis;
     }
+    if in_button(&sprites::EQ_OFF, x, y) {
+        return Region::Toggle(WindowToggle::Equalizer);
+    }
+    if in_button(&sprites::PL_OFF, x, y) {
+        return Region::Toggle(WindowToggle::Playlist);
+    }
     if y < TITLEBAR_H {
         return Region::TitleBar;
     }
@@ -186,6 +202,11 @@ pub struct UiState {
     pub pressed: Option<Transport>,
     /// The title-bar button currently pressed (drawn depressed), or `None`.
     pub pressed_title: Option<TitleButton>,
+    /// Whether the equalizer / playlist windows are open (their toggle buttons light while open).
+    pub eq_open: bool,
+    pub pl_open: bool,
+    /// The EQ/PL toggle button currently held (drawn pressed), or `None`.
+    pub pressed_toggle: Option<WindowToggle>,
     /// Elapsed play time shown in the MM:SS display, in whole seconds, or `None` to blank it
     /// (nothing loaded or stopped). The platform timer refreshes it once a second via
     /// [`on_tick`], so composition can read it without touching the audio engine.
@@ -226,6 +247,9 @@ impl Default for UiState {
         Self {
             pressed: None,
             pressed_title: None,
+            eq_open: false,
+            pl_open: false,
+            pressed_toggle: None,
             elapsed: None,
             title: String::new(),
             marquee_offset: 0,
@@ -276,6 +300,8 @@ pub struct Outcome {
     /// A window action requested by a title-bar button (close, minimize, ...), for the platform
     /// layer to carry out. Distinct from `command`, which drives the audio engine.
     pub window: Option<TitleButton>,
+    /// A request to toggle (open/close) the equalizer or playlist window, for the platform layer.
+    pub toggle: Option<WindowToggle>,
     /// Whether UI state changed and the window should be recomposed and redrawn.
     pub redraw: bool,
 }
@@ -350,6 +376,14 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
             // Clicking the panel cycles Bars -> Oscilloscope -> Off. Purely a display change, so no
             // command is emitted; the platform layer keeps stepping the (new) mode each frame.
             state.vis.cycle();
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Toggle(t) => {
+            // Arm the toggle button (drawn pressed); it fires on release over the same button.
+            state.pressed_toggle = Some(t);
             Outcome {
                 redraw: true,
                 ..Default::default()
@@ -437,6 +471,15 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
             ..Default::default()
         };
     }
+    if let Some(t) = state.pressed_toggle.take() {
+        // The EQ/PL toggle fires only if released over the same button.
+        let fired = hit_test(x, y) == Region::Toggle(t);
+        return Outcome {
+            toggle: fired.then_some(t),
+            redraw: true,
+            ..Default::default()
+        };
+    }
     match state.pressed.take() {
         Some(b) => {
             let fired = hit_test(x, y) == Region::Transport(b);
@@ -455,10 +498,11 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
 /// and the release past the edge, so the drag should continue rather than abort here. Returns
 /// whether a redraw is needed.
 pub fn on_leave(state: &mut UiState) -> bool {
-    // Cancel any armed button (transport or title-bar) so none stays stuck down.
+    // Cancel any armed button (transport, title-bar, or EQ/PL toggle) so none stays stuck down.
     let transport = state.pressed.take().is_some();
     let title = state.pressed_title.take().is_some();
-    transport || title
+    let toggle = state.pressed_toggle.take().is_some();
+    transport || title || toggle
 }
 
 /// Volume change per Up/Down key, in 0..=100 units. Webamp steps by 1 and real Winamp 2.x by a
@@ -723,6 +767,26 @@ mod tests {
         let out = on_release(&mut s, cx, cy);
         assert_eq!(out.window, Some(TitleButton::Close), "close fires on release over it");
         assert_eq!(s.pressed_title, None);
+    }
+
+    #[test]
+    fn eq_and_pl_toggle_buttons_arm_and_fire_on_release() {
+        // From shufrep dests: EQ at (219,58), PL at (242,58), each 23x12.
+        assert_eq!(hit_test(219 + 4, 58 + 4), Region::Toggle(WindowToggle::Equalizer));
+        assert_eq!(hit_test(242 + 4, 58 + 4), Region::Toggle(WindowToggle::Playlist));
+        // Press arms (drawn pressed), release over the same fires the toggle.
+        let mut s = UiState::default();
+        let out = on_press(&mut s, 242 + 4, 58 + 4);
+        assert_eq!(s.pressed_toggle, Some(WindowToggle::Playlist));
+        assert!(out.redraw && out.toggle.is_none(), "arm only, no toggle yet");
+        let out = on_release(&mut s, 242 + 4, 58 + 4);
+        assert_eq!(out.toggle, Some(WindowToggle::Playlist), "PL toggles on release over it");
+        assert_eq!(s.pressed_toggle, None);
+        // Released off the button cancels (dragged away).
+        let mut s2 = UiState { pressed_toggle: Some(WindowToggle::Equalizer), ..Default::default() };
+        let out = on_release(&mut s2, 137, 45);
+        assert_eq!(out.toggle, None, "off-button = no toggle");
+        assert!(out.redraw);
     }
 
     #[test]

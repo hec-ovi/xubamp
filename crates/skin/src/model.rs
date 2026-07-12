@@ -2,6 +2,7 @@
 
 use crate::bmp::{self, Image};
 use crate::container::SkinArchive;
+use crate::pledit::PlEdit;
 use crate::viscolor::VisColor;
 
 /// Decoded skin sheets. Each is `None` when the skin omits it (the renderer then falls
@@ -33,6 +34,14 @@ pub struct Skin {
     /// The mono/stereo indicator sheet (`monoster.bmp`, 56x24): lit words on top, unlit below.
     /// `None` skips the indicator.
     pub monoster: Option<Image>,
+    /// The shuffle/repeat/EQ/PL toggle-button sheet (`shufrep.bmp`). `None` skips those buttons.
+    pub shufrep: Option<Image>,
+    /// The playlist-editor window sheet (`pledit.bmp`): the tiled title bar, edges, and bottom bar.
+    /// `None` when the skin omits it (the playlist window then cannot be drawn).
+    pub pledit: Option<Image>,
+    /// The playlist colours and font (`pledit.txt`), or `None`; the renderer falls back to
+    /// [`PlEdit::default`] (the classic Winamp look) when absent.
+    pub pledit_colors: Option<PlEdit>,
 }
 
 impl Skin {
@@ -56,6 +65,11 @@ impl Skin {
                 .get("viscolor.txt")
                 .map(|b| VisColor::parse(&String::from_utf8_lossy(b))),
             monoster: sheet("monoster.bmp"),
+            shufrep: sheet("shufrep.bmp"),
+            pledit: sheet("pledit.bmp"),
+            pledit_colors: archive
+                .get("pledit.txt")
+                .map(|b| PlEdit::parse(&String::from_utf8_lossy(b))),
         }
     }
 }

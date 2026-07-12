@@ -137,6 +137,51 @@ pub const MONO_UNLIT: Placement = Placement::new(Rect::new(29, 12, 27, 12), 212,
 pub const STEREO_LIT: Placement = Placement::new(Rect::new(0, 0, 29, 12), 239, 41);
 pub const STEREO_UNLIT: Placement = Placement::new(Rect::new(0, 12, 29, 12), 239, 41);
 
+/// The EQ and PL toggle buttons on the main window, from `shufrep.bmp` (23x12 each). The "lit"
+/// variant is the lower row (the window is open); each has a pressed column at +46px. Dests are the
+/// classic (219,58) for EQ and (242,58) for PL. Cross-checked against Webamp.
+pub const EQ_OFF: Placement = Placement::new(Rect::new(0, 61, 23, 12), 219, 58);
+pub const EQ_OFF_PRESSED: Placement = Placement::new(Rect::new(46, 61, 23, 12), 219, 58);
+pub const EQ_ON: Placement = Placement::new(Rect::new(0, 73, 23, 12), 219, 58);
+pub const EQ_ON_PRESSED: Placement = Placement::new(Rect::new(46, 73, 23, 12), 219, 58);
+pub const PL_OFF: Placement = Placement::new(Rect::new(23, 61, 23, 12), 242, 58);
+pub const PL_OFF_PRESSED: Placement = Placement::new(Rect::new(69, 61, 23, 12), 242, 58);
+pub const PL_ON: Placement = Placement::new(Rect::new(23, 73, 23, 12), 242, 58);
+pub const PL_ON_PRESSED: Placement = Placement::new(Rect::new(69, 73, 23, 12), 242, 58);
+
+// --- The playlist editor (PLEDIT) window, from pledit.bmp. Built from tiles so it can resize; we
+// draw the classic collapsed size for now. Coordinates cross-checked against Webamp. ---
+
+/// The playlist window's default (collapsed) size, same width as the main window.
+pub const PLEDIT_W: i32 = 275;
+pub const PLEDIT_H: i32 = 116;
+
+/// Title-bar band height, side-edge band height (a vertical tile), and bottom-bar height.
+pub const PLEDIT_TITLE_H: i32 = 20;
+pub const PLEDIT_BOTTOM_H: i32 = 38;
+
+/// Title bar (focused variant, y=0 row): corners, the centered "PLAYLIST" title, and the repeating
+/// fill tile between them.
+pub const PLEDIT_TOP_LEFT: Rect = Rect::new(0, 0, 25, 20);
+pub const PLEDIT_TITLE: Rect = Rect::new(26, 0, 100, 20);
+pub const PLEDIT_TOP_TILE: Rect = Rect::new(127, 0, 25, 20);
+pub const PLEDIT_TOP_RIGHT: Rect = Rect::new(153, 0, 25, 20);
+
+/// Side edges, repeated vertically down the middle band (left 12px wide, right 20px wide).
+pub const PLEDIT_LEFT_TILE: Rect = Rect::new(0, 42, 12, 29);
+pub const PLEDIT_RIGHT_TILE: Rect = Rect::new(31, 42, 20, 29);
+
+/// Bottom bar: at the default width the two corners (125 + 150) meet exactly, so no fill is needed.
+pub const PLEDIT_BOTTOM_LEFT: Rect = Rect::new(0, 72, 125, 38);
+pub const PLEDIT_BOTTOM_RIGHT: Rect = Rect::new(126, 72, 150, 38);
+
+/// The track-list content rectangle within the window (between the edges and the title/bottom
+/// bands): x 12..255 (width 243), y from 23, rows [`PLEDIT_ROW_H`] tall.
+pub const PLEDIT_LIST_X: i32 = 12;
+pub const PLEDIT_LIST_Y: i32 = 23;
+pub const PLEDIT_LIST_W: i32 = PLEDIT_W - 12 - 20; // right edge is 20px wide
+pub const PLEDIT_ROW_H: i32 = 13;
+
 /// Volume and balance sliders share a sheet layout: a column of `SLIDER_FRAMES` background
 /// frames stacked `SLIDER_FRAME_STRIDE` px apart (the level indicator), then the draggable
 /// thumb below them. The background is drawn `SLIDER_BG_H` px tall (the classic container

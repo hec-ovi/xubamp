@@ -11,6 +11,7 @@ use xubamp_skin::{textfont, Skin};
 
 pub mod hit;
 pub mod marquee;
+pub mod pledit;
 pub mod posbar;
 pub mod slider;
 pub mod vis;
@@ -139,6 +140,25 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     if let Some(posbar) = &skin.posbar {
         let held = state.dragging == Some(hit::Slider::Position);
         posbar::draw(&mut fb, posbar, state.position.unwrap_or(0.0), held);
+    }
+    // EQ and PL toggle buttons (from shufrep.bmp): lit while their window is open, pressed while
+    // held. Skins without shufrep.bmp show nothing here.
+    if let Some(shufrep) = &skin.shufrep {
+        let held = |t| state.pressed_toggle == Some(t);
+        let eq = match (state.eq_open, held(hit::WindowToggle::Equalizer)) {
+            (false, false) => sprites::EQ_OFF,
+            (false, true) => sprites::EQ_OFF_PRESSED,
+            (true, false) => sprites::EQ_ON,
+            (true, true) => sprites::EQ_ON_PRESSED,
+        };
+        let pl = match (state.pl_open, held(hit::WindowToggle::Playlist)) {
+            (false, false) => sprites::PL_OFF,
+            (false, true) => sprites::PL_OFF_PRESSED,
+            (true, false) => sprites::PL_ON,
+            (true, true) => sprites::PL_ON_PRESSED,
+        };
+        blit_placement(&mut fb, shufrep, eq);
+        blit_placement(&mut fb, shufrep, pl);
     }
     // kbps (bitrate) and kHz (sample rate) readouts, in the small text.bmp font, blank when nothing
     // is loaded. They share the marquee's font sheet.

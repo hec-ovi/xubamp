@@ -164,9 +164,16 @@ pub const REPEAT_ON_PRESSED: Placement = Placement::new(Rect::new(0, 45, 28, 15)
 // --- The playlist editor (PLEDIT) window, from pledit.bmp. Built from tiles so it can resize; we
 // draw the classic collapsed size for now. Coordinates cross-checked against Webamp. ---
 
-/// The playlist window's default (collapsed) size, same width as the main window.
+/// The playlist window's default (collapsed) size, same width as the main window. This is also the
+/// minimum size; the window only ever grows from here.
 pub const PLEDIT_W: i32 = 275;
 pub const PLEDIT_H: i32 = 116;
+
+/// The playlist resizes in whole segments: 25px wider or 29px taller at a time (Winamp's model,
+/// `WINDOW_RESIZE_SEGMENT_WIDTH`/`_HEIGHT` in Webamp). A compositor-suggested size is snapped to
+/// this grid so the tiled frame always lands on a seam.
+pub const PLEDIT_SEGMENT_W: i32 = 25;
+pub const PLEDIT_SEGMENT_H: i32 = 29;
 
 /// Title-bar band height, side-edge band height (a vertical tile), and bottom-bar height.
 pub const PLEDIT_TITLE_H: i32 = 20;
@@ -183,9 +190,12 @@ pub const PLEDIT_TOP_RIGHT: Rect = Rect::new(153, 0, 25, 20);
 pub const PLEDIT_LEFT_TILE: Rect = Rect::new(0, 42, 12, 29);
 pub const PLEDIT_RIGHT_TILE: Rect = Rect::new(31, 42, 20, 29);
 
-/// Bottom bar: at the default width the two corners (125 + 150) meet exactly, so no fill is needed.
+/// Bottom bar: the left corner (125px) holds the button cluster, the right corner (150px) the
+/// time/scroll area. At the default width they meet exactly; when the window is wider,
+/// `PLEDIT_BOTTOM_TILE` repeats between them.
 pub const PLEDIT_BOTTOM_LEFT: Rect = Rect::new(0, 72, 125, 38);
 pub const PLEDIT_BOTTOM_RIGHT: Rect = Rect::new(126, 72, 150, 38);
+pub const PLEDIT_BOTTOM_TILE: Rect = Rect::new(179, 0, 25, 38);
 
 /// The track-list content rectangle within the window (between the edges and the title/bottom
 /// bands): x 12..255 (width 243), y from 23, rows [`PLEDIT_ROW_H`] tall.

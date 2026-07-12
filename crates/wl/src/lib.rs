@@ -37,6 +37,7 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 use wayland_client::{
     globals::registry_queue_init,
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
@@ -87,8 +88,35 @@ struct PlaylistWin {
     pool: SlotPool,
     fb: Framebuffer,
     configured: bool,
+    /// Current window size in px, snapped to the resize grid (25px wide / 29px tall segments) and at
+    /// least the default. Grown by dragging the bottom-right grip; the compositor drives the change
+    /// via `configure` events, and the tiled frame is recomposed to match.
+    width: i32,
+    height: i32,
     /// A title-bar press deferred into a compositor move (same threshold as the main window).
     armed_move: Option<(i32, i32, u32)>,
+    /// Whether the pointer is currently over the bottom-right resize grip, so the resize cursor is
+    /// set only on the hover transition rather than on every motion event.
+    grip_hover: bool,
+}
+
+/// How many pixels in from the bottom-right corner count as the resize grip.
+const PLEDIT_GRIP: i32 = 20;
+
+/// Whether (`x`, `y`) (window-local) is over the playlist's bottom-right resize grip.
+fn over_resize_grip(pl: &PlaylistWin, x: i32, y: i32) -> bool {
+    x >= pl.width - PLEDIT_GRIP && y >= pl.height - PLEDIT_GRIP
+}
+
+/// Snap a compositor-suggested playlist size to the resize grid (25px wide / 29px tall segments),
+/// rounding to the nearest seam, and clamp to at least the default size so the frame always tiles
+/// onto a whole segment.
+fn snap_playlist_size(w: i32, h: i32) -> (i32, i32) {
+    use xubamp_skin::sprites::{PLEDIT_H, PLEDIT_SEGMENT_H, PLEDIT_SEGMENT_W, PLEDIT_W};
+    let snap = |v: i32, base: i32, seg: i32| {
+        base + ((v - base).max(0) + seg / 2) / seg * seg
+    };
+    (snap(w, PLEDIT_W, PLEDIT_SEGMENT_W), snap(h, PLEDIT_H, PLEDIT_SEGMENT_H))
 }
 
 /// Open the main window for `skin` and run until the user closes it. `title` is the song title
@@ -471,19 +499,29 @@ impl App {
         if self.playlist.is_some() {
             return;
         }
-        let fb = pledit::compose(&self.skin, &self.playlist_state);
-        let (w, h) = (fb.width, fb.height);
+        let (w, h) = (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H);
+        let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
         let surface = self.compositor.create_surface(&self.qh);
         let window = self
             .xdg_shell
             .create_window(surface, WindowDecorations::RequestClient, &self.qh);
         window.set_title("xubamp playlist");
         window.set_app_id("xubamp");
-        window.set_min_size(Some((w, h)));
-        window.set_max_size(Some((w, h)));
+        // Resizable: a minimum (the default size) but no maximum, so the compositor lets it grow when
+        // the user drags the bottom-right grip. The pool auto-grows as larger buffers are requested.
+        window.set_min_size(Some((w as u32, h as u32)));
         window.commit();
         let pool = SlotPool::new(w as usize * h as usize * 4, &self.shm).expect("playlist pool");
-        self.playlist = Some(PlaylistWin { window, pool, fb, configured: false, armed_move: None });
+        self.playlist = Some(PlaylistWin {
+            window,
+            pool,
+            fb,
+            configured: false,
+            width: w,
+            height: h,
+            armed_move: None,
+            grip_hover: false,
+        });
         self.state.pl_open = true;
         self.redraw(); // relight the PL button on the main window
     }
@@ -505,18 +543,19 @@ impl App {
 
     /// Recompose and present the playlist window from `playlist_state`, if it is open and mapped.
     fn redraw_playlist(&mut self) {
-        if !self.playlist.as_ref().is_some_and(|pl| pl.configured) {
+        let Some((w, h)) = self.playlist.as_ref().filter(|pl| pl.configured).map(|pl| (pl.width, pl.height))
+        else {
             return;
-        }
-        let fb = pledit::compose(&self.skin, &self.playlist_state);
+        };
+        let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
         let pl = self.playlist.as_mut().unwrap();
         pl.fb = fb;
         pl.present();
     }
 
-    /// Pointer handling for the playlist window. For now only the title-bar drag (to move it) and
-    /// the arrow cursor; list selection, double-click-play and scrolling arrive with the playlist
-    /// interactions sub-unit.
+    /// Pointer handling for the playlist window: the title-bar drag (to move it), the bottom-right
+    /// grip (to resize it), and cursor feedback. List selection, double-click-play and scrolling
+    /// arrive with the playlist interactions sub-unit.
     fn playlist_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
         match kind {
             PointerEventKind::Enter { .. } => {
@@ -525,6 +564,16 @@ impl App {
                 }
             }
             PointerEventKind::Press { button, serial, .. } if *button == BTN_LEFT => {
+                // A press on the bottom-right grip hands off to the compositor for an interactive
+                // resize; it then drives the new size back through `configure`.
+                if let Some(pl) = &self.playlist {
+                    if over_resize_grip(pl, x, y) {
+                        if let Some(seat) = &self.seat {
+                            pl.window.resize(seat, *serial, ResizeEdge::BottomRight);
+                        }
+                        return;
+                    }
+                }
                 // The title-bar band is the top 20px; a press there arms a compositor move.
                 if y < xubamp_skin::sprites::PLEDIT_TITLE_H {
                     if let Some(pl) = &mut self.playlist {
@@ -533,6 +582,18 @@ impl App {
                 }
             }
             PointerEventKind::Motion { .. } => {
+                // Cursor feedback: the grip shows a diagonal resize cursor, the rest an arrow. Only
+                // set it on the hover transition so we do not spam the compositor every motion.
+                let over_grip = self.playlist.as_ref().is_some_and(|pl| over_resize_grip(pl, x, y));
+                if self.playlist.as_ref().is_some_and(|pl| pl.grip_hover != over_grip) {
+                    if let Some(pointer) = &self.pointer {
+                        let icon = if over_grip { CursorIcon::SeResize } else { CursorIcon::Default };
+                        let _ = pointer.set_cursor(conn, icon);
+                    }
+                    if let Some(pl) = &mut self.playlist {
+                        pl.grip_hover = over_grip;
+                    }
+                }
                 let start = self
                     .playlist
                     .as_ref()
@@ -553,6 +614,7 @@ impl App {
             PointerEventKind::Leave { .. } => {
                 if let Some(pl) = &mut self.playlist {
                     pl.armed_move = None;
+                    pl.grip_hover = false;
                 }
             }
             _ => {}
@@ -638,7 +700,7 @@ impl WindowHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         window: &Window,
-        _: WindowConfigure,
+        configure: WindowConfigure,
         _: u32,
     ) {
         if *window == self.window {
@@ -646,6 +708,13 @@ impl WindowHandler for App {
             self.draw();
         } else if self.playlist.as_ref().is_some_and(|pl| *window == pl.window) {
             if let Some(pl) = &mut self.playlist {
+                // Adopt the compositor-suggested size, snapped to the resize grid. A (None, None)
+                // suggestion (the initial map) keeps the current size.
+                if let (Some(w), Some(h)) = configure.new_size {
+                    let (w, h) = snap_playlist_size(w.get() as i32, h.get() as i32);
+                    pl.width = w;
+                    pl.height = h;
+                }
                 pl.configured = true;
             }
             self.redraw_playlist();

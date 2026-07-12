@@ -98,6 +98,36 @@ fn resolve_skin(cli: Option<&str>) -> Skin {
     default_skin()
 }
 
+/// A primitive engine operation. Transport commands (Play/Pause/Stop) map to a short sequence of
+/// these; keeping the mapping pure (independent of the live engine) lets the play/pause/stop policy
+/// be unit-tested on the host without PipeWire. Only compiled with `audio` (where it is used) or
+/// under `test` (where it is exercised).
+#[cfg(any(feature = "audio", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineOp {
+    /// Rewind the decoder to frame 0.
+    SeekToStart,
+    /// Activate (`true`) or deactivate (`false`) the output stream.
+    SetActive(bool),
+}
+
+/// The engine operations a transport button/key maps to, given whether audio is currently playing.
+/// Classic Winamp semantics (cross-checked against Winamp's own play/pause behaviour): Play always
+/// forces the current track from the top, so it is a rewind-then-activate, never a resume; Pause
+/// toggles pause/resume from the live playing state; Stop halts and rewinds. Prev/Next/Eject need a
+/// playlist, so they map to nothing yet.
+#[cfg(any(feature = "audio", test))]
+fn transport_ops(t: xubamp_render::hit::Transport, playing: bool) -> Vec<EngineOp> {
+    use xubamp_render::hit::Transport;
+    use EngineOp::{SeekToStart, SetActive};
+    match t {
+        Transport::Play => vec![SeekToStart, SetActive(true)],
+        Transport::Pause => vec![SetActive(!playing)],
+        Transport::Stop => vec![SetActive(false), SeekToStart],
+        Transport::Prev | Transport::Next | Transport::Eject => Vec::new(),
+    }
+}
+
 fn main() {
     let (skin_arg, media_arg) = classify(std::env::args().skip(1));
     let skin = resolve_skin(skin_arg.as_deref());
@@ -151,39 +181,32 @@ fn main() {
         eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
     }
 
-    // Bridge UI commands from the window to the engine. Play resumes (restarting from the top if
-    // the track already finished), Pause halts, Stop halts and rewinds to the start (classic
-    // Winamp Stop shows 00:00); Prev, Next and Eject wait for a playlist. Volume and balance
-    // retune the realtime gains live; Seek repositions playback to the released posbar fraction.
-    // Without the audio feature, commands are just logged.
+    // Bridge UI commands from the window to the engine. Transport (Play/Pause/Stop) goes through the
+    // pure `transport_ops` policy: Play forces the track from the top, Pause toggles pause/resume,
+    // Stop halts and rewinds; Prev/Next/Eject wait for a playlist. Volume and balance retune the
+    // realtime gains live; Seek repositions playback to the target fraction. Without the audio
+    // feature, commands are just logged.
     #[cfg(feature = "audio")]
     let on_command = {
         let handle = _engine.as_ref().map(|engine| engine.handle());
         move |command: xubamp_render::hit::Command| {
-            use xubamp_render::hit::{Command, Transport};
+            use xubamp_render::hit::Command;
             match command {
-                Command::Transport(Transport::Play) => {
+                Command::Transport(t) => {
+                    // Pause toggles from the live playing state, so read it now; the others ignore it.
+                    let playing = handle.as_ref().is_some_and(|h| h.is_playing());
+                    let ops = transport_ops(t, playing);
+                    if ops.is_empty() {
+                        eprintln!("xubamp: {t:?} not wired yet (needs a playlist)");
+                    }
                     if let Some(h) = &handle {
-                        // A finished track restarts from the top on Play.
-                        if h.is_finished() {
-                            h.seek_to_start();
+                        for op in ops {
+                            match op {
+                                EngineOp::SeekToStart => h.seek_to_start(),
+                                EngineOp::SetActive(active) => h.set_active(active),
+                            }
                         }
-                        h.set_active(true);
                     }
-                }
-                Command::Transport(Transport::Pause) => {
-                    if let Some(h) = &handle {
-                        h.set_active(false);
-                    }
-                }
-                Command::Transport(Transport::Stop) => {
-                    if let Some(h) = &handle {
-                        h.set_active(false);
-                        h.seek_to_start();
-                    }
-                }
-                Command::Transport(other) => {
-                    eprintln!("xubamp: {other:?} not wired yet (needs a playlist)")
                 }
                 Command::Volume(v) => {
                     if let Some(h) = &handle {
@@ -248,10 +271,54 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, track_title};
+    use super::{classify, track_title, transport_ops, EngineOp};
+    use xubamp_render::hit::Transport;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn play_always_restarts_from_the_top() {
+        // Play forces the track from the beginning regardless of state (not a resume): rewind then
+        // activate. True whether it was already playing or paused/stopped.
+        for playing in [true, false] {
+            assert_eq!(
+                transport_ops(Transport::Play, playing),
+                vec![EngineOp::SeekToStart, EngineOp::SetActive(true)],
+                "play restarts (playing={playing})",
+            );
+        }
+    }
+
+    #[test]
+    fn pause_toggles_from_the_live_playing_state() {
+        assert_eq!(
+            transport_ops(Transport::Pause, true),
+            vec![EngineOp::SetActive(false)],
+            "playing -> pause",
+        );
+        assert_eq!(
+            transport_ops(Transport::Pause, false),
+            vec![EngineOp::SetActive(true)],
+            "paused -> resume",
+        );
+    }
+
+    #[test]
+    fn stop_halts_and_rewinds() {
+        // Order matters: deactivate first, then rewind, so the clock shows 00:00 stopped.
+        assert_eq!(
+            transport_ops(Transport::Stop, true),
+            vec![EngineOp::SetActive(false), EngineOp::SeekToStart],
+        );
+    }
+
+    #[test]
+    fn skip_commands_map_to_nothing_until_a_playlist() {
+        for t in [Transport::Prev, Transport::Next, Transport::Eject] {
+            assert!(transport_ops(t, true).is_empty(), "{t:?} maps to nothing yet");
+        }
     }
 
     #[test]

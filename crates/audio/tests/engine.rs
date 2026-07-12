@@ -233,6 +233,64 @@ fn restarts_a_finished_track_from_the_start() {
 
 #[test]
 #[ignore = "needs a running PipeWire session"]
+fn scrubbing_the_seek_bar_while_paused_keeps_responding() {
+    // Regression: seeking repeatedly while paused used to fill the ring (the paused realtime side
+    // never drains it) and busy-spin the producer forever, freezing the clock at an earlier target.
+    // The seek staging now bails when the paused ring is full and rebases the clock, so the LAST
+    // paused seek still moves the clock.
+    let path = std::env::temp_dir().join("xubamp_paused_scrub_test.wav");
+    write_wav(&path, 48_000, 4);
+
+    let engine = AudioEngine::play(&path).expect("engine failed to start playback");
+    let handle = engine.handle();
+
+    // Let ~1 s play, then pause and let the deactivation reach the loop.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && engine.position_frames() <= 48_000 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    handle.set_active(false);
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Scrub several times while paused (more than enough to fill the ring), ending on a known
+    // target of 50% (~2 s / 96_000 frames of the four-second track).
+    for f in [0.15_f32, 0.85, 0.25, 0.75, 0.35, 0.65, 0.5] {
+        handle.seek_fraction(f);
+        std::thread::sleep(Duration::from_millis(80));
+    }
+
+    // The clock must have followed the final paused seek: a producer hung on a full paused ring
+    // would never rebase it there. Give it a moment to service the last seek.
+    let target = 96_000i64;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && (engine.position_frames() as i64 - target).abs() > 8_000 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pos = engine.position_frames();
+    assert!(
+        (pos as i64 - target).abs() <= 8_000,
+        "paused scrub did not rebase the clock to the final target (~{target}); got {pos} \
+         (a frozen clock here means the producer hung on a full paused ring)",
+    );
+
+    // It still resumes and advances afterwards (no producer left stuck).
+    let base = engine.position_frames();
+    handle.set_active(true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && engine.position_frames() <= base + 8_000 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        engine.position_frames() > base + 8_000,
+        "resume after a paused scrub did not advance the clock (held at {base})",
+    );
+
+    drop(engine);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[ignore = "needs a running PipeWire session"]
 fn freezes_the_clock_at_end_of_track_and_reports_finished() {
     let path = std::env::temp_dir().join("xubamp_eos_test.wav");
     write_wav(&path, 48_000, 1); // exactly one second of audio

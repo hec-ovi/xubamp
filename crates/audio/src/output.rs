@@ -128,7 +128,7 @@ pub fn run_loop(
                 // and the producer draining the ring sees the final count immediately.
                 match bytemuck::try_cast_slice_mut::<u8, f32>(usable) {
                     Ok(out) => {
-                        fill_output(&mut ud.consumer, out, &ud.shared.flush, &ud.shared.frames_consumed);
+                        fill_output(&mut ud.consumer, out, &ud.shared);
                         // Scale by the current volume/balance gains. Unity (full volume, centered)
                         // short-circuits, so the common case adds nothing to the RT path.
                         let (gl, gr) = ud.shared.gains();

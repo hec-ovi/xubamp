@@ -52,19 +52,27 @@ pub fn apply_gain(out: &mut [f32], gain_l: f32, gain_r: f32) {
 /// (writes seek/flush) and the RT callback (writes `frames_consumed`). All lock-free.
 #[derive(Debug)]
 pub struct SharedState {
-    /// Frames the RT callback has consumed. Written only by the callback (Relaxed).
+    /// Frames the RT callback has PLAYED (copied to the output). Drives the position clock, so
+    /// dropped (skipped) frames deliberately do not count here. Written only by the callback.
     pub frames_consumed: AtomicU64,
+    /// Frames the RT callback has REMOVED from the ring, whether played or dropped. This is the
+    /// ring's read cursor in absolute frames; the callback compares it against [`Self::drop_before`]
+    /// to know how many stale frames are still queued ahead of the fresh post-seek audio. Written
+    /// only by the callback.
+    pub removed_frames: AtomicU64,
     /// Position clock offset: `position = base_offset + frames_consumed`. It folds the seek target
     /// and the `frames_consumed` snapshot at that seek into a single value (`seek_target -
     /// consumed_at_seek`), so the producer publishes a rebase with ONE atomic store and the UI
     /// reads the clock without a two-variable invariant that could tear mid-seek. Signed because a
     /// backward seek makes it negative; the position is clamped at 0.
     pub base_offset: AtomicI64,
-    /// Producer -> RT: when set, the callback drops all queued audio on its next quantum. A seek
-    /// deliberately leaves this unset (dropping the buffer underruns the stream, which some sinks
-    /// suspend on; see [`SharedState::begin_seek`]); it is kept for a future track change that can
-    /// deactivate the stream first.
-    pub flush: AtomicBool,
+    /// Producer -> RT: absolute ring-read index (in frames) below which queued audio is STALE and
+    /// must be dropped. A seek sets it to the frame count pushed up to the seek point, after the
+    /// producer has already staged fresh audio behind that boundary, so the callback drops the
+    /// stale tail and finds the fresh audio underneath in the same quantum: the ring never empties,
+    /// so the stream never underruns (which some sinks, notably Bluetooth, suspend on). See
+    /// [`SharedState::commit_seek`].
+    pub drop_before: AtomicU64,
     /// The graph rate PipeWire actually negotiated, published from `param_changed`.
     pub stream_rate: AtomicU32,
     /// Producer -> app: the track fully drained after a clean end of decode. Set once, so the
@@ -99,8 +107,9 @@ impl SharedState {
     pub fn new() -> Self {
         Self {
             frames_consumed: AtomicU64::new(0),
+            removed_frames: AtomicU64::new(0),
             base_offset: AtomicI64::new(0),
-            flush: AtomicBool::new(false),
+            drop_before: AtomicU64::new(0),
             stream_rate: AtomicU32::new(0),
             finished: AtomicBool::new(false),
             // Set true once the stream connects (it starts active); toggled by pause/resume.
@@ -172,23 +181,44 @@ impl SharedState {
         (v >= 0).then_some(v as u64)
     }
 
-    /// Producer: after repositioning the decoder to `landed_frames`, republish the position clock
-    /// so it reports the new spot immediately and clear any end-of-track flag so a seek revives a
-    /// finished track. Called only from the producer thread, after the decoder seek succeeds.
+    /// Producer: commit a seek that has landed the decoder at `landed_frames` and staged fresh
+    /// audio in the ring. `stale_boundary` is [`Self::removed_frames`] + the frames that were
+    /// already queued when the seek arrived (equivalently: the total frames pushed up to the seek
+    /// point), so the callback drops exactly the pre-seek tail and starts playing the fresh audio
+    /// staged behind it. Republishes the clock to the new spot and clears any end-of-track flag so
+    /// a seek revives a finished track. Called only from the producer thread.
     ///
-    /// It deliberately does NOT drop the queued audio. Dropping it would empty the ring for a
-    /// cycle, and an output stream that underruns is suspended by some sinks (notably Bluetooth)
-    /// and never resumes, freezing playback. Instead the ~0.5 s already buffered plays out while
-    /// the decoder refills from the new position behind it, so a seek carries a short tail of the
-    /// previous position (bounded by the ring latency) before the new audio arrives. The clock
-    /// rebases immediately, so the display responds at once and the audio catches up within that
-    /// window. (The RT still honours the `flush` flag; it is just left unset here.)
-    pub fn begin_seek(&self, landed_frames: u64) {
-        // Rebase in a single store: base_offset = landed - consumed_now, so
-        // position = base_offset + frames_consumed reads back `landed` immediately and advances
-        // from there. One atomic means the UI can never observe a half-applied (target, snapshot)
-        // pair; a read racing this store sees either the old or the new position, never a spurious
-        // one, and `frames_consumed` is monotonic so the sum never goes below the seek target.
+    /// Unlike a naive flush this never empties the ring: the producer stages the new-position audio
+    /// BEFORE calling this, so when the callback drops the stale tail the fresh audio is already
+    /// underneath it. A stream that underruns is suspended by some sinks (notably Bluetooth) and
+    /// never resumes; keeping the ring non-empty across the drop is what makes the seek gapless AND
+    /// safe.
+    pub fn commit_seek(&self, landed_frames: u64, stale_boundary: u64) {
+        // Rebase the clock in a single store so position = base_offset + frames_consumed reads back
+        // `landed` at the first fresh frame and advances from there. Normally the callback drops the
+        // remaining stale tail (not counted in frames_consumed) and the first fresh frame plays at
+        // frames_consumed == consumed, so base_offset = landed - consumed. But if the buffer ran low
+        // during the priming window and the callback already drained PAST the boundary, it has been
+        // PLAYING the freshly-staged frames under the old clock; `removed_frames - stale_boundary`
+        // is how many, and adding it keeps the clock from trailing the audio by that much.
+        let consumed = self.frames_consumed.load(Ordering::Relaxed) as i64;
+        let removed = self.removed_frames.load(Ordering::Relaxed);
+        let overshoot = removed.saturating_sub(stale_boundary) as i64;
+        self.base_offset
+            .store(landed_frames as i64 - consumed + overshoot, Ordering::Relaxed);
+        self.finished.store(false, Ordering::Release);
+        // Publish the drop boundary last, with Release, so the fresh audio the producer just pushed
+        // is visible to the callback before it acts on the new boundary (the callback loads it with
+        // Acquire).
+        self.drop_before.store(stale_boundary, Ordering::Release);
+    }
+
+    /// Producer: rebase the clock to `landed_frames` WITHOUT dropping the queued tail. Used as the
+    /// safe fallback when a seek lands so close to the end of the track that too little fresh audio
+    /// can be staged to keep the ring non-empty across a drop: rather than risk an underrun, the
+    /// buffered tail plays out (a short stale tail, bounded by the ring latency) while the decoder
+    /// refills. Clears the end-of-track flag so a seek still revives a finished track.
+    pub fn rebase_clock_only(&self, landed_frames: u64) {
         let consumed = self.frames_consumed.load(Ordering::Relaxed) as i64;
         self.base_offset.store(landed_frames as i64 - consumed, Ordering::Relaxed);
         self.finished.store(false, Ordering::Release);
@@ -281,27 +311,40 @@ pub fn push_all(p: &mut Producer<f32>, mut block: &[f32]) -> bool {
 }
 
 /// Realtime side (PipeWire callback): fill `out` with queued audio, silence-padding any
-/// shortfall, advance `consumed` by the real frames copied (before padding), and return that
-/// same count. RT-safe: only atomic loads/stores and memcpy. Trailing silence after a track's
-/// last frame copies nothing, so the clock stops there and the time display freezes at the true
-/// end. The count is published *before* the ring slots are freed (`commit_all`), so the producer
-/// draining the ring sees the final frames the instant it observes the ring empty; without that
-/// order it could flag end-of-track with the last quantum still uncounted and the clock would
-/// tick up afterward. If `flush` is set, drop all queued audio first and emit silence for this
-/// quantum (counting and returning 0).
-pub fn fill_output(
-    c: &mut Consumer<f32>,
-    out: &mut [f32],
-    flush: &AtomicBool,
-    consumed: &AtomicU64,
-) -> usize {
-    if flush.swap(false, Ordering::AcqRel) {
-        // read_chunk(slots()) never errors (n <= readable) and does not allocate.
-        if let Ok(chunk) = c.read_chunk(c.slots()) {
-            chunk.commit_all();
+/// shortfall, advance the clock by the real frames PLAYED (before padding), and return that
+/// count. RT-safe: only atomic loads/stores and memcpy. Trailing silence after a track's last
+/// frame copies nothing, so the clock stops there and the time display freezes at the true end.
+///
+/// Before reading, it drops any STALE tail a seek left queued: `shared.drop_before` is the ring
+/// read index below which frames are pre-seek audio. Because the producer stages the fresh audio
+/// BEHIND the tail before publishing the boundary, dropping the tail reveals the fresh audio in the
+/// same quantum, so the ring never empties and the stream never underruns (which some sinks
+/// suspend on). Dropped frames advance `removed_frames` (the read cursor) but NOT `frames_consumed`
+/// (the clock), so the skipped tail does not tick the time display.
+///
+/// The played-frame count is published *before* the ring slots are freed (`commit_all`), so the
+/// producer draining the ring sees the final frames the instant it observes the ring empty; without
+/// that order it could flag end-of-track with the last quantum still uncounted and the clock would
+/// tick up afterward.
+pub fn fill_output(c: &mut Consumer<f32>, out: &mut [f32], shared: &SharedState) -> usize {
+    // 1. Drop the stale pre-seek tail, if any. `drop_before` (frames) minus the read cursor is how
+    //    much stale audio is still queued ahead of the fresh audio.
+    let removed = shared.removed_frames.load(Ordering::Relaxed);
+    let drop_before = shared.drop_before.load(Ordering::Acquire);
+    let to_drop = drop_before.saturating_sub(removed) as usize;
+    if to_drop > 0 {
+        let drop_samples = (to_drop * CHANNELS).min(c.slots());
+        if drop_samples > 0 {
+            if let Ok(chunk) = c.read_chunk(drop_samples) {
+                chunk.commit_all();
+            }
+            shared
+                .removed_frames
+                .store(removed + (drop_samples / CHANNELS) as u64, Ordering::Relaxed);
         }
     }
 
+    // 2. Play the fresh audio (the only audio left after the drop).
     let avail = c.slots().min(out.len());
     let mut written = 0;
     if let Ok(chunk) = c.read_chunk(avail) {
@@ -309,11 +352,15 @@ pub fn fill_output(
         out[..a.len()].copy_from_slice(a);
         out[a.len()..a.len() + b.len()].copy_from_slice(b);
         written = a.len() + b.len();
-        // Count the real frames before `commit_all` frees the ring: the producer's drain loop
-        // waits on `slots()` (the read index that `commit_all` releases), so counting first gives
-        // it a happens-before view of this final count the moment it sees the ring drained.
-        // Relaxed is enough; the release/acquire on the ring's read index carries the store.
-        consumed.fetch_add((written / CHANNELS) as u64, Ordering::Relaxed);
+        let played = (written / CHANNELS) as u64;
+        // Count played frames before `commit_all` frees the ring: the producer's drain loop waits
+        // on `slots()` (the read index `commit_all` releases), so counting first gives it a
+        // happens-before view of this final count the moment it sees the ring drained. Relaxed is
+        // enough; the release/acquire on the ring's read index carries the store.
+        shared.frames_consumed.fetch_add(played, Ordering::Relaxed);
+        shared
+            .removed_frames
+            .fetch_add(played, Ordering::Relaxed);
         chunk.commit_all();
     }
     for s in &mut out[written..] {

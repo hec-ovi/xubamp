@@ -1,7 +1,7 @@
-//! SPSC ring correctness: in-order round-trip, wrap-around, underrun silence, flush, and the
-//! volume/balance gain stage.
+//! SPSC ring correctness: in-order round-trip, wrap-around, underrun silence, the gapless-seek
+//! drop-reveals-fresh-audio path, and the volume/balance gain stage.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use xubamp_audio::ring::{
     apply_gain, fill_output, mix_gains, new_ring, push_block, SharedState, SCOPE_LEN,
@@ -10,33 +10,33 @@ use xubamp_audio::ring::{
 #[test]
 fn round_trips_samples_in_order() {
     let (mut p, mut c) = new_ring(8); // 16 slots
-    let flush = AtomicBool::new(false);
+    let s = SharedState::new();
     let block: Vec<f32> = (0..12).map(|i| i as f32).collect();
     assert_eq!(push_block(&mut p, &block), 12);
     let mut out = [0.0f32; 12];
-    fill_output(&mut c, &mut out, &flush, &AtomicU64::new(0));
+    fill_output(&mut c, &mut out, &s);
     assert_eq!(out, [0., 1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11.]);
 }
 
 #[test]
 fn push_block_reports_partial_accept_when_nearly_full() {
     let (mut p, mut c) = new_ring(4); // 8 slots
-    let flush = AtomicBool::new(false);
+    let s = SharedState::new();
     let ten: Vec<f32> = (0..10).map(|i| i as f32).collect();
     // Only 8 slots exist, so only 8 samples are accepted.
     assert_eq!(push_block(&mut p, &ten), 8);
     let mut out = [0.0f32; 8];
-    fill_output(&mut c, &mut out, &flush, &AtomicU64::new(0));
+    fill_output(&mut c, &mut out, &s);
     assert_eq!(out, [0., 1., 2., 3., 4., 5., 6., 7.]);
 }
 
 #[test]
 fn underrun_pads_with_silence() {
     let (mut p, mut c) = new_ring(8);
-    let flush = AtomicBool::new(false);
+    let s = SharedState::new();
     push_block(&mut p, &[1.0, 2.0, 3.0, 4.0]);
     let mut out = [9.9f32; 8];
-    fill_output(&mut c, &mut out, &flush, &AtomicU64::new(0));
+    fill_output(&mut c, &mut out, &s);
     assert_eq!(&out[..4], &[1.0, 2.0, 3.0, 4.0]);
     assert_eq!(&out[4..], &[0.0; 4], "shortfall is silence, not stale data");
 }
@@ -44,77 +44,101 @@ fn underrun_pads_with_silence() {
 #[test]
 fn wraps_around_the_physical_end() {
     let (mut p, mut c) = new_ring(4); // 8 slots
-    let flush = AtomicBool::new(false);
+    let s = SharedState::new();
     let first: Vec<f32> = (0..8).map(|i| i as f32).collect();
     assert_eq!(push_block(&mut p, &first), 8);
     let mut out = [0.0f32; 6];
-    fill_output(&mut c, &mut out, &flush, &AtomicU64::new(0)); // consume 6, leaving 6,7 near the end
+    fill_output(&mut c, &mut out, &s); // consume 6, leaving 6,7 near the end
     assert_eq!(out, [0., 1., 2., 3., 4., 5.]);
     let more: Vec<f32> = (100..104).map(|i| i as f32).collect();
     assert_eq!(push_block(&mut p, &more), 4); // write wraps past the end
     let mut out2 = [0.0f32; 6];
-    fill_output(&mut c, &mut out2, &flush, &AtomicU64::new(0));
+    fill_output(&mut c, &mut out2, &s);
     assert_eq!(out2, [6., 7., 100., 101., 102., 103.]);
 }
 
 #[test]
-fn flush_drops_queued_audio_and_is_one_shot() {
-    let (mut p, mut c) = new_ring(8);
-    let flush = AtomicBool::new(false);
-    push_block(&mut p, &[1.0, 2.0, 3.0, 4.0]);
-    flush.store(true, Ordering::Release);
-    let mut out = [5.5f32; 4];
-    fill_output(&mut c, &mut out, &flush, &AtomicU64::new(0));
-    assert_eq!(out, [0.0; 4], "flushed audio is dropped and replaced with silence");
-    assert!(!flush.load(Ordering::Acquire), "flush clears itself");
-    // Audio pushed after the flush plays normally.
-    push_block(&mut p, &[7.0, 8.0]);
-    let mut out2 = [0.0f32; 2];
-    fill_output(&mut c, &mut out2, &flush, &AtomicU64::new(0));
-    assert_eq!(out2, [7.0, 8.0]);
+fn drop_before_skips_the_stale_tail_and_reveals_fresh_audio() {
+    // The gapless-seek path: stale (pre-seek) audio is queued, the producer stages FRESH audio
+    // behind it, then publishes the drop boundary. fill_output must drop exactly the stale frames
+    // and play the fresh, and the ring must never go empty across the drop (fresh sits underneath
+    // the tail) so the stream cannot underrun.
+    let (mut p, mut c) = new_ring(8); // 16 slots = 8 stereo frames
+    let s = SharedState::new();
+    push_block(&mut p, &[1., 2., 3., 4., 5., 6.]); // 3 stale frames
+    push_block(&mut p, &[100., 101., 102., 103., 104., 105.]); // 3 fresh frames staged behind
+    // The producer pushed 3 frames before the seek point, so the drop boundary is 3 (in frames).
+    s.drop_before.store(3, Ordering::Release);
+
+    let mut out = [9.9f32; 6]; // one quantum = the 3 fresh frames
+    let played = fill_output(&mut c, &mut out, &s);
+    assert_eq!(played, 3, "only the fresh frames are played");
+    assert_eq!(out, [100., 101., 102., 103., 104., 105.], "stale skipped, fresh revealed");
+    assert_eq!(s.frames_consumed.load(Ordering::Relaxed), 3, "clock counts only played frames");
+    assert_eq!(
+        s.removed_frames.load(Ordering::Relaxed),
+        6,
+        "read cursor advanced past the 3 dropped + 3 played",
+    );
+    assert_eq!(p.slots(), 16, "ring drained; the fresh audio was never left starved");
+    // The boundary is now behind the cursor, so a following quantum drops nothing.
+    let mut out2 = [7.7f32; 2];
+    assert_eq!(fill_output(&mut c, &mut out2, &s), 0, "nothing left, no spurious drop");
+    assert_eq!(out2, [0.0, 0.0], "empty read is silence");
 }
 
 #[test]
-fn flush_drains_a_completely_full_ring_and_refills() {
-    // The live seek path flushes a ring that is FULL (0.5 s buffered), unlike the partial-ring
-    // flush above. Prove a full-ring flush actually empties it and that new audio pushed after is
-    // readable (a desync here silently freezes playback after a seek).
-    let (mut p, mut c) = new_ring(4); // 8 slots
-    let flush = AtomicBool::new(false);
-    let consumed = AtomicU64::new(0);
-    assert_eq!(push_block(&mut p, &[1., 2., 3., 4., 5., 6., 7., 8.]), 8);
+fn drop_reveals_fresh_audio_across_a_full_ring() {
+    // A seek when the ring is essentially full of stale: the boundary drops the whole stale block
+    // in one quantum and the fresh audio staged behind it plays with no gap (a desync here would
+    // empty the ring and freeze playback on a sink that suspends on underrun).
+    let (mut p, mut c) = new_ring(4); // 8 slots = 4 stereo frames
+    let s = SharedState::new();
+    push_block(&mut p, &[1., 2., 3., 4.]); // 2 stale frames
+    push_block(&mut p, &[10., 11., 12., 13.]); // 2 fresh frames -> ring full
     assert_eq!(p.slots(), 0, "ring is completely full");
+    s.drop_before.store(2, Ordering::Release); // 2 stale frames pushed before the seek
 
-    flush.store(true, Ordering::Release);
-    let mut out = [9.9f32; 4];
-    fill_output(&mut c, &mut out, &flush, &consumed);
-    assert_eq!(out, [0.0; 4], "flushed audio is dropped");
-    assert_eq!(p.slots(), 8, "a full ring is fully drained by the flush");
+    let mut out = [0.0f32; 4]; // request the 2 fresh frames
+    let played = fill_output(&mut c, &mut out, &s);
+    assert_eq!(played, 2, "the 2 fresh frames play");
+    assert_eq!(out, [10., 11., 12., 13.], "stale dropped, fresh revealed from a full ring");
+    assert_eq!(s.frames_consumed.load(Ordering::Relaxed), 2);
+    assert_eq!(s.removed_frames.load(Ordering::Relaxed), 4, "2 dropped + 2 played");
+}
 
-    // New audio pushed after the flush must be visible to the reader.
-    assert_eq!(push_block(&mut p, &[10., 11., 12., 13.]), 4);
-    let mut out2 = [0.0f32; 4];
-    fill_output(&mut c, &mut out2, &flush, &consumed);
-    assert_eq!(out2, [10., 11., 12., 13.], "new audio reads back after a full-ring flush");
+#[test]
+fn no_drop_once_the_boundary_is_behind_the_read_cursor() {
+    // A stale drop boundary that the read cursor already passed must not eat fresh audio.
+    let (mut p, mut c) = new_ring(8);
+    let s = SharedState::new();
+    push_block(&mut p, &[1., 2., 3., 4.]); // 2 frames
+    s.removed_frames.store(5, Ordering::Relaxed); // cursor already past
+    s.drop_before.store(3, Ordering::Release); // an old boundary
+    let mut out = [0.0f32; 4];
+    let played = fill_output(&mut c, &mut out, &s);
+    assert_eq!(played, 2, "plays normally, drops nothing");
+    assert_eq!(out, [1., 2., 3., 4.]);
+    assert_eq!(s.removed_frames.load(Ordering::Relaxed), 7, "5 + 2 played");
+    assert_eq!(s.frames_consumed.load(Ordering::Relaxed), 2, "all real frames counted");
 }
 
 #[test]
 fn fill_output_counts_and_returns_real_audio_frames_only() {
     let (mut p, mut c) = new_ring(8); // 16 slots, 8 stereo frames
-    let flush = AtomicBool::new(false);
-    let consumed = AtomicU64::new(0);
+    let s = SharedState::new();
     // Four stereo frames (8 samples) into an eight-frame (16-sample) request: only the four real
     // frames are counted and returned; the silence padding is neither, so the clock advances by
     // played audio alone.
     push_block(&mut p, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     let mut out = [0.0f32; 16];
-    assert_eq!(fill_output(&mut c, &mut out, &flush, &consumed), 4);
-    assert_eq!(consumed.load(Ordering::Relaxed), 4, "counts only the real frames");
+    assert_eq!(fill_output(&mut c, &mut out, &s), 4);
+    assert_eq!(s.frames_consumed.load(Ordering::Relaxed), 4, "counts only the real frames");
     // Draining an empty ring counts and returns zero: this freezes the clock at a track's end
     // instead of counting trailing silence.
     let mut out2 = [0.0f32; 16];
-    assert_eq!(fill_output(&mut c, &mut out2, &flush, &consumed), 0);
-    assert_eq!(consumed.load(Ordering::Relaxed), 4, "an empty read adds nothing");
+    assert_eq!(fill_output(&mut c, &mut out2, &s), 0);
+    assert_eq!(s.frames_consumed.load(Ordering::Relaxed), 4, "an empty read adds nothing");
 }
 
 #[test]
@@ -192,27 +216,58 @@ fn seek_request_round_trips_and_coalesces() {
 }
 
 #[test]
-fn begin_seek_rebases_the_clock_and_clears_finished() {
+fn commit_seek_rebases_the_clock_sets_the_drop_boundary_and_revives() {
     let s = SharedState::new();
     s.frames_consumed.store(5_000, Ordering::Relaxed);
     s.finished.store(true, Ordering::Release);
 
-    // Seeking rebases the clock to the landed frame and revives a finished track. It does NOT
-    // raise the flush: the queued audio plays out (dropping it would underrun the stream, which
-    // some sinks suspend on), so the seek carries a short tail before the new position.
-    s.begin_seek(30_000);
-    assert!(!s.flush.load(Ordering::Acquire), "the ring is not flushed on a seek");
+    // A seek that landed the decoder at frame 30_000, with 12_000 frames pushed up to the seek
+    // point (the stale boundary). The clock jumps to the target and the drop boundary is published.
+    s.commit_seek(30_000, 12_000);
     assert!(!s.is_finished(), "a seek revives a finished track");
     assert_eq!(s.position_frames(), 30_000, "clock jumps to the seek target, no drift");
-    // The clock then advances from the target as the RT consumes new-position frames.
+    assert_eq!(s.drop_before.load(Ordering::Acquire), 12_000, "drop boundary published");
+    // The clock advances from the target as PLAYED frames accrue; the dropped stale tail does not
+    // count (frames_consumed only ever counts played audio).
     s.frames_consumed.store(5_480, Ordering::Relaxed);
     assert_eq!(s.position_frames(), 30_480);
+}
 
-    // Seeking to the start rebases to 0 (base_offset is recomputed from the current consumed).
-    s.begin_seek(0);
-    assert_eq!(s.position_frames(), 0, "rebased to the start");
-    s.frames_consumed.store(5_960, Ordering::Relaxed);
-    assert_eq!(s.position_frames(), 480, "advances from 0 as new-position frames play");
+#[test]
+fn commit_seek_corrects_the_clock_when_the_rt_over_drained_during_priming() {
+    // If the buffer ran low while staging, the realtime side can drain PAST the boundary and play
+    // some freshly-staged frames before commit_seek runs. commit_seek must count those so the clock
+    // does not trail the audio.
+    let s = SharedState::new();
+    s.frames_consumed.store(200, Ordering::Relaxed);
+    // Read cursor is 50 frames past the stale boundary: 50 fresh frames already played early.
+    s.removed_frames.store(12_050, Ordering::Relaxed);
+    s.commit_seek(30_000, 12_000);
+    assert_eq!(
+        s.position_frames(),
+        30_050,
+        "clock accounts for the 50 fresh frames the RT already played past the boundary",
+    );
+    // With no over-drain (cursor at or before the boundary), the correction is zero.
+    let s2 = SharedState::new();
+    s2.frames_consumed.store(200, Ordering::Relaxed);
+    s2.removed_frames.store(11_000, Ordering::Relaxed); // still short of the boundary
+    s2.commit_seek(30_000, 12_000);
+    assert_eq!(s2.position_frames(), 30_000, "no correction when the tail was not over-drained");
+}
+
+#[test]
+fn rebase_clock_only_moves_the_clock_without_touching_the_drop_boundary() {
+    // The near-end-of-track fallback: rebase the clock but leave the tail to play out (no drop), so
+    // the ring is never risked empty when too little fresh audio could be staged.
+    let s = SharedState::new();
+    s.frames_consumed.store(1_000, Ordering::Relaxed);
+    s.drop_before.store(7, Ordering::Release); // some earlier boundary
+    s.finished.store(true, Ordering::Release);
+    s.rebase_clock_only(50_000);
+    assert_eq!(s.position_frames(), 50_000, "clock rebased to the target");
+    assert!(!s.is_finished(), "still revives a finished track");
+    assert_eq!(s.drop_before.load(Ordering::Acquire), 7, "boundary untouched: the tail plays out");
 }
 
 #[test]
@@ -257,13 +312,13 @@ fn position_clock_tracks_consumption_and_seeks() {
     s.frames_consumed.store(1000, Ordering::Relaxed);
     assert_eq!(s.position_frames(), 1000);
     // Seek to frame 5000 with 1000 already consumed: the clock reports 5000 with no jump...
-    s.begin_seek(5000);
+    s.commit_seek(5000, 0);
     assert_eq!(s.position_frames(), 5000, "no jump right after a seek");
     // ...then advances from the seek target as more frames play.
     s.frames_consumed.store(1250, Ordering::Relaxed);
     assert_eq!(s.position_frames(), 5250, "advances from the seek target");
     // A backward seek to 0 with 1250 consumed clamps at 0 (never negative) and climbs from there.
-    s.begin_seek(0);
+    s.commit_seek(0, 0);
     assert_eq!(s.position_frames(), 0, "backward seek rebases to the start");
     s.frames_consumed.store(1450, Ordering::Relaxed);
     assert_eq!(s.position_frames(), 200, "advances from 0 after the backward seek");

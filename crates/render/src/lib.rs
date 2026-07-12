@@ -7,7 +7,7 @@
 
 use xubamp_skin::bmp::Image;
 use xubamp_skin::sprites::{self, Placement, Rect};
-use xubamp_skin::Skin;
+use xubamp_skin::{textfont, Skin};
 
 pub mod hit;
 pub mod marquee;
@@ -140,12 +140,45 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         let held = state.dragging == Some(hit::Slider::Position);
         posbar::draw(&mut fb, posbar, state.position.unwrap_or(0.0), held);
     }
+    // kbps (bitrate) and kHz (sample rate) readouts, in the small text.bmp font, blank when nothing
+    // is loaded. They share the marquee's font sheet.
+    if let Some(text) = &skin.text {
+        if let Some(kbps) = state.kbps {
+            draw_small_number(&mut fb, text, kbps, sprites::KBPS_X, sprites::KBPS_Y, sprites::KBPS_DIGITS);
+        }
+        if let Some(khz) = state.khz {
+            draw_small_number(&mut fb, text, khz, sprites::KHZ_X, sprites::KHZ_Y, sprites::KHZ_DIGITS);
+        }
+    }
+    // Mono/stereo indicator: both words are drawn; the one matching the channel count is lit, the
+    // other dim. Nothing loaded (0 channels) dims both.
+    if let Some(monoster) = &skin.monoster {
+        let (mono, stereo) = if state.channels == 1 {
+            (sprites::MONO_LIT, sprites::STEREO_UNLIT)
+        } else if state.channels >= 2 {
+            (sprites::MONO_UNLIT, sprites::STEREO_LIT)
+        } else {
+            (sprites::MONO_UNLIT, sprites::STEREO_UNLIT)
+        };
+        blit_placement(&mut fb, monoster, mono);
+        blit_placement(&mut fb, monoster, stereo);
+    }
     // The visualizer: spectrum bars, oscilloscope, or off, over the recessed panel, coloured from
     // viscolor.txt. Skins without that palette (the built-in default) show no visualizer.
     if let Some(viscolor) = &skin.viscolor {
         vis::draw(&mut fb, viscolor, &state.vis);
     }
     fb
+}
+
+/// Draw `value` as small `text.bmp` digits, left-aligned at (`x`, `y`) and clipped to `max_digits`
+/// (matching the classic fixed-width field). Non-digit chars are skipped.
+fn draw_small_number(fb: &mut Framebuffer, text: &Image, value: u32, x: i32, y: i32, max_digits: usize) {
+    for (i, ch) in value.to_string().chars().take(max_digits).enumerate() {
+        if let Some(cell) = textfont::cell(ch) {
+            blit(fb, text, cell, x + i as i32 * textfont::ADVANCE, y);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +330,67 @@ mod tests {
         // With no elapsed time the slots stay blank: the main background shows through.
         let blank = compose_main_window(&skin, &hit::UiState::default());
         assert_eq!(px(&blank, 48 + 4, 26 + 6), RED, "blank display draws no digit");
+    }
+
+    #[test]
+    fn kbps_and_khz_draw_small_text_font_digits() {
+        // A text sheet where digit d's 5x6 cell (at x=d*5, y=6) is a d-distinct red.
+        let mut text = solid(50, 12, [0, 0, 0, 255]);
+        for d in 0..10u32 {
+            let color = [(10 + d * 20) as u8, 0, 0, 255];
+            for y in 6..12u32 {
+                for x in d * 5..d * 5 + 5 {
+                    let o = ((y * 50 + x) * 4) as usize;
+                    text.rgba[o..o + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        let skin = Skin { main: Some(solid(275, 116, RED)), text: Some(text), ..Default::default() };
+        let state = hit::UiState { kbps: Some(192), khz: Some(44), ..Default::default() };
+        let fb = compose_main_window(&skin, &state);
+        let color = |d: u32| [(10 + d * 20) as u8, 0, 0, 255];
+        use xubamp_skin::sprites::{KBPS_X, KBPS_Y, KHZ_X, KHZ_Y};
+        // kbps "192": digits at x=111,116,121 (y=43), sampled a couple pixels into each cell.
+        assert_eq!(px(&fb, KBPS_X as u32 + 2, KBPS_Y as u32 + 2), color(1), "kbps hundreds");
+        assert_eq!(px(&fb, KBPS_X as u32 + 7, KBPS_Y as u32 + 2), color(9), "kbps tens");
+        assert_eq!(px(&fb, KBPS_X as u32 + 12, KBPS_Y as u32 + 2), color(2), "kbps units");
+        // khz "44": digits at x=156,161 (y=43).
+        assert_eq!(px(&fb, KHZ_X as u32 + 2, KHZ_Y as u32 + 2), color(4), "khz tens");
+        assert_eq!(px(&fb, KHZ_X as u32 + 7, KHZ_Y as u32 + 2), color(4), "khz units");
+        // Nothing loaded: the readouts stay blank.
+        let blank = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&blank, KBPS_X as u32 + 2, KBPS_Y as u32 + 2), RED, "no kbps without a track");
+    }
+
+    #[test]
+    fn mono_stereo_lights_the_channel_word() {
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        use xubamp_skin::sprites::{MONO_LIT, STEREO_LIT};
+        // monoster: lit row (y=0) GREEN, unlit row (y=12) BLUE.
+        let mut monoster = solid(56, 24, BLUE);
+        for y in 0..12u32 {
+            for x in 0..56u32 {
+                let o = ((y * 56 + x) * 4) as usize;
+                monoster.rgba[o..o + 4].copy_from_slice(&GREEN);
+            }
+        }
+        let skin =
+            Skin { main: Some(solid(275, 116, RED)), monoster: Some(monoster), ..Default::default() };
+        let (mono_x, mono_y) = (MONO_LIT.dst_x as u32 + 3, MONO_LIT.dst_y as u32 + 3);
+        let (stereo_x, stereo_y) = (STEREO_LIT.dst_x as u32 + 3, STEREO_LIT.dst_y as u32 + 3);
+
+        // Stereo (2 channels): stereo lit (green), mono dim (blue).
+        let st = compose_main_window(&skin, &hit::UiState { channels: 2, ..Default::default() });
+        assert_eq!(px(&st, stereo_x, stereo_y), GREEN, "stereo lit for 2 channels");
+        assert_eq!(px(&st, mono_x, mono_y), BLUE, "mono dim for 2 channels");
+        // Mono (1 channel): mono lit, stereo dim.
+        let mo = compose_main_window(&skin, &hit::UiState { channels: 1, ..Default::default() });
+        assert_eq!(px(&mo, mono_x, mono_y), GREEN, "mono lit for 1 channel");
+        assert_eq!(px(&mo, stereo_x, stereo_y), BLUE, "stereo dim for 1 channel");
+        // Nothing loaded (0 channels): both dim.
+        let none = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&none, mono_x, mono_y), BLUE, "mono dim with no track");
+        assert_eq!(px(&none, stereo_x, stereo_y), BLUE, "stereo dim with no track");
     }
 
     #[test]

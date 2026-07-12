@@ -30,6 +30,9 @@ pub struct Skin {
     /// oscilloscope. `None` when the skin omits it; the visualizer then draws nothing (it needs a
     /// palette), though a caller could substitute [`VisColor::default`].
     pub viscolor: Option<VisColor>,
+    /// The mono/stereo indicator sheet (`monoster.bmp`, 56x24): lit words on top, unlit below.
+    /// `None` skips the indicator.
+    pub monoster: Option<Image>,
 }
 
 impl Skin {
@@ -52,6 +55,7 @@ impl Skin {
             viscolor: archive
                 .get("viscolor.txt")
                 .map(|b| VisColor::parse(&String::from_utf8_lossy(b))),
+            monoster: sheet("monoster.bmp"),
         }
     }
 }

@@ -117,6 +117,26 @@ pub const MARQUEE_W: i32 = 154;
 /// (The countdown minus sign, added with a later remaining-time toggle, is a 9x13 cell at 39,26.)
 pub const TIME_DIGITS: [(i32, i32); 4] = [(48, 26), (60, 26), (78, 26), (90, 26)];
 
+/// The kbps (bitrate) and kHz (sample-rate) readouts are drawn with the small `text.bmp` font
+/// (5x6 digits, abutting), NOT the big time digits. `kbps` is a 3-digit field at (111,43), `kHz` a
+/// 2-digit field at (156,43); each digit advances 5px and is left-aligned in its field, clipped to
+/// the digit count. Coordinates cross-checked against Webamp's main-window CSS.
+pub const KBPS_X: i32 = 111;
+pub const KBPS_Y: i32 = 43;
+pub const KBPS_DIGITS: usize = 3;
+pub const KHZ_X: i32 = 156;
+pub const KHZ_Y: i32 = 43;
+pub const KHZ_DIGITS: usize = 2;
+
+/// The mono/stereo indicator (`monoster.bmp`, 56x24): the lit words are the top row (y=0), the dim
+/// words the bottom row (y=12); the left block (29px) is "stereo", the right (27px) is "mono". On
+/// the window, "mono" sits at (212,41) and "stereo" at (239,41). Both are always drawn; the one
+/// matching the track's channel count is lit, the other dim. Each entry is (source rect, dest).
+pub const MONO_LIT: Placement = Placement::new(Rect::new(29, 0, 27, 12), 212, 41);
+pub const MONO_UNLIT: Placement = Placement::new(Rect::new(29, 12, 27, 12), 212, 41);
+pub const STEREO_LIT: Placement = Placement::new(Rect::new(0, 0, 29, 12), 239, 41);
+pub const STEREO_UNLIT: Placement = Placement::new(Rect::new(0, 12, 29, 12), 239, 41);
+
 /// Volume and balance sliders share a sheet layout: a column of `SLIDER_FRAMES` background
 /// frames stacked `SLIDER_FRAME_STRIDE` px apart (the level indicator), then the draggable
 /// thumb below them. The background is drawn `SLIDER_BG_H` px tall (the classic container

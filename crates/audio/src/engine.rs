@@ -197,6 +197,11 @@ pub struct AudioEngine {
     rate: u32,
     /// Total track length in frames from the header, or `None` when the format reports none.
     duration_frames: Option<u64>,
+    /// Average bitrate in kbps (file bytes * 8 / duration), or `None` without a known length. For a
+    /// VBR file this is the average, not the classic per-frame value; for PCM it is the true rate.
+    bitrate_kbps: Option<u32>,
+    /// Channel count of the track (1 mono, 2 stereo), for the mono/stereo indicator.
+    channels: u8,
     loop_thread: Option<JoinHandle<()>>,
     producer_thread: Option<JoinHandle<()>>,
 }
@@ -211,6 +216,8 @@ pub struct EngineHandle {
     shared: Arc<SharedState>,
     rate: u32,
     duration_frames: Option<u64>,
+    bitrate_kbps: Option<u32>,
+    channels: u8,
 }
 
 impl EngineHandle {
@@ -307,6 +314,21 @@ impl EngineHandle {
     pub fn is_playing(&self) -> bool {
         self.shared.playing.load(Ordering::Relaxed)
     }
+
+    /// Average bitrate in kbps for the readout, or `None` without a known length.
+    pub fn bitrate_kbps(&self) -> Option<u32> {
+        self.bitrate_kbps
+    }
+
+    /// Sample rate in whole kHz (e.g. 44100 -> 44), or `None` if unknown.
+    pub fn khz(&self) -> Option<u32> {
+        (self.rate > 0).then_some(self.rate / 1000)
+    }
+
+    /// Channel count (1 mono, 2 stereo) for the mono/stereo indicator.
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
 }
 
 impl AudioEngine {
@@ -328,6 +350,15 @@ impl AudioEngine {
         if rate == 0 {
             return Err(EngineError::Empty);
         }
+        // Average bitrate for the kbps readout: file bytes * 8 / duration. `None` without a known
+        // length. For a VBR file this is the average, not the classic per-frame value; for PCM it is
+        // the true rate.
+        let bitrate_kbps = duration_frames.and_then(|frames| {
+            let secs = frames as f64 / rate as f64;
+            let bytes = std::fs::metadata(path).ok()?.len();
+            (secs > 0.0).then_some(((bytes as f64 * 8.0) / secs / 1000.0).round() as u32)
+        });
+        let channels_u8 = channels.min(u8::MAX as usize) as u8;
 
         // Steady-state buffer is ~0.5 s (the underrun headroom: a Bluetooth sink suspends the
         // stream on an underrun). The ring is sized to DOUBLE that so a seek can stage fresh audio
@@ -471,6 +502,8 @@ impl AudioEngine {
             shared,
             rate,
             duration_frames,
+            bitrate_kbps,
+            channels: channels_u8,
             loop_thread: Some(loop_thread),
             producer_thread: Some(producer_thread),
         })
@@ -502,6 +535,8 @@ impl AudioEngine {
             shared: Arc::clone(&self.shared),
             rate: self.rate,
             duration_frames: self.duration_frames,
+            bitrate_kbps: self.bitrate_kbps,
+            channels: self.channels,
         }
     }
 }

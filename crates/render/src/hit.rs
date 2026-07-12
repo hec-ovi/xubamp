@@ -209,6 +209,11 @@ pub struct UiState {
     /// The visualizer: its mode plus the per-frame spectrum/oscilloscope decay state. Stepped by
     /// the platform layer each frame from the audio scope tap; clicking the panel cycles the mode.
     pub vis: VisState,
+    /// Bitrate (kbps) and sample rate (kHz) for the small readouts, `None` when nothing is loaded.
+    pub kbps: Option<u32>,
+    pub khz: Option<u32>,
+    /// Channel count: 2 lights "stereo", 1 lights "mono", 0 (nothing loaded) dims both.
+    pub channels: u8,
 }
 
 impl Default for UiState {
@@ -227,6 +232,9 @@ impl Default for UiState {
             position: None,
             duration: None,
             vis: VisState::default(),
+            kbps: None,
+            khz: None,
+            channels: 0,
         }
     }
 }
@@ -243,6 +251,11 @@ pub struct Playback {
     /// Whether audio is actively playing (not paused/stopped). Gates the visualizer animation: the
     /// platform layer feeds live samples while playing and silence otherwise, so it settles.
     pub playing: bool,
+    /// Bitrate in kbps, sample rate in kHz, and channel count, for the small indicators. `None`/0
+    /// when nothing is loaded. Constant per track, but polled with the clock for simplicity.
+    pub kbps: Option<u32>,
+    pub khz: Option<u32>,
+    pub channels: u8,
 }
 
 /// What the platform layer should do after handling a pointer event. Every field defaults to
@@ -537,6 +550,14 @@ fn seek_key(state: &mut UiState, delta_secs: f32) -> Outcome {
 pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
     let mut changed = state.duration != pb.duration;
     state.duration = pb.duration;
+    // The kbps/kHz/channel indicators are constant per track; copy them and redraw on any change
+    // (which is really just once, when a track loads or clears).
+    if state.kbps != pb.kbps || state.khz != pb.khz || state.channels != pb.channels {
+        state.kbps = pb.kbps;
+        state.khz = pb.khz;
+        state.channels = pb.channels;
+        changed = true;
+    }
     if state.dragging != Some(Slider::Position) {
         if state.elapsed != pb.elapsed {
             state.elapsed = pb.elapsed;
@@ -945,7 +966,7 @@ mod tests {
         // Normal tick: the clock sets elapsed, position, and duration.
         assert!(on_tick(
             &mut s,
-            Playback { elapsed: Some(30), position: Some(0.25), duration: Some(120), playing: true }
+            Playback { elapsed: Some(30), position: Some(0.25), duration: Some(120), playing: true, ..Default::default() }
         ));
         assert_eq!((s.elapsed, s.position, s.duration), (Some(30), Some(0.25), Some(120)));
 
@@ -957,7 +978,7 @@ mod tests {
         s.position = Some(0.75);
         let changed = on_tick(
             &mut s,
-            Playback { elapsed: Some(31), position: Some(0.26), duration: Some(130), playing: true },
+            Playback { elapsed: Some(31), position: Some(0.26), duration: Some(130), playing: true, ..Default::default() },
         );
         assert!(changed, "a changed duration still redraws mid-drag");
         assert_eq!(s.duration, Some(130), "duration refreshes during the drag");
@@ -965,7 +986,7 @@ mod tests {
         // With the duration unchanged, a drag-phase tick changes nothing at all.
         let changed = on_tick(
             &mut s,
-            Playback { elapsed: Some(32), position: Some(0.27), duration: Some(130), playing: true },
+            Playback { elapsed: Some(32), position: Some(0.27), duration: Some(130), playing: true, ..Default::default() },
         );
         assert!(!changed, "no redraw: the drag owns the display and duration was unchanged");
         assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview still held");

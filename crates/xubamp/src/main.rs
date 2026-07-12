@@ -243,6 +243,9 @@ fn main() {
                 position: h.position_fraction(),
                 duration: h.duration_secs(),
                 playing: h.is_playing(),
+                kbps: h.bitrate_kbps(),
+                khz: h.khz(),
+                channels: h.channels(),
             },
             None => xubamp_render::hit::Playback::default(),
         }

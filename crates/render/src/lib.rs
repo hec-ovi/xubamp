@@ -119,10 +119,20 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
             blit(&mut fb, numbers, sprites::DIGITS[d as usize], dx, dy);
         }
     }
-    // Song-title marquee: drawn from the skin's text.bmp font over the display panel. Skins
-    // without that sheet (including the built-in default) simply show no marquee here.
+    // Song-title marquee: drawn from the skin's text.bmp font over the display panel. While a
+    // volume/balance slider is being dragged it instead shows that value ("Volume: 78%",
+    // "Balance: Center"/"Balance: 12% Left"), matching classic Winamp (verified against Webamp's
+    // marqueeUtils). Skins without text.bmp (the built-in default) show no marquee here.
     if let Some(text) = &skin.text {
-        marquee::draw(&mut fb, text, &state.title, state.marquee_offset);
+        match state.dragging {
+            Some(hit::Slider::Volume) => {
+                marquee::draw(&mut fb, text, &format!("Volume: {}%", state.volume), 0);
+            }
+            Some(hit::Slider::Balance) => {
+                marquee::draw(&mut fb, text, &balance_readout(state.balance), 0);
+            }
+            _ => marquee::draw(&mut fb, text, &state.title, state.marquee_offset),
+        }
     }
     // Volume and balance sliders: each drawn from its own sheet at the current value, with the
     // thumb shown pressed while that slider is being dragged. Skins without the sheet skip it.
@@ -217,6 +227,18 @@ fn draw_small_number(fb: &mut Framebuffer, text: &Image, value: u32, x: i32, y: 
         if let Some(cell) = textfont::cell(ch) {
             blit(fb, text, cell, x + i as i32 * textfont::ADVANCE, y);
         }
+    }
+}
+
+/// The classic Winamp balance readout shown in the marquee while dragging the balance slider:
+/// "Balance: Center" at centre, else "Balance: NN% Left"/"Right" by magnitude (verified against
+/// Webamp's `getBalanceText`).
+fn balance_readout(balance: i8) -> String {
+    if balance == 0 {
+        "Balance: Center".to_string()
+    } else {
+        let dir = if balance > 0 { "Right" } else { "Left" };
+        format!("Balance: {}% {}", (balance as i32).abs(), dir)
     }
 }
 
@@ -469,6 +491,49 @@ mod tests {
         };
         let fb = compose_main_window(&no_font, &playing);
         assert_eq!(px(&fb, mx, my), RED, "no text sheet, no marquee");
+    }
+
+    #[test]
+    fn balance_readout_matches_winamp() {
+        assert_eq!(balance_readout(0), "Balance: Center");
+        assert_eq!(balance_readout(-12), "Balance: 12% Left");
+        assert_eq!(balance_readout(34), "Balance: 34% Right");
+        assert_eq!(balance_readout(-100), "Balance: 100% Left");
+        assert_eq!(balance_readout(100), "Balance: 100% Right");
+    }
+
+    #[test]
+    fn dragging_a_slider_shows_its_readout_in_the_marquee() {
+        // A GREEN text sheet over a RED background. With an empty title the marquee is normally
+        // blank, but while a volume/balance slider is dragged it paints the readout there.
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            text: Some(solid(155, 18, GREEN)),
+            ..Default::default()
+        };
+        let (mx, my) = (xubamp_skin::sprites::MARQUEE_X as u32, xubamp_skin::sprites::MARQUEE_Y as u32);
+
+        // No title, not dragging: the marquee stays the background.
+        let idle = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&idle, mx, my), RED, "idle marquee is blank");
+
+        // Dragging volume paints the "Volume: 100%" readout ('V' cell) at the origin.
+        let vol = hit::UiState {
+            dragging: Some(hit::Slider::Volume),
+            volume: 100,
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &vol);
+        assert_eq!(px(&fb, mx, my), GREEN, "volume readout drawn while dragging");
+
+        // Dragging balance paints its readout too.
+        let bal = hit::UiState {
+            dragging: Some(hit::Slider::Balance),
+            balance: -50,
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &bal);
+        assert_eq!(px(&fb, mx, my), GREEN, "balance readout drawn while dragging");
     }
 
     #[test]

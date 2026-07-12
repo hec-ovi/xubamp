@@ -39,6 +39,9 @@ session=(
     -e "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}"
 )
 [ -d "$HOME/Music" ] && session+=(-v "$HOME/Music:$HOME/Music:ro")
+# Optionally pin playback to a specific PipeWire node (e.g. a spare analog sink for silent testing
+# so it never touches the default output). Set PIPEWIRE_NODE in the environment to pass it through.
+[ -n "${PIPEWIRE_NODE:-}" ] && session+=(-e "PIPEWIRE_NODE=$PIPEWIRE_NODE")
 
 cmd="${1:-}"
 [ $# -gt 0 ] && shift || true

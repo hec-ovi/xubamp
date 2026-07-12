@@ -142,16 +142,29 @@ in the repo and git history, nothing important lives only in chat.
     gained a lock-free `seek_request` atomic, `EngineHandle::seek_fraction`/`seek_to_start`/
     `duration_secs`/`position_fraction`, and a producer thread reworked to service seeks between
     decode steps and to survive end-of-track (it parks after finishing so a seek can scrub back in).
-    Seeking rebases the position clock immediately (`begin_seek`) but deliberately does NOT flush
-    the ring: dropping the ~0.5s buffered audio underruns the stream, and some sinks (notably
-    Bluetooth) suspend a stream on underrun and never resume (verified the hard way against the real
-    PipeWire daemon). So a seek carries a short tail of the previous position while the decoder
-    refills behind it; the clock jumps at once and the audio catches up within the ring latency.
-    This also unlocked Stop (halt + rewind to 00:00) and restart-on-Play after a finished track. The
+    The seek is gapless AND Bluetooth-safe (see (l) below for the design that replaced the original
+    short-tail approach). This also unlocked Stop (halt + rewind to 00:00) and restart-on-Play. The
     value math, the drag-vs-clock interaction, and the posbar rendering are unit-tested; the seek,
-    duration, and restart-from-finish paths are checked end to end against a real null sink (all five
-    ignored engine tests pass). A clean gapless flush (dropping the stale tail without underrunning)
-    is a later polish item.
+    duration, and restart-from-finish paths are checked end to end against a real sink (the ignored
+    engine tests pass).
+  - (l) done, from a live-test round: three fixes.
+    * Transport semantics: Play force-restarts the current track from the top (not a resume), Pause
+      toggles pause/resume, Stop halts and rewinds. The policy is a pure, unit-tested
+      `transport_ops(Transport, playing)` in the binary, so keys and mouse buttons share it.
+    * Title-bar drag threshold: a click no longer jumps the window. The compositor move is deferred
+      until the pointer travels past 4px, so a near-miss on a small title-bar button stays a click
+      (`render::hit::exceeds_move_threshold`, unit-tested).
+    * Gapless, Bluetooth-safe seek: the ~0.5s pre-seek tail no longer plays before the jump. The
+      ring is doubled; on a seek the producer keeps the stale tail queued, stages the fresh-position
+      audio into the spare half behind it, then publishes a drop boundary. The realtime callback
+      drops the stale tail and finds the fresh audio underneath in the same quantum, so the jump is
+      near-instant and the ring never goes empty (never underruns, which is what suspends a Bluetooth
+      sink). `frames_consumed` counts only played frames so the dropped tail does not tick the clock.
+      Paused scrubs (ring cannot drain) and near-end seeks (too little to stage) fall back to a
+      no-drop clock rebase rather than risk an underrun. Validated by ring unit tests (drop reveals
+      fresh, clock correction), a no-alloc proof of the drop branch, an ignored paused-scrub
+      regression test, and an adversarial RT-safety review. Known follow-up: reviving a fully
+      finished, drained track via Play can reactivate over an empty ring.
   - (i) done: the main-window visualizer (spectrum analyzer, oscilloscope, off), cycled by clicking
     the panel. The realtime callback taps the post-gain output into a wait-free scope ring
     (`SharedState::push_scope`, a lock-free ring of atomics, downmixed mono, no allocation) that the
@@ -231,12 +244,14 @@ in the repo and git history, nothing important lives only in chat.
 
 - Phase 4 (continued): the windowshade (compact) mode and the options/main menu. More keyboard
   bindings once their targets exist (r/s repeat/shuffle, l open-file, Alt+W/E/G window toggles,
-  Ctrl+D double-size), all of which need the playlist, equalizer, or a menu first. Polish: a gapless
-  seek flush (drop the stale tail without underrunning the stream, e.g. deactivate then flush then
-  refill), pause-blink, the click-to-toggle remaining-time display, a center detent on the balance
-  slider, and button drag-off un-press. Plus a real skin. (The built-in default skin ships no
-  volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt, so it shows none of the sliders,
-  the seek bar, the marquee, or the visualizer; those await an authored default sheet set.)
+  Ctrl+D double-size), all of which need the playlist, equalizer, or a menu first. Audio follow-up:
+  reviving a fully finished, drained track via Play can reactivate the stream over an empty ring (a
+  brief underrun); keep the stream fed with silence at end-of-track, or stage-then-reactivate on the
+  revive, so it stays Bluetooth-safe. Polish: pause-blink, the click-to-toggle remaining-time
+  display, a center detent on the balance slider, and button drag-off un-press. Plus a real skin.
+  (The built-in default skin ships no volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt,
+  so it shows none of the sliders, the seek bar, the marquee, or the visualizer; those await an
+  authored default sheet set.)
 
 ## Working rules
 

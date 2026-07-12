@@ -79,11 +79,16 @@ impl Player {
     pub fn transport(&mut self, t: Transport) {
         match t {
             Transport::Prev => {
-                // Back retraces the real play order (the history stack), so it returns to the track
-                // you actually just heard, not merely index-1. This is what makes Prev correct under
-                // shuffle. Falls back to the linear previous when there is no history.
-                let fresh = self.playlist.peek_prev();
-                if self.playlist.back(fresh).is_some() {
+                // In shuffle, Back retraces the real play order (the history stack) so it returns to
+                // the track you actually just heard. In order, Prev is simply the previous track, so
+                // toggling shuffle off gives plain sequential navigation.
+                let moved = if self.shuffle {
+                    let fresh = self.playlist.peek_prev();
+                    self.playlist.back(fresh).is_some()
+                } else {
+                    self.playlist.prev().is_some()
+                };
+                if moved {
                     self.load_current();
                 }
             }
@@ -109,12 +114,15 @@ impl Player {
     /// else a random one in shuffle mode or the next in order (wrapping when repeat is on). Loads and
     /// plays whatever it lands on; a no-op at a hard end. Remembers the departing track for Back.
     fn advance(&mut self) {
-        let fresh = if self.shuffle && self.playlist.len() > 1 {
-            Some(self.next_random())
+        let moved = if self.shuffle && self.playlist.len() > 1 {
+            // Redo a stepped-back track if any, else a fresh random pick; both remember the trail.
+            let fresh = Some(self.next_random());
+            self.playlist.forward(fresh).is_some()
         } else {
-            self.playlist.peek_next()
+            // In order, Next is simply the next track (wrapping with repeat).
+            self.playlist.next().is_some()
         };
-        if self.playlist.forward(fresh).is_some() {
+        if moved {
             self.load_current();
         }
     }
@@ -123,7 +131,14 @@ impl Player {
     /// current track for Back and clears the forward stack (a fresh navigation). No-op if the index
     /// is out of range.
     pub fn play_index(&mut self, i: usize) {
-        if self.playlist.jump_to(i).is_some() {
+        // In shuffle, remember the departing track for Back; in order, a plain select keeps Prev/Next
+        // sequential from the new position.
+        let moved = if self.shuffle {
+            self.playlist.jump_to(i).is_some()
+        } else {
+            self.playlist.select(i).is_some()
+        };
+        if moved {
             self.load_current();
         }
     }
@@ -131,7 +146,12 @@ impl Player {
     /// Toggle shuffle or repeat mode.
     pub fn toggle_mode(&mut self, mode: ModeButton) {
         match mode {
-            ModeButton::Shuffle => self.shuffle = !self.shuffle,
+            ModeButton::Shuffle => {
+                self.shuffle = !self.shuffle;
+                // The Back/Forward history only drives navigation in shuffle, so reset it on any
+                // mode change so a stale shuffle trail never leaks into sequential play (or back).
+                self.playlist.clear_history();
+            }
             ModeButton::Repeat => {
                 let on = !self.playlist.repeat();
                 self.playlist.set_repeat(on);

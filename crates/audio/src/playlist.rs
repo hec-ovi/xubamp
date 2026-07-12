@@ -178,6 +178,14 @@ impl Playlist {
         self.select(i)
     }
 
+    /// Drop the Back/Forward navigation history. Called on a shuffle-mode change, since the history
+    /// only drives navigation in shuffle (in order, Prev/Next are plainly sequential), so a stale
+    /// shuffle trail must not leak across the mode switch.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.future.clear();
+    }
+
     /// Cap the back history so it cannot grow without bound over a long session.
     fn cap_history(&mut self) {
         let overflow = self.history.len().saturating_sub(HISTORY_MAX);
@@ -332,5 +340,16 @@ mod tests {
         p.select(1);
         assert_eq!(p.forward(None), None, "end of list, no repeat, nothing to redo");
         assert_eq!(p.current_index(), Some(1));
+    }
+
+    #[test]
+    fn clear_history_drops_back_and_forward() {
+        let mut p = pl(&["a", "b", "c"]);
+        p.forward(Some(1)); // a -> b, history=[0]
+        p.forward(Some(2)); // b -> c, history=[0,1]
+        p.clear_history();
+        // With the trail gone, Back falls to the linear previous (b) rather than retracing history.
+        let fresh = p.peek_prev();
+        assert_eq!(p.back(fresh).as_deref(), Some(Path::new("b")), "linear previous, not history");
     }
 }

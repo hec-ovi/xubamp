@@ -222,6 +222,19 @@ in the repo and git history, nothing important lives only in chat.
     build/clippy/tests green with the feature off, container build/clippy green with it on, and a live
     startup smoke test maps the window through the new keyboard path without panicking.
 
+- Phase 5: playlist. Sub-units:
+  - (a) done: a functional multi-track playlist (no window yet). `xubamp a.mp3 b.mp3` (or a shell
+    glob) builds an ordered playlist; the transport Prev/Next buttons and keys move through it, and
+    it auto-advances when a track ends. `audio::playlist::Playlist` is a pure, unit-tested model
+    (tracks + current index; next/prev/select stop at the ends, no wrap). A binary-side `Player`
+    owns the current `AudioEngine` and switches tracks by dropping the old engine and starting a
+    fresh one (each track streams at its native rate, so no cross-track resampler is needed); it
+    reuses the tested `transport_ops` policy and lives on the UI thread, shared with the window
+    callbacks via `Rc<RefCell>` (the single-threaded event loop borrows it one at a time). The
+    marquee title now rides the `Playback` snapshot and updates per track. Verified on real hardware
+    (silent sink): a two-track run auto-advances from the first track to the second. Next: the PLEDIT
+    window (the visible list), then drag-drop / file loading / m3u.
+
 - Phase 3: audio engine. Written plan first (see ARCHITECTURE.md). Sub-units:
   - (a) done: Symphonia decode (WAV + MP3), channel map to stereo. Pure Rust.
   - (b) done: lock-free SPSC ring (`audio::ring`: `SharedState`, `new_ring`, `push_block`,

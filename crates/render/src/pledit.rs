@@ -30,10 +30,6 @@ pub struct PlState {
     pub anchor: Option<usize>,
     /// Scroll position as a 0..=100 percentage of the overflow (Winamp's model).
     pub scroll: f32,
-    /// When `Some`, the playlist is in "jump to file" mode (the classic `J` hotkey) showing this
-    /// live search query; the first matching row is selected and scrolled into view. Winamp opens a
-    /// separate dialog; we do an in-place incremental search instead.
-    pub jump: Option<String>,
 }
 
 impl PlState {
@@ -130,31 +126,6 @@ impl PlState {
         };
         self.scroll = target.min(overflow) as f32 / overflow as f32 * 100.0;
     }
-
-    /// The index of the first row matching the current jump query: every whitespace-separated token
-    /// must appear in the row title (case-insensitive). `None` if there is no query or no match.
-    pub fn jump_match(&self) -> Option<usize> {
-        let query = self.jump.as_deref()?;
-        let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-        if tokens.is_empty() {
-            return None;
-        }
-        self.rows.iter().position(|r| {
-            let title = r.title.to_lowercase();
-            tokens.iter().all(|t| title.contains(t))
-        })
-    }
-
-    /// Recompute the jump match after the query changed: select and scroll to the first matching row
-    /// (in a window `window_h` px tall). Returns the matched index, if any.
-    pub fn jump_refresh(&mut self, window_h: i32) -> Option<usize> {
-        let m = self.jump_match();
-        if let Some(i) = m {
-            self.selected = vec![i];
-            self.scroll_to(i, window_h);
-        }
-        m
-    }
 }
 
 /// Compose the playlist window at `width` x `height` (already snapped to the resize grid and clamped
@@ -193,16 +164,6 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
     blit(&mut fb, sheet, sprites::PLEDIT_BOTTOM_RIGHT, w - sprites::PLEDIT_BOTTOM_RIGHT.w, mid_y1);
 
     draw_rows(&mut fb, state, &colors, h, list_w);
-
-    // Jump-to-file mode: black out the title bar's baked "PLAYLIST" and show the live query there.
-    if let Some(query) = &state.jump {
-        let x0 = sprites::PLEDIT_TOP_LEFT.w;
-        let bar_w = w - x0 - sprites::PLEDIT_TOP_RIGHT.w;
-        fill_rect(&mut fb, x0, 2, bar_w, sprites::PLEDIT_TITLE_H - 4, Rgb::new(0, 0, 0));
-        let rgb = colors.current;
-        let text = format!("JUMP: {query}");
-        font::draw_text(&mut fb.rgba, fb.width, fb.height, x0 + 4, 7, &text, [rgb.r, rgb.g, rgb.b]);
-    }
     fb
 }
 
@@ -452,37 +413,4 @@ mod tests {
         assert_eq!(s.scroll, before);
     }
 
-    #[test]
-    fn jump_match_finds_tokens_case_insensitively() {
-        let mk = |t: &str| Row { title: t.into(), duration: String::new() };
-        let mut s = PlState {
-            rows: vec![mk("1. Cry Wolf"), mk("2. Take On Me"), mk("3. The Sun Always Shines")],
-            ..Default::default()
-        };
-        s.jump = Some("take".into());
-        assert_eq!(s.jump_match(), Some(1));
-        s.jump = Some("TAKE me".into());
-        assert_eq!(s.jump_match(), Some(1), "all tokens, any order, case-insensitive");
-        s.jump = Some("sun shines".into());
-        assert_eq!(s.jump_match(), Some(2));
-        s.jump = Some("nope".into());
-        assert_eq!(s.jump_match(), None);
-        s.jump = Some("   ".into());
-        assert_eq!(s.jump_match(), None, "whitespace-only query matches nothing");
-        s.jump = None;
-        assert_eq!(s.jump_match(), None);
-    }
-
-    #[test]
-    fn jump_refresh_selects_and_scrolls_to_the_match() {
-        let h = sprites::PLEDIT_H;
-        let mut rs = rows(20);
-        rs[15].title = "15. needle".into();
-        let mut s = PlState { rows: rs, ..Default::default() };
-        s.jump = Some("needle".into());
-        assert_eq!(s.jump_refresh(h), Some(15));
-        assert_eq!(s.selected, vec![15]);
-        let off = s.scroll_offset(h);
-        assert!(off <= 15 && 15 < off + PlState::visible_rows(h), "match scrolled into view");
-    }
 }

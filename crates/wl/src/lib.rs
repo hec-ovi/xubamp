@@ -44,7 +44,7 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 use xubamp_render::vis::{VisMode, FFT_N};
-use xubamp_render::{compose_main_window, hit, marquee, pledit, Framebuffer};
+use xubamp_render::{compose_main_window, hit, jump, marquee, pledit, Framebuffer};
 use xubamp_skin::Skin;
 
 // Keyboard shortcuts are gated behind the `keyboard` feature so the host build stays free of the
@@ -104,6 +104,43 @@ struct PlaylistWin {
     /// Whether the pointer is currently over the bottom-right resize grip, so the resize cursor is
     /// set only on the hover transition rather than on every motion event.
     grip_hover: bool,
+}
+
+/// The "Jump to file" dialog window (classic `J`): a standalone toplevel that filters the track
+/// list and plays the pick, without touching the playlist. Its content lives in `App::jump_state`.
+struct JumpWin {
+    window: Window,
+    pool: SlotPool,
+    fb: Framebuffer,
+    configured: bool,
+    width: i32,
+    height: i32,
+    /// A title-bar press deferred into a compositor move.
+    armed_move: Option<(i32, i32, u32)>,
+    /// The last result row clicked and when, to detect a double-click (which plays it).
+    last_click: Option<(usize, Instant)>,
+}
+
+impl JumpWin {
+    /// Upload `self.fb` to the window's shm buffer and commit (static, no frame callback).
+    fn present(&mut self) {
+        let (w, h) = (self.fb.width, self.fb.height);
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .expect("create wl_shm buffer");
+        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        let surface = self.window.wl_surface();
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer.attach_to(surface).expect("attach buffer");
+        surface.commit();
+    }
 }
 
 /// How many pixels in from the bottom-right corner count as the resize grip.
@@ -189,6 +226,8 @@ pub fn run(
         playlist: None,
         playlist_state: pledit::PlState::default(),
         pl_size: (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H),
+        jump_win: None,
+        jump_state: jump::JumpState::default(),
         playlist_source: Box::new(playlist_source),
         mod_ctrl: false,
         mod_shift: false,
@@ -307,6 +346,10 @@ struct App {
     /// The playlist window's last size, remembered so reopening it restores the size (its on-screen
     /// position cannot be restored: Wayland does not let a client set its toplevel's position).
     pl_size: (i32, i32),
+    /// The "Jump to file" dialog window, or `None` when closed.
+    jump_win: Option<JumpWin>,
+    /// The jump dialog's search query, track list, and result selection.
+    jump_state: jump::JumpState,
     /// Latest Ctrl/Shift state, mirrored from `update_modifiers`. Always present (unlike the
     /// keyboard-gated `modifiers`) so the pointer handler can read them for ctrl/shift-click
     /// selection; they simply stay false in a build without the keyboard feature.
@@ -508,6 +551,7 @@ impl App {
     fn is_our_surface(&self, surface: &wl_surface::WlSurface) -> bool {
         surface == self.window.wl_surface()
             || self.playlist.as_ref().is_some_and(|pl| surface == pl.window.wl_surface())
+            || self.jump_win.as_ref().is_some_and(|j| surface == j.window.wl_surface())
     }
 
     /// Open the playlist window (a second toplevel) if it is not already open, and light the PL
@@ -705,6 +749,147 @@ impl App {
             }
         }
     }
+
+    /// Open the jump-to-file dialog (a standalone window) unless already open, filtered over the
+    /// current track list with a fresh empty query. Only reachable via the `J` key.
+    #[cfg(feature = "keyboard")]
+    fn open_jump(&mut self) {
+        if self.jump_win.is_some() {
+            return;
+        }
+        let (rows, _current) = (self.playlist_source)();
+        self.jump_state = jump::JumpState { rows, query: String::new(), selected: 0, scroll: 0 };
+        let (w, h) = (jump::JUMP_W, jump::JUMP_H);
+        let fb = jump::compose(&self.jump_state, w, h);
+        let surface = self.compositor.create_surface(&self.qh);
+        let window = self
+            .xdg_shell
+            .create_window(surface, WindowDecorations::RequestClient, &self.qh);
+        window.set_title("xubamp jump to file");
+        window.set_app_id("xubamp");
+        // Fixed size for now (the classic dialog is resizable; that can follow).
+        window.set_min_size(Some((w as u32, h as u32)));
+        window.set_max_size(Some((w as u32, h as u32)));
+        window.commit();
+        let pool = SlotPool::new(w as usize * h as usize * 4, &self.shm).expect("jump pool");
+        self.jump_win = Some(JumpWin {
+            window,
+            pool,
+            fb,
+            configured: false,
+            width: w,
+            height: h,
+            armed_move: None,
+            last_click: None,
+        });
+    }
+
+    fn close_jump(&mut self) {
+        self.jump_win = None;
+    }
+
+    #[cfg(feature = "keyboard")]
+    fn toggle_jump(&mut self) {
+        if self.jump_win.is_some() {
+            self.close_jump();
+        } else {
+            self.open_jump();
+        }
+    }
+
+    /// Play the currently-highlighted match (if any) and close the dialog.
+    fn jump_confirm(&mut self) {
+        if let Some(i) = self.jump_state.selected_track() {
+            (self.on_command)(hit::Command::PlayIndex(i));
+        }
+        self.close_jump();
+    }
+
+    /// Recompose and present the jump dialog from `jump_state`, if open and mapped.
+    fn redraw_jump(&mut self) {
+        let Some((w, h)) = self.jump_win.as_ref().filter(|j| j.configured).map(|j| (j.width, j.height))
+        else {
+            return;
+        };
+        let fb = jump::compose(&self.jump_state, w, h);
+        let j = self.jump_win.as_mut().unwrap();
+        j.fb = fb;
+        j.present();
+    }
+
+    /// Pointer handling for the jump dialog: title-bar drag, result-row select + double-click-play,
+    /// and the Jump/Close buttons.
+    fn jump_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        match kind {
+            PointerEventKind::Enter { .. } => {
+                if let Some(pointer) = &self.pointer {
+                    let _ = pointer.set_cursor(conn, CursorIcon::Default);
+                }
+            }
+            PointerEventKind::Press { button, serial, .. } if *button == BTN_LEFT => {
+                // Title-bar band: arm a compositor move.
+                if y < jump::JUMP_TITLE_H {
+                    if let Some(j) = &mut self.jump_win {
+                        j.armed_move = Some((x, y, *serial));
+                    }
+                    return;
+                }
+                let Some((w, h)) = self.jump_win.as_ref().map(|j| (j.width, j.height)) else {
+                    return;
+                };
+                // Bottom buttons.
+                if let Some(btn) = self.jump_state.button_at(x, y, w, h) {
+                    match btn {
+                        jump::JumpButton::Jump => self.jump_confirm(),
+                        jump::JumpButton::Close => self.close_jump(),
+                    }
+                    return;
+                }
+                // A result row: select it; a double-click on the same row plays it.
+                if let Some(pos) = self.jump_state.row_at(x, y, h) {
+                    self.jump_state.selected = pos;
+                    let now = Instant::now();
+                    let double = self
+                        .jump_win
+                        .as_ref()
+                        .and_then(|j| j.last_click)
+                        .is_some_and(|(p, at)| p == pos && now.duration_since(at) < DOUBLE_CLICK);
+                    if double {
+                        self.jump_confirm();
+                    } else {
+                        if let Some(j) = &mut self.jump_win {
+                            j.last_click = Some((pos, now));
+                        }
+                        self.redraw_jump();
+                    }
+                }
+            }
+            PointerEventKind::Motion { .. } => {
+                let start = self
+                    .jump_win
+                    .as_ref()
+                    .and_then(|j| j.armed_move)
+                    .filter(|&(px, py, _)| hit::exceeds_move_threshold(x - px, y - py));
+                if let Some((_, _, serial)) = start {
+                    if let (Some(seat), Some(j)) = (self.seat.clone(), self.jump_win.as_mut()) {
+                        j.window.move_(&seat, serial);
+                        j.armed_move = None;
+                    }
+                }
+            }
+            PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
+                if let Some(j) = &mut self.jump_win {
+                    j.armed_move = None;
+                }
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(j) = &mut self.jump_win {
+                    j.armed_move = None;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl PlaylistWin {
@@ -773,9 +958,11 @@ impl CompositorHandler for App {
 
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
-        // Closing the main window quits; closing the playlist window just hides it.
+        // Closing the main window quits; closing a secondary window just drops it.
         if *window == self.window {
             self.exit = true;
+        } else if self.jump_win.as_ref().is_some_and(|j| *window == j.window) {
+            self.close_jump();
         } else {
             self.close_playlist();
         }
@@ -810,6 +997,11 @@ impl WindowHandler for App {
                 pl.configured = true;
             }
             self.redraw_playlist();
+        } else if self.jump_win.as_ref().is_some_and(|j| *window == j.window) {
+            if let Some(j) = &mut self.jump_win {
+                j.configured = true;
+            }
+            self.redraw_jump();
         }
     }
 }
@@ -912,6 +1104,15 @@ impl PointerHandler for App {
                     .is_some_and(|pl| event.surface == *pl.window.wl_surface());
             if on_playlist {
                 self.playlist_pointer(conn, &event.kind, x, y);
+                continue;
+            }
+            let on_jump = !on_main
+                && self
+                    .jump_win
+                    .as_ref()
+                    .is_some_and(|j| event.surface == *j.window.wl_surface());
+            if on_jump {
+                self.jump_pointer(conn, &event.kind, x, y);
                 continue;
             }
             if !on_main {
@@ -1052,8 +1253,9 @@ impl App {
         if !self.keyboard_focus {
             return;
         }
-        // Jump-to-file mode captures every key (text, Backspace, Enter, Escape) until it closes.
-        if self.playlist_state.jump.is_some() {
+        // The jump-to-file dialog captures every key (text, Backspace, arrows, Enter, Escape) while
+        // it is open.
+        if self.jump_win.is_some() {
             self.jump_key(event);
             return;
         }
@@ -1066,61 +1268,43 @@ impl App {
         let Some(key) = decode_key(event) else {
             return;
         };
-        // J opens jump-to-file mode (rather than being a main-window shortcut).
+        // J opens (toggles) the jump-to-file dialog rather than being a main-window shortcut.
         if key == hit::KeyPress::Char('j') {
-            self.enter_jump_mode();
+            self.toggle_jump();
             return;
         }
         let outcome = hit::on_key(&mut self.state, key, is_repeat);
         self.apply(outcome);
     }
 
-    /// Enter "jump to file" mode: open the playlist if closed and start an empty query. Subsequent
-    /// keys route to [`Self::jump_key`] until Enter plays the match or Escape cancels.
-    fn enter_jump_mode(&mut self) {
-        self.playlist_state.jump = Some(String::new());
-        if self.playlist.is_none() {
-            self.open_playlist();
-        } else {
-            self.redraw_playlist();
-        }
-    }
-
-    /// Handle a key while in jump-to-file mode: printable characters and Backspace edit the query
-    /// (re-selecting and scrolling to the first match), Enter plays the match and closes, Escape
-    /// closes without changing playback.
+    /// Handle a key while the jump dialog is open: printable characters and Backspace edit the
+    /// query, Up/Down move the highlighted match, Enter plays it and closes, Escape closes.
     fn jump_key(&mut self, event: &KeyEvent) {
-        let ph = self
-            .playlist
-            .as_ref()
-            .map_or(xubamp_skin::sprites::PLEDIT_H, |pl| pl.height);
+        let h = self.jump_win.as_ref().map_or(jump::JUMP_H, |j| j.height);
         match event.keysym {
-            Keysym::Escape => {
-                self.playlist_state.jump = None;
-                self.redraw_playlist();
+            Keysym::Escape => self.close_jump(),
+            Keysym::Return | Keysym::KP_Enter => self.jump_confirm(),
+            Keysym::Up => {
+                self.jump_state.move_selection(-1, h);
+                self.redraw_jump();
             }
-            Keysym::Return | Keysym::KP_Enter => {
-                if let Some(i) = self.playlist_state.jump_match() {
-                    (self.on_command)(hit::Command::PlayIndex(i));
-                }
-                self.playlist_state.jump = None;
-                self.redraw_playlist();
+            Keysym::Down => {
+                self.jump_state.move_selection(1, h);
+                self.redraw_jump();
             }
             Keysym::BackSpace => {
-                if let Some(q) = self.playlist_state.jump.as_mut() {
-                    q.pop();
-                }
-                self.playlist_state.jump_refresh(ph);
-                self.redraw_playlist();
+                let mut q = self.jump_state.query.clone();
+                q.pop();
+                self.jump_state.set_query(q, h);
+                self.redraw_jump();
             }
             _ => {
                 if let Some(c) = event.utf8.as_deref().and_then(|s| s.chars().next()) {
                     if !c.is_control() {
-                        if let Some(q) = self.playlist_state.jump.as_mut() {
-                            q.push(c);
-                        }
-                        self.playlist_state.jump_refresh(ph);
-                        self.redraw_playlist();
+                        let mut q = self.jump_state.query.clone();
+                        q.push(c);
+                        self.jump_state.set_query(q, h);
+                        self.redraw_jump();
                     }
                 }
             }

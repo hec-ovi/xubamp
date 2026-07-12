@@ -10,6 +10,7 @@ use xubamp_skin::sprites::{self, Placement, Rect};
 use xubamp_skin::{textfont, Skin};
 
 pub mod hit;
+pub mod jump;
 pub mod marquee;
 pub mod pledit;
 pub mod posbar;

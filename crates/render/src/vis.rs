@@ -221,12 +221,16 @@ fn group_wide(v: &mut [f32; VIS_COLS]) {
     }
 }
 
-/// Map the waveform to [`VIS_COLS`] oscilloscope column rows (0..VIS_H). Samples the recent buffer
-/// at stride 7 (Winamp's 576/75), scaling a sample to a row with `round(sample*16) + centre`.
+/// Map the waveform to [`VIS_COLS`] oscilloscope column rows (0..VIS_H). Spreads the WHOLE sample
+/// window across the columns (stride `n / VIS_COLS`), not just its first ~518 samples: the window
+/// advances by roughly its own width each audio quantum, so mapping the whole window makes
+/// consecutive frames contiguous (a continuous scroll) instead of disjoint snapshots with a ~10ms
+/// gap between them, which reads as a choppy, low-fps scope. A sample scales to a row with
+/// `round(sample*16) + centre`.
 fn oscilloscope(samples: &[f32], out: &mut [u8; VIS_COLS]) {
     let n = samples.len();
     for (x, o) in out.iter_mut().enumerate() {
-        let s = if n == 0 { 0.0 } else { samples[(x * 7).min(n - 1)] };
+        let s = if n == 0 { 0.0 } else { samples[(x * n / VIS_COLS).min(n - 1)] };
         // `saturating_add` guards the +OSC_CENTER against overflow if a decoder ever hands us a
         // huge/non-finite sample (`as i32` saturates such a value to i32::MAX). Clamped to range.
         let y = ((s * 16.0).round() as i32).saturating_add(OSC_CENTER).clamp(0, sprites::VIS_H - 1);

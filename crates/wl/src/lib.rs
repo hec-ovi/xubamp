@@ -139,6 +139,7 @@ pub fn run(
         last_marquee: Instant::now(),
         pointer: None,
         seat: None,
+        armed_move: None,
         #[cfg(feature = "keyboard")]
         keyboard: None,
         #[cfg(feature = "keyboard")]
@@ -199,6 +200,11 @@ struct App {
     /// The seat the pointer belongs to, kept so a title-bar press can start an interactive
     /// move: `xdg_toplevel.move` needs the seat plus the press serial.
     seat: Option<wl_seat::WlSeat>,
+    /// A title-bar press that has not yet become a window drag: the press position and its serial.
+    /// The compositor move is deferred until the pointer moves past a small threshold, so a click
+    /// (or a near-miss on a title-bar button) does not jump the window. Cleared on release/leave or
+    /// once the move starts.
+    armed_move: Option<(i32, i32, u32)>,
     /// The keyboard, once the seat reports the capability. Created with repeat so held seek/volume
     /// keys auto-ramp; `None` on a seat with no keyboard.
     #[cfg(feature = "keyboard")]
@@ -476,27 +482,40 @@ impl PointerHandler for App {
                     button, serial, ..
                 } if button == BTN_LEFT => {
                     let outcome = hit::on_press(&mut self.state, x, y);
-                    // A title-bar press hands the drag to the compositor: it moves the window
-                    // while the button is held, then ends the grab on release. Wayland has no
-                    // client-set absolute position, so this is the classic title-bar drag.
+                    // A title-bar press arms a window drag, but does NOT start it yet: the compositor
+                    // move is deferred until the pointer moves past a threshold, so a click (or a
+                    // near-miss on a small title-bar button) does not jump the window.
                     if outcome.start_move {
-                        if let Some(seat) = &self.seat {
-                            self.window.move_(seat, serial);
-                        }
+                        self.armed_move = Some((x, y, serial));
                     }
                     self.apply(outcome);
                 }
                 PointerEventKind::Motion { .. } => {
+                    // A moved-far-enough armed title-bar press becomes a compositor window drag:
+                    // hand it off with the original press serial, then let the compositor move the
+                    // window until release. Wayland has no client-set absolute position, so this is
+                    // the classic title-bar drag.
+                    if let Some((px, py, serial)) = self.armed_move {
+                        if hit::exceeds_move_threshold(x - px, y - py) {
+                            if let Some(seat) = &self.seat {
+                                self.window.move_(seat, serial);
+                            }
+                            self.armed_move = None;
+                        }
+                    }
                     // Drives slider dragging; inert otherwise. Wayland keeps delivering motion
                     // during the implicit button grab, so a drag continues past the window edge.
                     let outcome = hit::on_motion(&mut self.state, x, y);
                     self.apply(outcome);
                 }
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                    // A release without crossing the threshold was a click, not a drag.
+                    self.armed_move = None;
                     let outcome = hit::on_release(&mut self.state, x, y);
                     self.apply(outcome);
                 }
                 PointerEventKind::Leave { .. } => {
+                    self.armed_move = None;
                     // Cancel any in-progress button press so a button never stays stuck down.
                     let needs_redraw = hit::on_leave(&mut self.state);
                     if needs_redraw {

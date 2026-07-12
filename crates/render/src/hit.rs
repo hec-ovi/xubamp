@@ -116,6 +116,17 @@ pub enum Region {
 /// source of truth for the geometry.
 pub const TITLEBAR_H: i32 = sprites::TITLEBAR_ACTIVE.src.h;
 
+/// How far the pointer must move from a title-bar press before it becomes a window drag, in window
+/// pixels. Below this, a press-and-release is a click, not a move, so a near-miss on one of the
+/// small title-bar buttons does not jump the whole window (the band surrounds those buttons).
+pub const MOVE_THRESHOLD_PX: i32 = 4;
+
+/// Has the pointer moved far enough from the title-bar press point (offset `dx`, `dy`) to begin a
+/// window drag? Squared distance, so there is no float math and no directional bias.
+pub fn exceeds_move_threshold(dx: i32, dy: i32) -> bool {
+    dx * dx + dy * dy > MOVE_THRESHOLD_PX * MOVE_THRESHOLD_PX
+}
+
 /// Does window-local pixel (`x`, `y`) fall inside the on-window rectangle of button `b`? The
 /// button's screen rectangle is its destination plus the source sprite's width and height.
 fn in_button(b: &sprites::Placement, x: i32, y: i32) -> bool {
@@ -542,6 +553,20 @@ pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_threshold_ignores_small_jitters_but_starts_on_a_real_drag() {
+        // A click with no (or tiny) motion stays a click, so a near-miss on a title button does not
+        // move the window.
+        assert!(!exceeds_move_threshold(0, 0), "no motion is a click");
+        assert!(!exceeds_move_threshold(3, 0), "a 3px jitter stays a click");
+        assert!(!exceeds_move_threshold(-2, 2), "diagonal within the threshold");
+        assert!(!exceeds_move_threshold(0, 4), "exactly the threshold is not yet a drag");
+        // A deliberate drag past the threshold starts the move, in any direction.
+        assert!(exceeds_move_threshold(5, 0), "5px horizontal is a drag");
+        assert!(exceeds_move_threshold(0, -5), "upward drag counts");
+        assert!(exceeds_move_threshold(4, 4), "diagonal beyond the threshold");
+    }
 
     #[test]
     fn title_bar_band_is_the_top_strip() {

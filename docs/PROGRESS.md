@@ -266,18 +266,37 @@ in the repo and git history, nothing important lives only in chat.
   audio `output` feature builds there with `--features output`; pure crates
   (skin/render/wl/audio-so-far) still build and test natively on the host.
 
+## Landed since the last phase note (see git log for detail)
+
+- Playlist (PLEDIT) window: a second Wayland toplevel, tiled from `pledit.bmp`, resizable by the
+  bottom-right grip (renders the exact compositor size, so minimize/restore is stable), size
+  remembered across close/reopen. List interactions verified against Webamp: click-select,
+  Ctrl-toggle, Shift-range, empty-click clears, double-click plays, mouse-wheel scroll.
+- Shuffle and repeat buttons; balance slider (with a volume-sheet fallback for skins without
+  `balance.bmp`); the volume/balance value shown in the marquee while dragging.
+- Prev/Next Back/Forward history: retraces the real play order in shuffle, plain sequential in
+  order, history reset on a mode change.
+- Seek hold: keyboard seek and seek-bar release hold the display at the target until the engine's
+  clock catches up, so a held arrow no longer jitters back and forth.
+- Jump to file (`J`): a standalone dialog (third toplevel) with a search field, a found/total
+  counter, a filtered results list, and Jump/Close buttons; does not touch the playlist. Replaced
+  the earlier in-place incremental search.
+
 ## Next
 
-- Phase 4 (continued): the windowshade (compact) mode and the options/main menu. More keyboard
-  bindings once their targets exist (r/s repeat/shuffle, l open-file, Alt+W/E/G window toggles,
-  Ctrl+D double-size), all of which need the playlist, equalizer, or a menu first. Audio follow-up:
-  reviving a fully finished, drained track via Play can reactivate the stream over an empty ring (a
-  brief underrun); keep the stream fed with silence at end-of-track, or stage-then-reactivate on the
-  revive, so it stays Bluetooth-safe. Polish: pause-blink, the click-to-toggle remaining-time
-  display, a center detent on the balance slider, and button drag-off un-press. Plus a real skin.
-  (The built-in default skin ships no volume.bmp/balance.bmp, text.bmp, posbar.bmp, or viscolor.txt,
-  so it shows none of the sliders, the seek bar, the marquee, or the visualizer; those await an
-  authored default sheet set.)
+- Equalizer: the EQ window (`eqmain.bmp`/`eq_ex.bmp` are present in skins) plus the 10-band DSP.
+- Windowshade (compact) mode for the main window (the 2nd title-bar button), and the options/main
+  menu. More keyboard bindings once their targets exist (r/s repeat/shuffle, l open-file, window
+  toggles, Ctrl+D double-size).
+- Window docking/snapping and restoring a window's position are blocked by Wayland (a client cannot
+  set its toplevel position); the faithful route is compositing docked panes as subsurfaces of one
+  window, which is a larger rework.
+- Formats: FLAC and Ogg Vorbis (Symphonia is built with wav+pcm+mp3 today); `.m3u`/`.pls` files.
+- Audio follow-up: reviving a fully finished, drained track via Play can reactivate the stream over
+  an empty ring (a brief underrun); keep it fed with silence at end-of-track, or stage-then-
+  reactivate on the revive, so it stays Bluetooth-safe. Polish: pause-blink, click-to-toggle
+  remaining-time, a center detent on the balance slider, button drag-off un-press. Plus an authored
+  default skin (the built-in default ships no volume/balance/text/posbar sheets or viscolor.txt).
 
 ## Working rules
 

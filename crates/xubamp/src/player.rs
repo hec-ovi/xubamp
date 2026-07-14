@@ -242,7 +242,6 @@ impl Player {
         let rows = self
             .playlist
             .tracks()
-            .iter()
             .enumerate()
             .map(|(i, path)| pledit::Row {
                 title: format!("{}. {}", i + 1, track_title(&path.to_string_lossy())),

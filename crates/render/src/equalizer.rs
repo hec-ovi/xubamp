@@ -16,6 +16,25 @@ use crate::{blit, blit_placement, Framebuffer};
 pub const MIN_DB: f32 = -12.0;
 pub const MAX_DB: f32 = 12.0;
 
+/// The three clickable dB labels on the graph's left edge (`+12db`/`0db`/`-12db`). Clicking one
+/// flattens all ten bands to that level, leaving the preamp untouched, matching classic Winamp
+/// (`eqmain_dbs.m` loops the ten bands only). Coordinates are the EQ-window-local click rects.
+const DB_LABEL_X: i32 = 45;
+const DB_LABEL_W: i32 = 22;
+const DB_LABEL_H: i32 = 8;
+const DB_LABELS: [(i32, i8); 3] = [(36, 12), (64, 0), (95, -12)];
+
+/// Winamp snaps a band or preamp drag to exactly 0 dB when it lands within 5 of 100 slider units of
+/// center, i.e. within 5% of the 24 dB span (1.2 dB). Keeps a flat setting easy to hit by hand.
+fn snap_to_center(db: f32) -> f32 {
+    const SNAP_DB: f32 = (MAX_DB - MIN_DB) * 0.05;
+    if db.abs() <= SNAP_DB {
+        0.0
+    } else {
+        db
+    }
+}
+
 const FALLBACK_BODY: [u8; 3] = [17, 31, 41];
 const FALLBACK_TITLE: [u8; 3] = [18, 83, 103];
 const FALLBACK_FACE: [u8; 3] = [37, 65, 78];
@@ -52,6 +71,9 @@ pub enum Region {
     /// Visible but unsupported AUTO control.
     Auto,
     Slider(Slider),
+    /// One of the three `+12db`/`0db`/`-12db` graph labels (carrying that dB level). Clicking it
+    /// flattens all ten bands to the level; `0db` is the "reset to flat".
+    DbLabel(i8),
     Body,
     None,
 }
@@ -291,6 +313,11 @@ pub fn region_at(state: &EqState, x: i32, y: i32) -> Region {
     if in_placement(x, y, sprites::EQ_PRESETS) {
         return Region::Button(Button::Presets);
     }
+    for (label_y, level) in DB_LABELS {
+        if in_rect(x, y, DB_LABEL_X, label_y, DB_LABEL_W, DB_LABEL_H) {
+            return Region::DbLabel(level);
+        }
+    }
     if in_rect(
         x,
         y,
@@ -340,6 +367,20 @@ pub fn on_press(state: &mut EqState, x: i32, y: i32) -> Outcome {
             let command = update_slider(state, slider, x, y);
             Outcome {
                 command,
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        // A dB label flattens the ten bands to its level, leaving the preamp. Emitted as a single
+        // atomic Preset so the player boundary applies it in one step, like a menu preset.
+        Region::DbLabel(level) => {
+            let db = sanitize_db(level as f32);
+            state.bands_db = [db; 10];
+            Outcome {
+                command: Some(Command::Preset {
+                    preamp_db: state.preamp_db,
+                    bands_db: state.bands_db,
+                }),
                 redraw: true,
                 ..Default::default()
             }
@@ -422,12 +463,12 @@ fn slider_value(state: &EqState, slider: Slider) -> Option<f32> {
 fn update_slider(state: &mut EqState, slider: Slider, x: i32, y: i32) -> Option<Command> {
     match slider {
         Slider::Preamp => {
-            let db = db_from_y(y);
+            let db = snap_to_center(db_from_y(y));
             state.preamp_db = db;
             Some(Command::Preamp(db))
         }
         Slider::Band(index) => {
-            let db = db_from_y(y);
+            let db = snap_to_center(db_from_y(y));
             let value = state.bands_db.get_mut(index)?;
             *value = db;
             Some(Command::Band { index, db })
@@ -1147,6 +1188,38 @@ mod tests {
             Some(Action::SetShade(false))
         );
         assert!(!state.shade);
+    }
+
+    #[test]
+    fn db_labels_flatten_all_bands_and_leave_the_preamp() {
+        for (y, level) in DB_LABELS {
+            let mut state = EqState {
+                preamp_db: 4.0,
+                bands_db: [1.0; 10],
+                ..EqState::default()
+            };
+            assert_eq!(region_at(&state, DB_LABEL_X + 1, y + 1), Region::DbLabel(level));
+            let outcome = on_press(&mut state, DB_LABEL_X + 1, y + 1);
+            assert_eq!(state.bands_db, [level as f32; 10], "all ten bands flattened");
+            assert_eq!(state.preamp_db, 4.0, "the preamp is left untouched");
+            assert_eq!(
+                outcome.command,
+                Some(Command::Preset {
+                    preamp_db: 4.0,
+                    bands_db: [level as f32; 10],
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn snap_to_center_pulls_small_values_to_exactly_flat() {
+        assert_eq!(snap_to_center(0.0), 0.0);
+        assert_eq!(snap_to_center(0.5), 0.0);
+        assert_eq!(snap_to_center(-1.0), 0.0);
+        assert_eq!(snap_to_center(1.2), 0.0, "the 5%-of-span threshold snaps");
+        assert!((snap_to_center(3.0) - 3.0).abs() < 1e-6, "past the threshold is kept");
+        assert!((snap_to_center(-6.0) + 6.0).abs() < 1e-6);
     }
 
     #[test]

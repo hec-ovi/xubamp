@@ -1,4 +1,4 @@
-//! XDG desktop portal file chooser support for audio and equalizer files.
+//! XDG desktop portal file chooser support for audio, equalizer, and skin files.
 //!
 //! The portal is used instead of a toolkit-specific chooser so the same code works on the host and
 //! in a future sandboxed package. Dialog calls are asynchronous. Matching blocking helpers are
@@ -157,6 +157,34 @@ impl FileChooser {
         async_io::block_on(self.open_eqf_file(current_folder))
     }
 
+    /// Ask for one Winamp skin archive to load.
+    ///
+    /// Portal filters are advisory, so the accepted result is also validated as one local `.wsz`
+    /// or `.zip` path before it reaches the skin loader.
+    pub async fn open_skin_archive(
+        &self,
+        current_folder: Option<&Path>,
+    ) -> Result<DialogResult<PathBuf>, Error> {
+        let request = SelectedFiles::open_file()
+            .title("Load skin")
+            .accept_label("Open")
+            .modal(true)
+            .multiple(false)
+            .directory(false)
+            .filter(skin_archive_filter());
+        let request = self.configure_open_request(request, current_folder)?;
+        map_selected(request.send().await.and_then(|request| request.response()))?
+            .map_selected(expect_one_skin_archive_path)
+    }
+
+    /// Blocking form of [`Self::open_skin_archive`] for a dedicated worker thread.
+    pub fn open_skin_archive_blocking(
+        &self,
+        current_folder: Option<&Path>,
+    ) -> Result<DialogResult<PathBuf>, Error> {
+        async_io::block_on(self.open_skin_archive(current_folder))
+    }
+
     /// Ask for a destination for one Winamp EQF equalizer preset.
     ///
     /// The returned path always has an `.eqf` extension. A missing extension is appended; a
@@ -290,6 +318,18 @@ fn expect_one_eqf_save_path(selected: SelectedFiles) -> Result<PathBuf, Error> {
     normalize_eqf_save_path(expect_one_path(selected)?).map_err(Error::InvalidSelection)
 }
 
+fn expect_one_skin_archive_path(selected: SelectedFiles) -> Result<PathBuf, Error> {
+    validate_skin_archive_path(expect_one_path(selected)?).map_err(Error::InvalidSelection)
+}
+
+fn validate_skin_archive_path(path: PathBuf) -> Result<PathBuf, SelectionError> {
+    if has_skin_archive_extension(&path) {
+        Ok(path)
+    } else {
+        Err(SelectionError::NotSkinArchive(path))
+    }
+}
+
 fn normalize_eqf_save_path(mut path: PathBuf) -> Result<PathBuf, SelectionError> {
     match path.extension() {
         None => {
@@ -321,6 +361,14 @@ fn has_eqf_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("eqf"))
 }
 
+fn has_skin_archive_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("wsz") || extension.eq_ignore_ascii_case("zip")
+        })
+}
+
 fn suggested_eqf_name(name: &str) -> String {
     let name = Path::new(name)
         .file_name()
@@ -348,6 +396,12 @@ fn audio_filter() -> FileFilter {
 
 fn eqf_filter() -> FileFilter {
     FileFilter::new("Winamp equalizer presets").glob("*.[eE][qQ][fF]")
+}
+
+fn skin_archive_filter() -> FileFilter {
+    FileFilter::new("Winamp skin archives")
+        .glob("*.[wW][sS][zZ]")
+        .glob("*.[zZ][iI][pP]")
 }
 
 /// Convert a local `file://` URI returned by the portal into a Unix path.
@@ -453,6 +507,7 @@ pub enum SelectionError {
     ExpectedOne { actual: usize },
     UnsupportedAudio(PathBuf),
     NotEqf(PathBuf),
+    NotSkinArchive(PathBuf),
 }
 
 impl fmt::Display for SelectionError {
@@ -467,6 +522,13 @@ impl fmt::Display for SelectionError {
             }
             Self::NotEqf(path) => {
                 write!(formatter, "expected an .eqf file: {}", path.display())
+            }
+            Self::NotSkinArchive(path) => {
+                write!(
+                    formatter,
+                    "expected a .wsz or .zip file: {}",
+                    path.display()
+                )
             }
         }
     }
@@ -558,7 +620,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_and_eqf_filters_cover_case_variants() {
+    fn audio_eqf_and_skin_filters_cover_case_variants() {
         let audio = audio_filter();
         assert_eq!(audio.pattern_filters(), ["*.[mM][pP]3", "*.[wW][aA][vV]"]);
         assert_eq!(
@@ -566,6 +628,10 @@ mod tests {
             ["audio/mpeg", "audio/wav", "audio/x-wav"]
         );
         assert_eq!(eqf_filter().pattern_filters(), ["*.[eE][qQ][fF]"]);
+        assert_eq!(
+            skin_archive_filter().pattern_filters(),
+            ["*.[wW][sS][zZ]", "*.[zZ][iI][pP]"]
+        );
     }
 
     #[test]
@@ -630,6 +696,29 @@ mod tests {
             expect_one(vec![PathBuf::from("a")]).unwrap(),
             Path::new("a")
         );
+    }
+
+    #[test]
+    fn skin_archive_validation_accepts_wsz_and_zip_only() {
+        for path in ["/tmp/Classic.wsz", "/tmp/Classic.WSZ", "/tmp/Classic.zip"] {
+            let path = PathBuf::from(path);
+            assert_eq!(validate_skin_archive_path(path.clone()), Ok(path));
+        }
+
+        for path in ["/tmp/Classic", "/tmp/Classic.tar", "/tmp/Classic.wsz.exe"] {
+            let path = PathBuf::from(path);
+            assert_eq!(
+                validate_skin_archive_path(path.clone()),
+                Err(SelectionError::NotSkinArchive(path))
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_dialog_skips_skin_selection_validation() {
+        let result: Result<DialogResult<PathBuf>, Error> = DialogResult::<()>::Cancelled
+            .map_selected(|_| panic!("selection validation must not run after cancellation"));
+        assert!(matches!(result, Ok(DialogResult::Cancelled)));
     }
 
     #[test]

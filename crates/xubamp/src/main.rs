@@ -510,6 +510,12 @@ fn main() {
                         portal_actions::Completion::Saved(path) => {
                             eprintln!("xubamp: saved equalizer preset to {}", path.display());
                         }
+                        portal_actions::Completion::SkinArchive(path) => {
+                            eprintln!(
+                                "xubamp: selected skin archive {}; runtime loading is pending",
+                                path.display()
+                            );
+                        }
                         portal_actions::Completion::Error(error) => {
                             eprintln!("xubamp: {error}");
                         }
@@ -603,6 +609,12 @@ fn main() {
                     }
                     portal_actions::Completion::Saved(path) => {
                         eprintln!("xubamp: saved equalizer preset to {}", path.display());
+                    }
+                    portal_actions::Completion::SkinArchive(path) => {
+                        eprintln!(
+                            "xubamp: selected skin archive {}; runtime loading is pending",
+                            path.display()
+                        );
                     }
                     portal_actions::Completion::Error(error) => eprintln!("xubamp: {error}"),
                 }

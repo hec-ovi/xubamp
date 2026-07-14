@@ -20,6 +20,7 @@ pub(crate) enum Completion {
         warnings: Vec<String>,
     },
     OpenPaths(Vec<PathBuf>),
+    SkinArchive(PathBuf),
     EqualizerPreset(equalizer::Preset),
     Saved(PathBuf),
     Error(String),
@@ -125,6 +126,7 @@ fn is_supported(request: &MenuRequest) -> bool {
             | MenuRequest::Action(
                 ClassicMenuAction::PlaylistAddDirectory
                     | ClassicMenuAction::PlaylistAddFile
+                    | ClassicMenuAction::LoadSkin
                     | ClassicMenuAction::EqualizerLoadEqf
             )
             | MenuRequest::SaveEqualizer(_)
@@ -168,6 +170,10 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
                 }
                 DialogResult::Cancelled => None,
             }),
+        MenuRequest::Action(ClassicMenuAction::LoadSkin) => chooser
+            .open_skin_archive_blocking(None)
+            .map_err(|error| format!("cannot open skin file chooser: {error}"))
+            .map(skin_archive_completion),
         MenuRequest::Action(ClassicMenuAction::EqualizerLoadEqf) => {
             let result = chooser
                 .open_eqf_file_blocking(None)
@@ -214,6 +220,13 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
             Ok(Some(Completion::Saved(path)))
         }
         _ => Ok(None),
+    }
+}
+
+fn skin_archive_completion(result: DialogResult<PathBuf>) -> Option<Completion> {
+    match result {
+        DialogResult::Selected(path) => Some(Completion::SkinArchive(path)),
+        DialogResult::Cancelled => None,
     }
 }
 
@@ -317,6 +330,25 @@ mod tests {
         let (completions, pending) = receiver.poll();
         assert!(completions.is_empty());
         assert!(!pending);
+    }
+
+    #[test]
+    fn load_skin_is_supported_by_the_portal_dispatcher() {
+        assert!(is_supported(&MenuRequest::Action(
+            ClassicMenuAction::LoadSkin
+        )));
+    }
+
+    #[test]
+    fn skin_archive_completion_preserves_selection_and_cancellation() {
+        assert!(skin_archive_completion(DialogResult::Cancelled).is_none());
+
+        let path = PathBuf::from("/tmp/Classic.wsz");
+        let completion = skin_archive_completion(DialogResult::Selected(path.clone()));
+        assert!(matches!(
+            completion,
+            Some(Completion::SkinArchive(selected)) if selected == path
+        ));
     }
 
     #[test]

@@ -47,7 +47,7 @@ use wayland_client::{
 };
 use xubamp_render::vis::{VisMode, FFT_N};
 use xubamp_render::{
-    compose_main_window, equalizer, hit, jump, marquee, menu, pledit, Framebuffer,
+    compose_main_window, equalizer, hit, jump, marquee, menu, pledit, preferences, Framebuffer,
 };
 use xubamp_skin::{default_skin, Skin};
 
@@ -104,6 +104,7 @@ pub enum MenuRequest {
 }
 
 type MenuSink = Box<dyn FnMut(MenuRequest)>;
+type PreferencesSink = Box<dyn FnMut(preferences::Command)>;
 
 /// An event produced outside the Wayland thread and applied on the next event-loop tick.
 #[derive(Clone, Debug, PartialEq)]
@@ -135,6 +136,8 @@ pub struct Runtime {
     playlist_source: PlaylistSource,
     external_source: ExternalSource,
     ui_options: UiOptions,
+    preferences_model: preferences::PreferencesModel,
+    on_preferences: PreferencesSink,
 }
 
 impl Runtime {
@@ -157,6 +160,8 @@ impl Runtime {
             playlist_source: Box::new(playlist_source),
             external_source: Box::new(ExternalPoll::default),
             ui_options: UiOptions::default(),
+            preferences_model: preferences::PreferencesModel::default(),
+            on_preferences: Box::new(|_| {}),
         }
     }
 
@@ -171,12 +176,37 @@ impl Runtime {
         self.ui_options = options;
         self
     }
+
+    /// Supply the persisted Preferences model and receive every committed setting command.
+    pub fn with_preferences(
+        mut self,
+        model: preferences::PreferencesModel,
+        sink: impl FnMut(preferences::Command) + 'static,
+    ) -> Self {
+        self.preferences_model = model;
+        self.on_preferences = Box::new(sink);
+        self
+    }
 }
 
 /// Display choices owned by the window layer and persisted by the application after the session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UiOptions {
     pub time_display: hit::TimeDisplay,
+    pub scroll_title: bool,
+    pub visualization_mode: VisMode,
+    pub visualization_show_peaks: bool,
+}
+
+impl Default for UiOptions {
+    fn default() -> Self {
+        Self {
+            time_display: hit::TimeDisplay::Elapsed,
+            scroll_title: true,
+            visualization_mode: VisMode::Bars,
+            visualization_show_peaks: true,
+        }
+    }
 }
 
 /// Persistable pane layout restored before the first mapped frame. Positions are relative to the
@@ -202,6 +232,9 @@ pub struct SessionState {
     pub equalizer_preamp_db: f32,
     pub equalizer_bands_db: [f32; 10],
     pub time_display: hit::TimeDisplay,
+    pub scroll_title: bool,
+    pub visualization_mode: VisMode,
+    pub visualization_show_peaks: bool,
 }
 
 impl Default for PaneLayout {
@@ -307,6 +340,41 @@ struct JumpWin {
     last_click: Option<(usize, Instant)>,
 }
 
+/// Native OS-style Preferences window. The pure renderer owns its controls and accessibility
+/// metadata; this wrapper owns only the Wayland toplevel and shm presentation resources.
+struct PreferencesWin {
+    window: Window,
+    pool: SlotPool,
+    fb: Framebuffer,
+    configured: bool,
+    width: i32,
+    height: i32,
+    armed_move: Option<(i32, i32, u32)>,
+}
+
+impl PreferencesWin {
+    fn present(&mut self) {
+        let (w, h) = (self.fb.width, self.fb.height);
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .expect("create preferences wl_shm buffer");
+        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        let surface = self.window.wl_surface();
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer
+            .attach_to(surface)
+            .expect("attach preferences buffer");
+        surface.commit();
+    }
+}
+
 impl JumpWin {
     /// Upload `self.fb` to the window's shm buffer and commit (static, no frame callback).
     fn present(&mut self) {
@@ -381,10 +449,15 @@ pub fn run(
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
 
+    let mut visualization = xubamp_render::vis::VisState::default();
+    visualization.mode = runtime.ui_options.visualization_mode;
+    visualization.show_peaks = runtime.ui_options.visualization_show_peaks;
     let state = hit::UiState {
         title,
         shade: pane_layout.main_shaded,
         time_display: runtime.ui_options.time_display,
+        scroll_title: runtime.ui_options.scroll_title,
+        vis: visualization,
         ..Default::default()
     };
     let fb = compose_main_window(&skin, &state);
@@ -425,7 +498,6 @@ pub fn run(
         seat_state: SeatState::new(&globals, &qh),
         compositor,
         subcompositor,
-        #[cfg(feature = "keyboard")]
         xdg_shell,
         shm,
         pool,
@@ -436,6 +508,7 @@ pub fn run(
         on_command: runtime.on_command,
         on_equalizer: runtime.on_equalizer,
         on_menu: runtime.on_menu,
+        on_preferences: runtime.on_preferences,
         equalizer_presets: runtime.equalizer_presets,
         playback_source: runtime.playback_source,
         sample_source: runtime.sample_source,
@@ -454,6 +527,8 @@ pub fn run(
         },
         jump_win: None,
         jump_state: jump::JumpState::default(),
+        preferences_win: None,
+        preferences_state: preferences::PreferencesState::new(runtime.preferences_model),
         playlist_source: runtime.playlist_source,
         external_source: runtime.external_source,
         mod_ctrl: false,
@@ -482,6 +557,8 @@ pub fn run(
         keyboard: None,
         #[cfg(feature = "keyboard")]
         keyboard_focus: false,
+        #[cfg(feature = "keyboard")]
+        preferences_keyboard_focus: false,
         #[cfg(feature = "keyboard")]
         modifiers: Modifiers::default(),
         #[cfg(feature = "keyboard")]
@@ -528,6 +605,8 @@ struct App {
     /// Sink for popup actions whose side effects live above the window layer (file choosers,
     /// settings, skin selection).
     on_menu: MenuSink,
+    /// Sink for committed values from the native Preferences surface.
+    on_preferences: PreferencesSink,
     /// Canonical DSP-provided preset values paired with the labels shown by the popup.
     equalizer_presets: Vec<equalizer::Preset>,
     /// Polled each redraw tick for the clock snapshot (elapsed, seek-bar position, duration,
@@ -545,7 +624,6 @@ struct App {
     /// Positions the playlist and equalizer as child panes of the main toplevel.
     subcompositor: SubcompositorState,
     /// The xdg shell, kept alive so standalone dialogs can be created on demand.
-    #[cfg(feature = "keyboard")]
     xdg_shell: XdgShell,
     /// The pointer, once the seat reports the capability. A themed pointer so we can set a proper
     /// arrow cursor on enter (without it the window inherits whatever cursor was last active).
@@ -566,6 +644,9 @@ struct App {
     /// Whether our surface currently holds keyboard focus, so a shortcut fires only while focused.
     #[cfg(feature = "keyboard")]
     keyboard_focus: bool,
+    /// Whether the active keyboard surface is specifically Preferences rather than a player pane.
+    #[cfg(feature = "keyboard")]
+    preferences_keyboard_focus: bool,
     /// The latest modifier state. Key press events do not carry it, so it is cached here from
     /// `update_modifiers` and read to decide whether a shortcut's modifiers are clear.
     #[cfg(feature = "keyboard")]
@@ -606,6 +687,9 @@ struct App {
     jump_win: Option<JumpWin>,
     /// The jump dialog's search query, track list, and result selection.
     jump_state: jump::JumpState,
+    /// Singleton native Preferences window and its pure interaction model.
+    preferences_win: Option<PreferencesWin>,
+    preferences_state: preferences::PreferencesState,
     /// Latest Ctrl/Shift state, mirrored from `update_modifiers`. Always present (unlike the
     /// keyboard-gated `modifiers`) so the pointer handler can read them for ctrl/shift-click
     /// selection; they simply stay false in a build without the keyboard feature.
@@ -649,6 +733,9 @@ impl App {
             equalizer_preamp_db: self.equalizer_state.preamp_db,
             equalizer_bands_db: self.equalizer_state.bands_db,
             time_display: self.state.time_display,
+            scroll_title: self.state.scroll_title,
+            visualization_mode: self.state.vis.mode,
+            visualization_show_peaks: self.state.vis.show_peaks,
         }
     }
 
@@ -696,6 +783,31 @@ impl App {
                 hit::WindowToggle::Equalizer => self.toggle_equalizer(),
             }
         }
+        self.sync_preferences_from_ui();
+    }
+
+    fn sync_preferences_from_ui(&mut self) {
+        let time = match self.state.time_display {
+            hit::TimeDisplay::Elapsed => preferences::TimeDisplay::Elapsed,
+            hit::TimeDisplay::Remaining => preferences::TimeDisplay::Remaining,
+        };
+        let visualization = match self.state.vis.mode {
+            VisMode::Bars => preferences::VisualizationMode::Spectrum,
+            VisMode::Oscilloscope => preferences::VisualizationMode::Oscilloscope,
+            VisMode::Off => preferences::VisualizationMode::Off,
+        };
+        let changed = self.preferences_state.model.display_time != time
+            || self.preferences_state.model.display_scroll_title != self.state.scroll_title
+            || self.preferences_state.model.visualization_mode != visualization
+            || self.preferences_state.model.visualization_show_peaks != self.state.vis.show_peaks;
+        if !changed {
+            return;
+        }
+        self.preferences_state.model.display_time = time;
+        self.preferences_state.model.display_scroll_title = self.state.scroll_title;
+        self.preferences_state.model.visualization_mode = visualization;
+        self.preferences_state.model.visualization_show_peaks = self.state.vis.show_peaks;
+        self.redraw_preferences();
     }
 
     /// Toggle windowshade (collapsed) mode: flip the flag, pin the toplevel to the new fixed size,
@@ -801,7 +913,10 @@ impl App {
         // The marquee steps on its OWN 100 ms clock, not once per redraw: the frame-callback loop
         // redraws at the display rate, and stepping the title every frame would scroll it far too
         // fast. Only skins with text.bmp render a marquee, and the collapsed strip shows none.
-        if !self.state.shade && self.skin.text.is_some() && marquee::is_scrolling(&self.state.title)
+        if self.state.scroll_title
+            && !self.state.shade
+            && self.skin.text.is_some()
+            && marquee::is_scrolling(&self.state.title)
         {
             let elapsed = self.last_marquee.elapsed();
             if elapsed >= MARQUEE_TICK {
@@ -882,6 +997,13 @@ impl App {
             }
             FRAME_FALLBACK
         } else {
+            // Not animating, so we neither hold nor want a frame callback. Clear the in-flight flag:
+            // if a requested callback was dropped (surface minimized/occluded while it was playing)
+            // it would otherwise latch `true` forever and, once playback resumed, both re-arm paths
+            // (guarded by `!frame_pending`) could never request another callback, permanently
+            // freezing the visualizer. A late stray callback that still arrives is harmless: it just
+            // redraws once without re-arming.
+            self.frame_pending = false;
             // Not playing, so no frame callbacks. When STOPPED the visualizer settles to baseline
             // (step_vis advances with silence and reports the change); when merely PAUSED it stays
             // frozen. The clock and marquee keep moving regardless.
@@ -892,6 +1014,7 @@ impl App {
             if vis_changed {
                 VIS_SETTLE_TICK
             } else if !self.state.shade
+                && self.state.scroll_title
                 && self.skin.text.is_some()
                 && marquee::is_scrolling(&self.state.title)
             {
@@ -980,6 +1103,10 @@ impl App {
                 .jump_win
                 .as_ref()
                 .is_some_and(|j| surface == j.window.wl_surface())
+            || self
+                .preferences_win
+                .as_ref()
+                .is_some_and(|preferences| surface == preferences.window.wl_surface())
     }
 
     fn open_equalizer(&mut self) {
@@ -1232,6 +1359,14 @@ impl App {
             self.playlist_state.pressed_add = false;
             self.redraw_playlist();
         }
+        // Destroying the popup subsurface is parent-latched state on the compositor: it only takes
+        // effect on the parent's next commit. Repaint the main window so the dismissed menu leaves
+        // the screen immediately, mirroring close_equalizer/close_playlist. Without this the menu
+        // stays painted and the whole view looks frozen until the next input or clock tick, which is
+        // exactly what made "File..."/"Load Skin"/"Add" and click-away appear to do nothing.
+        if self.configured {
+            self.redraw();
+        }
     }
 
     fn redraw_popup_menu(&mut self) {
@@ -1294,6 +1429,7 @@ impl App {
             menu::ClassicMenuAction::ShowRemainingTime => {
                 self.set_time_display(hit::TimeDisplay::Remaining);
             }
+            menu::ClassicMenuAction::OpenPreferences => self.open_preferences(),
             menu::ClassicMenuAction::UseBaseSkin => {
                 self.replace_skin(default_skin());
                 (self.on_menu)(MenuRequest::Action(action));
@@ -1320,6 +1456,7 @@ impl App {
         if self.state.time_display != display {
             self.state.time_display = display;
             self.redraw();
+            self.sync_preferences_from_ui();
         }
     }
 
@@ -1912,6 +2049,196 @@ impl App {
         }
     }
 
+    fn open_preferences(&mut self) {
+        if self.preferences_win.is_some() {
+            return;
+        }
+        self.preferences_state.model.display_time = match self.state.time_display {
+            hit::TimeDisplay::Elapsed => preferences::TimeDisplay::Elapsed,
+            hit::TimeDisplay::Remaining => preferences::TimeDisplay::Remaining,
+        };
+        self.preferences_state.model.display_scroll_title = self.state.scroll_title;
+        self.preferences_state.model.visualization_mode = match self.state.vis.mode {
+            VisMode::Bars => preferences::VisualizationMode::Spectrum,
+            VisMode::Oscilloscope => preferences::VisualizationMode::Oscilloscope,
+            VisMode::Off => preferences::VisualizationMode::Off,
+        };
+        self.preferences_state.model.visualization_show_peaks = self.state.vis.show_peaks;
+        let (width, height) = (preferences::PREFERENCES_W, preferences::PREFERENCES_H);
+        let fb = preferences::compose(&self.preferences_state, width, height);
+        let surface = self.compositor.create_surface(&self.qh);
+        let window =
+            self.xdg_shell
+                .create_window(surface, WindowDecorations::RequestClient, &self.qh);
+        window.set_title("xubamp preferences");
+        window.set_app_id("xubamp");
+        window.set_min_size(Some((width as u32, height as u32)));
+        window.commit();
+        let pool = SlotPool::new(width as usize * height as usize * 4, &self.shm)
+            .expect("preferences pool");
+        self.preferences_win = Some(PreferencesWin {
+            window,
+            pool,
+            fb,
+            configured: false,
+            width,
+            height,
+            armed_move: None,
+        });
+    }
+
+    fn close_preferences(&mut self) {
+        self.preferences_state.pointer_leave();
+        self.preferences_win = None;
+        #[cfg(feature = "keyboard")]
+        {
+            self.preferences_keyboard_focus = false;
+        }
+    }
+
+    fn redraw_preferences(&mut self) {
+        let Some((width, height, configured)) = self
+            .preferences_win
+            .as_ref()
+            .map(|window| (window.width, window.height, window.configured))
+        else {
+            return;
+        };
+        if !configured {
+            return;
+        }
+        let fb = preferences::compose(&self.preferences_state, width, height);
+        let window = self.preferences_win.as_mut().unwrap();
+        window.fb = fb;
+        window.present();
+    }
+
+    fn apply_preferences(&mut self, outcome: preferences::Outcome) {
+        match outcome {
+            preferences::Outcome::Unchanged => {}
+            preferences::Outcome::Redraw => self.redraw_preferences(),
+            preferences::Outcome::Close => self.close_preferences(),
+            preferences::Outcome::Command(command) => {
+                match command {
+                    preferences::Command::SetDisplayTime(display) => {
+                        let display = match display {
+                            preferences::TimeDisplay::Elapsed => hit::TimeDisplay::Elapsed,
+                            preferences::TimeDisplay::Remaining => hit::TimeDisplay::Remaining,
+                        };
+                        self.set_time_display(display);
+                        (self.on_preferences)(preferences::Command::SetDisplayTime(
+                            self.preferences_state.model.display_time,
+                        ));
+                    }
+                    preferences::Command::SetVisualizationMode(mode) => {
+                        self.state.vis.mode = match mode {
+                            preferences::VisualizationMode::Spectrum => VisMode::Bars,
+                            preferences::VisualizationMode::Oscilloscope => {
+                                VisMode::Oscilloscope
+                            }
+                            preferences::VisualizationMode::Off => VisMode::Off,
+                        };
+                        self.redraw();
+                        (self.on_preferences)(preferences::Command::SetVisualizationMode(mode));
+                    }
+                    preferences::Command::SetVisualizationShowPeaks(show) => {
+                        self.state.vis.show_peaks = show;
+                        self.redraw();
+                        (self.on_preferences)(
+                            preferences::Command::SetVisualizationShowPeaks(show),
+                        );
+                    }
+                    preferences::Command::SetDisplayScrollTitle(enabled) => {
+                        if self.state.set_scroll_title(enabled) {
+                            self.redraw();
+                        }
+                        (self.on_preferences)(preferences::Command::SetDisplayScrollTitle(
+                            enabled,
+                        ));
+                    }
+                    preferences::Command::ChooseSkinFile => {
+                        (self.on_menu)(MenuRequest::Action(menu::ClassicMenuAction::LoadSkin));
+                    }
+                    preferences::Command::SetSkinPath(None) => {
+                        self.replace_skin(default_skin());
+                        (self.on_preferences)(preferences::Command::SetSkinPath(None));
+                    }
+                    command => (self.on_preferences)(command),
+                }
+                self.redraw_preferences();
+            }
+        }
+    }
+
+    fn preferences_pointer(
+        &mut self,
+        conn: &Connection,
+        kind: &PointerEventKind,
+        x: i32,
+        y: i32,
+    ) {
+        let Some((width, height)) = self
+            .preferences_win
+            .as_ref()
+            .map(|window| (window.width, window.height))
+        else {
+            return;
+        };
+        match *kind {
+            PointerEventKind::Enter { .. } => {
+                if let Some(pointer) = &self.pointer {
+                    let _ = pointer.set_cursor(conn, CursorIcon::Default);
+                }
+            }
+            PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
+                if y < preferences::PREFERENCES_TITLE_H {
+                    if let Some(window) = &mut self.preferences_win {
+                        window.armed_move = Some((x, y, serial));
+                    }
+                } else {
+                    let outcome = self.preferences_state.pointer_press(x, y, width, height);
+                    self.apply_preferences(outcome);
+                }
+            }
+            PointerEventKind::Motion { .. } => {
+                let armed = self
+                    .preferences_win
+                    .as_ref()
+                    .and_then(|window| window.armed_move);
+                if let Some((press_x, press_y, serial)) = armed {
+                    if hit::exceeds_move_threshold(x - press_x, y - press_y) {
+                        if let (Some(seat), Some(window)) =
+                            (self.seat.as_ref(), self.preferences_win.as_mut())
+                        {
+                            window.window.move_(seat, serial);
+                            window.armed_move = None;
+                        }
+                    }
+                } else {
+                    let outcome = self.preferences_state.pointer_motion(x, width, height);
+                    self.apply_preferences(outcome);
+                }
+            }
+            PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                if let Some(window) = &mut self.preferences_win {
+                    window.armed_move = None;
+                }
+                let outcome = self
+                    .preferences_state
+                    .pointer_release(x, y, width, height);
+                self.apply_preferences(outcome);
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(window) = &mut self.preferences_win {
+                    window.armed_move = None;
+                }
+                let outcome = self.preferences_state.pointer_leave();
+                self.apply_preferences(outcome);
+            }
+            _ => {}
+        }
+    }
+
     /// Open the jump-to-file dialog (a standalone window) unless already open, filtered over the
     /// current track list with a fresh empty query. Only reachable via the `J` key.
     #[cfg(feature = "keyboard")]
@@ -2186,12 +2513,18 @@ impl CompositorHandler for App {
 
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
-        // Closing the main window quits; closing the standalone jump dialog drops only it. Child
-        // panes close through their own rendered buttons and never receive xdg close requests.
+        // Closing the main window quits; standalone dialogs close independently. Child panes close
+        // through their own rendered buttons and never receive xdg close requests.
         if *window == self.window {
             self.exit = true;
         } else if self.jump_win.as_ref().is_some_and(|j| *window == j.window) {
             self.close_jump();
+        } else if self
+            .preferences_win
+            .as_ref()
+            .is_some_and(|preferences| *window == preferences.window)
+        {
+            self.close_preferences();
         }
     }
     fn configure(
@@ -2199,7 +2532,7 @@ impl WindowHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         window: &Window,
-        _configure: WindowConfigure,
+        configure: WindowConfigure,
         _: u32,
     ) {
         if *window == self.window {
@@ -2223,6 +2556,25 @@ impl WindowHandler for App {
                 j.configured = true;
             }
             self.redraw_jump();
+        } else if self
+            .preferences_win
+            .as_ref()
+            .is_some_and(|preferences| *window == preferences.window)
+        {
+            if let Some(preferences) = &mut self.preferences_win {
+                preferences.width = configure
+                    .new_size
+                    .0
+                    .map_or(preferences.width, |width| width.get() as i32)
+                    .max(preferences::PREFERENCES_W);
+                preferences.height = configure
+                    .new_size
+                    .1
+                    .map_or(preferences.height, |height| height.get() as i32)
+                    .max(preferences::PREFERENCES_H);
+                preferences.configured = true;
+            }
+            self.redraw_preferences();
         }
     }
 }
@@ -2304,6 +2656,7 @@ impl SeatHandler for App {
             }
             // SCTK cancels any in-flight repeat timer on release; drop focus so nothing lingers.
             self.keyboard_focus = false;
+            self.preferences_keyboard_focus = false;
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -2389,6 +2742,17 @@ impl PointerHandler for App {
                     .is_some_and(|j| event.surface == *j.window.wl_surface());
             if on_jump {
                 self.jump_pointer(conn, &event.kind, x, y);
+                continue;
+            }
+            let on_preferences = !on_main
+                && self
+                    .preferences_win
+                    .as_ref()
+                    .is_some_and(|preferences| {
+                        event.surface == *preferences.window.wl_surface()
+                    });
+            if on_preferences {
+                self.preferences_pointer(conn, &event.kind, x, y);
                 continue;
             }
             if !on_main {
@@ -2481,6 +2845,10 @@ impl KeyboardHandler for App {
         // the jump-to-file query keep receiving keys after the playlist window is what's focused.
         if self.is_our_surface(surface) {
             self.keyboard_focus = true;
+            self.preferences_keyboard_focus = self
+                .preferences_win
+                .as_ref()
+                .is_some_and(|preferences| surface == preferences.window.wl_surface());
         }
     }
     fn leave(
@@ -2493,6 +2861,7 @@ impl KeyboardHandler for App {
     ) {
         if self.is_our_surface(surface) {
             self.keyboard_focus = false;
+            self.preferences_keyboard_focus = false;
         }
     }
     fn press_key(
@@ -2542,6 +2911,10 @@ impl App {
         if !self.keyboard_focus {
             return;
         }
+        if self.preferences_keyboard_focus && self.preferences_win.is_some() {
+            self.preferences_key(event);
+            return;
+        }
         if self.popup_menu.is_some() {
             self.popup_menu_key(event);
             return;
@@ -2556,14 +2929,18 @@ impl App {
         // otherwise left for the compositor, so e.g. Ctrl+X never triggers Play. Ctrl+T is the
         // classic clock-mode toggle and fires once rather than repeating while held.
         let m = self.modifiers;
-        if m.ctrl
-            && !m.alt
-            && !m.logo
-            && !is_repeat
-            && matches!(event.keysym, Keysym::t | Keysym::T)
-        {
-            self.toggle_time_display();
-            return;
+        if m.ctrl && !m.alt && !m.logo && !is_repeat {
+            match event.keysym {
+                Keysym::t | Keysym::T => {
+                    self.toggle_time_display();
+                    return;
+                }
+                Keysym::p | Keysym::P => {
+                    self.open_preferences();
+                    return;
+                }
+                _ => {}
+            }
         }
         if m.ctrl || m.alt || m.logo {
             return;
@@ -2606,6 +2983,32 @@ impl App {
         };
         let outcome = popup.interaction.key(&popup.model, key);
         self.apply_popup_outcome(outcome);
+    }
+
+    fn preferences_key(&mut self, event: &KeyEvent) {
+        let key = match event.keysym {
+            Keysym::Escape => preferences::Key::Escape,
+            Keysym::Tab if self.modifiers.shift => preferences::Key::BackTab,
+            Keysym::Tab => preferences::Key::Tab,
+            Keysym::Up => preferences::Key::Up,
+            Keysym::Down => preferences::Key::Down,
+            Keysym::Left => preferences::Key::Left,
+            Keysym::Right => preferences::Key::Right,
+            Keysym::Home => preferences::Key::Home,
+            Keysym::End => preferences::Key::End,
+            Keysym::space => preferences::Key::Space,
+            Keysym::Return | Keysym::KP_Enter => preferences::Key::Enter,
+            _ => return,
+        };
+        let Some((width, height)) = self
+            .preferences_win
+            .as_ref()
+            .map(|window| (window.width, window.height))
+        else {
+            return;
+        };
+        let outcome = self.preferences_state.key(key, width, height);
+        self.apply_preferences(outcome);
     }
 
     /// Handle a key while the jump dialog is open: printable characters and Backspace edit the

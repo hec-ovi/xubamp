@@ -67,11 +67,13 @@ impl Player {
         tracks: Vec<PathBuf>,
         shuffle: bool,
         repeat: bool,
+        shuffle_morph_rate: u8,
         equalizer: EqSettings,
     ) -> Self {
         let mut player = Self::new(tracks);
         player.shuffle = shuffle;
         player.playlist.set_repeat(repeat);
+        player.set_shuffle_morph_rate(shuffle_morph_rate);
         player.set_equalizer_settings(equalizer);
         if shuffle {
             player.shuffle_cycle.anchor(&player.playlist);
@@ -433,6 +435,16 @@ impl Player {
         self.playlist.repeat()
     }
 
+    /// Current repeat-boundary mutation rate. Updating it leaves the active shuffle permutation
+    /// untouched and takes effect only when a repeated cycle is created.
+    pub fn shuffle_morph_rate(&self) -> u8 {
+        self.shuffle_cycle.morph_rate()
+    }
+
+    pub fn set_shuffle_morph_rate(&mut self, rate: u8) {
+        self.shuffle_cycle.set_morph_rate(rate);
+    }
+
     /// Return the coherent equalizer snapshot that will carry into the next track.
     pub fn equalizer_settings(&self) -> EqSettings {
         self.equalizer
@@ -637,10 +649,11 @@ mod tests {
         };
         equalizer.bands_db[3] = -7.25;
 
-        let player = Player::with_settings(Vec::new(), true, true, equalizer);
+        let player = Player::with_settings(Vec::new(), true, true, 17, equalizer);
 
         assert!(player.shuffle());
         assert!(player.repeat());
+        assert_eq!(player.shuffle_morph_rate(), 17);
         assert_eq!(player.equalizer_settings(), equalizer);
         assert!(
             player.engine.is_none(),
@@ -653,12 +666,22 @@ mod tests {
         let mut player = Player::new(Vec::new());
         assert!(!player.shuffle());
         assert!(!player.repeat());
+        assert_eq!(
+            player.shuffle_morph_rate(),
+            xubamp_config::DEFAULT_SHUFFLE_MORPH_RATE
+        );
         assert_eq!(player.equalizer_settings(), EqSettings::default());
 
+        player.set_shuffle_morph_rate(12);
         player.toggle_mode(ModeButton::Shuffle);
         player.toggle_mode(ModeButton::Repeat);
         assert!(player.shuffle());
         assert!(player.repeat());
+        assert_eq!(
+            player.shuffle_morph_rate(),
+            12,
+            "mode toggles do not reset the independent morph preference"
+        );
     }
 
     #[test]
@@ -729,7 +752,13 @@ mod tests {
         ]
         .map(PathBuf::from)
         .to_vec();
-        let mut player = Player::with_settings(paths, true, true, EqSettings::default());
+        let mut player = Player::with_settings(
+            paths,
+            true,
+            true,
+            xubamp_config::DEFAULT_SHUFFLE_MORPH_RATE,
+            EqSettings::default(),
+        );
 
         player.start();
         assert!(player.engine.is_none());
@@ -782,6 +811,7 @@ mod tests {
             ["a.mp3", "b.wav", "c.mp3"].map(PathBuf::from).to_vec(),
             true,
             false,
+            xubamp_config::DEFAULT_SHUFFLE_MORPH_RATE,
             EqSettings::default(),
         );
         player.shuffle_cycle = ShuffleCycle::with_seed(0xA11D);
@@ -832,6 +862,7 @@ mod tests {
             ["old-a.mp3", "old-b.wav"].map(PathBuf::from).to_vec(),
             true,
             true,
+            23,
             equalizer,
         );
         player.set_volume(37);
@@ -859,6 +890,7 @@ mod tests {
         assert_eq!(player.playlist.current_index(), Some(0));
         assert!(player.shuffle());
         assert!(player.repeat());
+        assert_eq!(player.shuffle_morph_rate(), 23);
         assert_eq!(player.equalizer_settings(), equalizer);
         assert_eq!(player.volume, 37);
         assert_eq!(player.balance, -22);
@@ -1070,7 +1102,13 @@ mod tests {
         for path in &paths {
             write_wav(path, 48_000, 1);
         }
-        let mut player = Player::with_settings(paths.clone(), true, false, EqSettings::default());
+        let mut player = Player::with_settings(
+            paths.clone(),
+            true,
+            false,
+            xubamp_config::DEFAULT_SHUFFLE_MORPH_RATE,
+            EqSettings::default(),
+        );
         player.shuffle_cycle = ShuffleCycle::with_seed(0x0BAD_5EED);
         player.shuffle_cycle.anchor(&player.playlist);
         player.start();
@@ -1108,7 +1146,13 @@ mod tests {
         for path in &paths {
             write_wav(path, 48_000, 1);
         }
-        let mut player = Player::with_settings(paths.clone(), true, true, EqSettings::default());
+        let mut player = Player::with_settings(
+            paths.clone(),
+            true,
+            true,
+            xubamp_config::DEFAULT_SHUFFLE_MORPH_RATE,
+            EqSettings::default(),
+        );
         player.shuffle_cycle = ShuffleCycle::with_seed(0x000C_1C1E);
         player.shuffle_cycle.anchor(&player.playlist);
         player.start();

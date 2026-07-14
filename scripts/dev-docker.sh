@@ -37,6 +37,12 @@ session=(
     -v "$runtime:$runtime" --ipc=host
     -e "XDG_RUNTIME_DIR=$runtime"
     -e "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}"
+    # Reach the host's xdg-desktop-portal (file/skin/playlist choosers) over the D-Bus session bus.
+    # The bus socket already lives under the mounted $runtime; pass its address explicitly so ashpd
+    # does not have to guess. Falls back to the well-known $runtime/bus path when the host var is
+    # unset. Without this the FileChooser request errors and no dialog appears (looked like "load
+    # not working").
+    -e "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime/bus}"
 )
 [ -d "$HOME/Music" ] && session+=(-v "$HOME/Music:$HOME/Music:ro")
 # Optionally pin playback to a specific PipeWire node (e.g. a spare analog sink for silent testing

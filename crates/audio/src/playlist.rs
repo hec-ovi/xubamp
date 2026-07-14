@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 /// (older entries fall off the far end of the back history).
 const HISTORY_MAX: usize = 256;
 
+/// Winamp's persisted shuffle-morph slider spans 0 (keep the preceding cycle) through 50 (the
+/// classic maximum mutation window). Values supplied by non-config callers are clamped here so the
+/// traversal policy remains well-defined on its own.
+const SHUFFLE_MORPH_RATE_MAX: u8 = 50;
+
 /// Identity of one playlist entry. IDs do not change when entries are inserted, removed, or moved,
 /// and are never reused during a playlist's lifetime. Duplicate paths therefore remain distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,9 +29,11 @@ impl TrackId {
 ///
 /// The current track is the first member of a newly anchored cycle, so it is excluded from the
 /// initial pending permutation. Every other live entry is returned at most once. When repeat is
-/// enabled, exhausting the permutation starts a new one containing every live entry; its first
-/// result avoids the track that just played whenever another choice exists. Removed IDs are
-/// discarded, moved IDs keep their place in the cycle, and newly-added IDs join the pending set.
+/// enabled, exhausting the permutation morphs the completed stable-ID order into a new cycle
+/// containing every live entry. Morph rate 0 preserves that order; larger rates apply Winamp's
+/// sliding shuffle window, up to its classic maximum at 50. The first result avoids the track that
+/// just played whenever another choice exists. Removed IDs are discarded, moved IDs keep their
+/// place in the cycle, and newly-added IDs join the pending set.
 ///
 /// Randomness is deliberately self-contained rather than pulled from a global RNG. Supplying a
 /// seed makes the navigation policy reproducible in tests while [`Self::from_entropy`] gives the
@@ -35,8 +42,12 @@ impl TrackId {
 pub struct ShuffleCycle {
     remaining: Vec<TrackId>,
     members: HashSet<TrackId>,
+    /// Stable IDs consumed in the current cycle's shuffle-table order. Back/Forward history does
+    /// not alter this: replaying history is navigation, not a new shuffle-table choice.
+    cycle_order: Vec<TrackId>,
     rng: u64,
     anchored: bool,
+    morph_rate: u8,
 }
 
 impl ShuffleCycle {
@@ -46,8 +57,10 @@ impl ShuffleCycle {
         Self {
             remaining: Vec::new(),
             members: HashSet::new(),
+            cycle_order: Vec::new(),
             rng: nonzero_seed(seed),
             anchored: false,
+            morph_rate: SHUFFLE_MORPH_RATE_MAX,
         }
     }
 
@@ -72,7 +85,18 @@ impl ShuffleCycle {
     pub fn clear(&mut self) {
         self.remaining.clear();
         self.members.clear();
+        self.cycle_order.clear();
         self.anchored = false;
+    }
+
+    /// Set the variation applied when the current cycle next crosses a repeat boundary. Changing
+    /// this never reorders the in-flight pending permutation.
+    pub fn set_morph_rate(&mut self, rate: u8) {
+        self.morph_rate = rate.min(SHUFFLE_MORPH_RATE_MAX);
+    }
+
+    pub fn morph_rate(&self) -> u8 {
+        self.morph_rate
     }
 
     /// Return the next stable track ID. With repeat off, an exhausted cycle stays exhausted. With
@@ -83,29 +107,17 @@ impl ShuffleCycle {
         }
         self.sync_edits(playlist);
         if let Some(id) = self.remaining.pop() {
+            self.cycle_order.push(id);
             return Some(id);
         }
         if !repeat || playlist.is_empty() {
             return None;
         }
 
-        self.members = playlist.ids().collect();
-        self.remaining = playlist.ids().collect();
-        self.shuffle_remaining();
-
-        // `pop` is the next result. Keep the just-played track away from that position when there
-        // is any alternative; a one-entry repeating playlist necessarily returns itself.
-        if self.remaining.len() > 1 && self.remaining.last().copied() == playlist.current_id() {
-            if let Some(other) = self
-                .remaining
-                .iter()
-                .position(|id| Some(*id) != playlist.current_id())
-            {
-                let last = self.remaining.len() - 1;
-                self.remaining.swap(other, last);
-            }
-        }
-        self.remaining.pop()
+        self.start_repeated_cycle(playlist);
+        let id = self.remaining.pop()?;
+        self.cycle_order.push(id);
+        Some(id)
     }
 
     /// Anchor at an explicit entry. This is used by a manual playlist jump after that entry has
@@ -114,6 +126,10 @@ impl ShuffleCycle {
         self.members = playlist.ids().collect();
         self.remaining = playlist.ids().filter(|id| Some(*id) != current).collect();
         self.shuffle_remaining();
+        self.cycle_order.clear();
+        if let Some(current) = current.filter(|id| self.members.contains(id)) {
+            self.cycle_order.push(current);
+        }
         self.anchored = true;
     }
 
@@ -121,12 +137,16 @@ impl ShuffleCycle {
         let live: HashSet<_> = playlist.ids().collect();
         self.remaining.retain(|id| live.contains(id));
         self.members.retain(|id| live.contains(id));
+        self.cycle_order.retain(|id| live.contains(id));
 
         // If removing the current row caused Playlist to select its neighbor, that neighbor is now
         // the cycle anchor and must not be returned immediately as a pending choice.
         if let Some(current) = playlist.current_id() {
             self.remaining.retain(|id| *id != current);
             self.members.insert(current);
+            if !self.cycle_order.contains(&current) {
+                self.cycle_order.push(current);
+            }
         }
 
         let old_len = self.remaining.len();
@@ -140,10 +160,79 @@ impl ShuffleCycle {
         }
     }
 
+    fn start_repeated_cycle(&mut self, playlist: &Playlist) {
+        let live: HashSet<_> = playlist.ids().collect();
+        let mut included = HashSet::with_capacity(live.len());
+        let mut order = Vec::with_capacity(live.len());
+
+        // Preserve the prior shuffle-table order by stable identity. Reconcile edits defensively:
+        // removed entries disappear and any live entry not observed in the completed order is
+        // appended once in display order.
+        for id in self.cycle_order.iter().copied() {
+            if live.contains(&id) && included.insert(id) {
+                order.push(id);
+            }
+        }
+        for id in playlist.ids() {
+            if included.insert(id) {
+                order.push(id);
+            }
+        }
+
+        if self.morph_rate > 0 {
+            self.morph_order(&mut order);
+        }
+
+        // The completed cycle's current track must not be the first choice of the next one while
+        // another live identity exists. This also covers edited or partly-unplayable cycles where
+        // the selected track need not be the final shuffle-table member.
+        if order.len() > 1 && order.first().copied() == playlist.current_id() {
+            if let Some(other) = order
+                .iter()
+                .position(|id| Some(*id) != playlist.current_id())
+            {
+                order.swap(0, other);
+            }
+        }
+
+        self.members = live;
+        self.remaining = order.into_iter().rev().collect();
+        self.cycle_order.clear();
+    }
+
+    /// Winamp mutates a completed shuffle table by randomizing a sliding local window at every
+    /// position. Its maximum slider value is 50, producing a window approximately half the list.
+    /// Rate 0 is handled by the caller as an exact stable-ID carry-over.
+    fn morph_order(&mut self, order: &mut [TrackId]) {
+        if order.len() <= 2 {
+            return;
+        }
+
+        // Win32 MulDiv rounds the positive product to the nearest integer before Winamp enforces a
+        // minimum two-entry window.
+        let scaled = order
+            .len()
+            .saturating_mul(usize::from(self.morph_rate))
+            .saturating_add(50)
+            / 100;
+        let window = scaled.max(2);
+        for start in 0..order.len() - 1 {
+            let end = start.saturating_add(window).min(order.len());
+            self.shuffle_slice(&mut order[start..end]);
+        }
+    }
+
     fn shuffle_remaining(&mut self) {
         for i in (1..self.remaining.len()).rev() {
             let j = (self.rand() % (i as u64 + 1)) as usize;
             self.remaining.swap(i, j);
+        }
+    }
+
+    fn shuffle_slice(&mut self, values: &mut [TrackId]) {
+        for i in (1..values.len()).rev() {
+            let j = (self.rand() % (i as u64 + 1)) as usize;
+            values.swap(i, j);
         }
     }
 
@@ -582,6 +671,21 @@ mod tests {
         Playlist::new(names.iter().map(PathBuf::from).collect())
     }
 
+    fn consume_shuffle(
+        cycle: &mut ShuffleCycle,
+        playlist: &mut Playlist,
+        count: usize,
+        repeat: bool,
+    ) -> Vec<TrackId> {
+        (0..count)
+            .map(|_| {
+                let id = cycle.next(playlist, repeat).expect("shuffle candidate");
+                playlist.select_track(id).expect("live shuffle candidate");
+                id
+            })
+            .collect()
+    }
+
     #[test]
     fn a_fresh_playlist_starts_on_the_first_track() {
         let p = pl(&["a.mp3", "b.mp3", "c.mp3"]);
@@ -923,6 +1027,123 @@ mod tests {
             new_cycle.iter().copied().collect::<HashSet<_>>().len(),
             p.len()
         );
+    }
+
+    #[test]
+    fn shuffle_morph_endpoints_preserve_or_maximally_mutate_completed_order() {
+        let mut slow_playlist = pl(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let mut fast_playlist = slow_playlist.clone();
+        let mut slow = ShuffleCycle::with_seed(0x51A0_0A7E);
+        let mut fast = ShuffleCycle::with_seed(0x51A0_0A7E);
+        slow.set_morph_rate(0);
+        fast.set_morph_rate(50);
+        slow.anchor(&slow_playlist);
+        fast.anchor(&fast_playlist);
+
+        let mut first_slow = vec![slow_playlist.current_id().unwrap()];
+        let mut first_fast = vec![fast_playlist.current_id().unwrap()];
+        first_slow.extend(consume_shuffle(&mut slow, &mut slow_playlist, 7, false));
+        first_fast.extend(consume_shuffle(&mut fast, &mut fast_playlist, 7, false));
+        assert_eq!(first_slow, first_fast, "morphing is boundary-only");
+
+        let second_slow = consume_shuffle(&mut slow, &mut slow_playlist, 8, true);
+        let second_fast = consume_shuffle(&mut fast, &mut fast_playlist, 8, true);
+        assert_eq!(second_slow, first_slow, "rate 0 carries the order forward");
+        assert_ne!(
+            second_fast, first_fast,
+            "rate 50 applies the classic maximum mutation window"
+        );
+        assert_eq!(
+            second_fast.iter().copied().collect::<HashSet<_>>(),
+            first_fast.iter().copied().collect(),
+            "morphing is still a permutation"
+        );
+        assert_ne!(
+            second_fast.first(),
+            first_fast.last(),
+            "a repeat boundary cannot replay the same track in place"
+        );
+    }
+
+    #[test]
+    fn changing_morph_rate_does_not_reorder_the_active_cycle() {
+        let mut changed_playlist = pl(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+        let mut control_playlist = changed_playlist.clone();
+        let mut changed = ShuffleCycle::with_seed(0xB0A0_DA7E);
+        let mut control = ShuffleCycle::with_seed(0xB0A0_DA7E);
+        changed.set_morph_rate(0);
+        control.set_morph_rate(0);
+        changed.anchor(&changed_playlist);
+        control.anchor(&control_playlist);
+
+        let changed_prefix = consume_shuffle(&mut changed, &mut changed_playlist, 3, false);
+        let control_prefix = consume_shuffle(&mut control, &mut control_playlist, 3, false);
+        assert_eq!(changed_prefix, control_prefix);
+
+        changed.set_morph_rate(50);
+        assert_eq!(changed.morph_rate(), 50);
+        let changed_tail = consume_shuffle(&mut changed, &mut changed_playlist, 4, false);
+        let control_tail = consume_shuffle(&mut control, &mut control_playlist, 4, false);
+        assert_eq!(
+            changed_tail, control_tail,
+            "a settings change waits for the repeat boundary"
+        );
+
+        let changed_repeat = consume_shuffle(&mut changed, &mut changed_playlist, 8, true);
+        let control_repeat = consume_shuffle(&mut control, &mut control_playlist, 8, true);
+        assert_ne!(
+            changed_repeat, control_repeat,
+            "the new rate is used when the next cycle is created"
+        );
+    }
+
+    #[test]
+    fn zero_morph_reconciles_add_remove_and_move_by_stable_identity() {
+        let mut p = pl(&["a", "b", "c", "d", "e", "f"]);
+        let mut cycle = ShuffleCycle::with_seed(0xED17_5AFE);
+        cycle.set_morph_rate(0);
+        cycle.anchor(&p);
+
+        let mut observed = vec![p.current_id().unwrap()];
+        observed.extend(consume_shuffle(&mut cycle, &mut p, 2, false));
+        let removed = observed[0];
+        let removed_index = p.index_of_id(removed).unwrap();
+        p.remove(removed_index).unwrap();
+        let added = p.add(PathBuf::from("new"));
+        assert!(p.move_track(p.index_of_id(added).unwrap(), 1));
+
+        while let Some(id) = cycle.next(&p, false) {
+            p.select_track(id).unwrap();
+            observed.push(id);
+        }
+        observed.retain(|id| p.index_of_id(*id).is_some());
+
+        let live_len = p.len();
+        let repeated = consume_shuffle(&mut cycle, &mut p, live_len, true);
+        assert_eq!(
+            repeated, observed,
+            "rate 0 preserves the surviving completed stable-ID order"
+        );
+        assert!(repeated.contains(&added));
+        assert_eq!(
+            repeated.iter().copied().collect::<HashSet<_>>().len(),
+            p.len(),
+            "edits cannot duplicate or skip a live entry"
+        );
+    }
+
+    #[test]
+    fn repeat_off_remains_exhausted_for_every_morph_rate() {
+        for rate in [0, 1, 25, 50, u8::MAX] {
+            let mut p = pl(&["a", "b", "c", "d"]);
+            let mut cycle = ShuffleCycle::with_seed(0x00F1_A17E);
+            cycle.set_morph_rate(rate);
+            cycle.anchor(&p);
+            consume_shuffle(&mut cycle, &mut p, 3, false);
+            assert_eq!(cycle.next(&p, false), None);
+            assert_eq!(cycle.next(&p, false), None);
+            assert_eq!(cycle.morph_rate(), rate.min(50));
+        }
     }
 
     #[test]

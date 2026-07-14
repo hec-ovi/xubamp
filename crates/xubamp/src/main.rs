@@ -207,6 +207,15 @@ fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::
     settings.equalizer.preamp_db = session.equalizer_preamp_db;
     settings.equalizer.bands_db = session.equalizer_bands_db;
     settings.display.time = config_time_display(session.time_display);
+    settings.display.scroll_title = session.scroll_title;
+    settings.visualization.mode = match session.visualization_mode {
+        xubamp_render::vis::VisMode::Bars => xubamp_config::VisualizationMode::Spectrum,
+        xubamp_render::vis::VisMode::Oscilloscope => {
+            xubamp_config::VisualizationMode::Oscilloscope
+        }
+        xubamp_render::vis::VisMode::Off => xubamp_config::VisualizationMode::Off,
+    };
+    settings.visualization.show_peaks = session.visualization_show_peaks;
 }
 
 fn classic_equalizer_presets() -> Vec<xubamp_render::equalizer::Preset> {
@@ -319,6 +328,15 @@ fn main() {
     };
     let ui_options = xubamp_wl::UiOptions {
         time_display: ui_time_display(settings.display.time),
+        scroll_title: settings.display.scroll_title,
+        visualization_mode: match settings.visualization.mode {
+            xubamp_config::VisualizationMode::Spectrum => xubamp_render::vis::VisMode::Bars,
+            xubamp_config::VisualizationMode::Oscilloscope => {
+                xubamp_render::vis::VisMode::Oscilloscope
+            }
+            xubamp_config::VisualizationMode::Off => xubamp_render::vis::VisMode::Off,
+        },
+        visualization_show_peaks: settings.visualization.show_peaks,
     };
     let equalizer_presets = classic_equalizer_presets();
 
@@ -378,6 +396,7 @@ fn main() {
             tracks,
             settings.playback.shuffle,
             settings.playback.repeat,
+            settings.playback.shuffle_morph_rate,
             equalizer,
         )));
         let settings = Rc::new(RefCell::new(settings));
@@ -799,6 +818,7 @@ mod tests {
     fn mode_persistence_changes_only_modes_and_round_trips_atomically() {
         let path = temp_settings_path();
         let mut settings = xubamp_config::Settings::default();
+        settings.playback.shuffle_morph_rate = 17;
         settings.equalizer.preamp_db = 3.5;
         settings.skin_path = Some(PathBuf::from("/skins/kept.wsz"));
 
@@ -807,6 +827,7 @@ mod tests {
         let loaded = xubamp_config::load(&path).unwrap().settings;
         assert!(loaded.playback.shuffle);
         assert!(loaded.playback.repeat);
+        assert_eq!(loaded.playback.shuffle_morph_rate, 17);
         assert_eq!(loaded.equalizer.preamp_db, 3.5);
         assert_eq!(loaded.skin_path, Some(PathBuf::from("/skins/kept.wsz")));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -827,7 +848,10 @@ mod tests {
         let archive = PathBuf::from("/skins/selected.wsz");
 
         persist_skin_path(Some(&path), &mut settings, Some(archive.clone())).unwrap();
-        assert_eq!(xubamp_config::load(&path).unwrap().settings.skin_path, Some(archive));
+        assert_eq!(
+            xubamp_config::load(&path).unwrap().settings.skin_path,
+            Some(archive)
+        );
 
         persist_skin_path(Some(&path), &mut settings, None).unwrap();
         assert_eq!(xubamp_config::load(&path).unwrap().settings.skin_path, None);
@@ -854,6 +878,9 @@ mod tests {
             equalizer_preamp_db: 3.5,
             equalizer_bands_db: [-12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 1.5],
             time_display: xubamp_render::hit::TimeDisplay::Remaining,
+            scroll_title: false,
+            visualization_mode: xubamp_render::vis::VisMode::Oscilloscope,
+            visualization_show_peaks: false,
         };
 
         apply_ui_session(&mut settings, session);
@@ -880,6 +907,12 @@ mod tests {
         assert_eq!(settings.equalizer.preamp_db, 3.5);
         assert_eq!(settings.equalizer.bands_db, session.equalizer_bands_db);
         assert_eq!(settings.display.time, xubamp_config::TimeDisplay::Remaining);
+        assert!(!settings.display.scroll_title);
+        assert_eq!(
+            settings.visualization.mode,
+            xubamp_config::VisualizationMode::Oscilloscope
+        );
+        assert!(!settings.visualization.show_peaks);
         assert!(
             settings.playback.shuffle,
             "unrelated playback state is kept"

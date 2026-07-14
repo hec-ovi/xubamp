@@ -202,6 +202,20 @@ fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::
     settings.equalizer.bands_db = session.equalizer_bands_db;
 }
 
+fn classic_equalizer_presets() -> Vec<xubamp_render::equalizer::Preset> {
+    xubamp_dsp::presets::builtins()
+        .into_iter()
+        .map(|preset| {
+            let settings = preset.settings(true);
+            xubamp_render::equalizer::Preset {
+                name: preset.name,
+                preamp_db: settings.preamp_db,
+                bands_db: settings.bands_db,
+            }
+        })
+        .collect()
+}
+
 /// A primitive engine operation. Transport commands (Play/Pause/Stop) map to a short sequence of
 /// these; keeping the mapping pure (independent of the live engine) lets the play/pause/stop policy
 /// be unit-tested on the host without PipeWire. Only compiled with `audio` (where it is used) or
@@ -277,6 +291,7 @@ fn main() {
             settings.windows.playlist.height,
         ),
     };
+    let equalizer_presets = classic_equalizer_presets();
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
     // window would display, then exit without opening a window. `XUBAMP_TITLE` overrides the
@@ -395,8 +410,25 @@ fn main() {
                             settings.borrow_mut().equalizer.bands_db[index] = db;
                         }
                     }
+                    Command::Preset {
+                        preamp_db,
+                        bands_db,
+                    } => {
+                        let equalizer = xubamp_audio::EqSettings {
+                            enabled: player.equalizer_settings().enabled,
+                            preamp_db,
+                            bands_db,
+                        };
+                        player.set_equalizer_settings(equalizer);
+                        let mut settings = settings.borrow_mut();
+                        settings.equalizer.preamp_db = preamp_db;
+                        settings.equalizer.bands_db = bands_db;
+                    }
                 }
             }
+        };
+        let on_menu = |action: xubamp_render::menu::ClassicMenuAction| {
+            eprintln!("xubamp: menu action pending integration: {action:?}")
         };
         let playback_source = {
             let player = Rc::clone(&player);
@@ -423,6 +455,8 @@ fn main() {
             xubamp_wl::Runtime::new(
                 on_command,
                 on_equalizer,
+                on_menu,
+                equalizer_presets,
                 playback_source,
                 sample_source,
                 playlist_source,
@@ -455,6 +489,9 @@ fn main() {
         let on_equalizer = |command: xubamp_render::equalizer::Command| {
             eprintln!("xubamp: equalizer command {command:?}")
         };
+        let on_menu = |action: xubamp_render::menu::ClassicMenuAction| {
+            eprintln!("xubamp: menu action pending integration: {action:?}")
+        };
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
@@ -466,6 +503,8 @@ fn main() {
             xubamp_wl::Runtime::new(
                 on_command,
                 on_equalizer,
+                on_menu,
+                equalizer_presets,
                 playback_source,
                 sample_source,
                 playlist_source,
@@ -491,8 +530,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ui_session, classify, persist_playback_modes, preferred_skin_path, track_title,
-        transport_ops, EngineOp, TransportState, DEV_SKIN,
+        apply_ui_session, classic_equalizer_presets, classify, persist_playback_modes,
+        preferred_skin_path, track_title, transport_ops, EngineOp, TransportState, DEV_SKIN,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -535,6 +574,18 @@ mod tests {
             "a deleted saved skin falls through to the development/base choices"
         );
         assert_eq!(preferred_skin_path(None, None, None, false, false), None);
+    }
+
+    #[test]
+    fn classic_equalizer_menu_uses_the_canonical_dsp_presets() {
+        let presets = classic_equalizer_presets();
+        assert_eq!(presets.len(), 17);
+        assert_eq!(presets.first().unwrap().name, "Classical");
+        assert_eq!(presets.last().unwrap().name, "Techno");
+        assert!(presets.iter().all(|preset| {
+            preset.preamp_db.is_finite()
+                && preset.bands_db.iter().all(|db| (-12.0..=12.0).contains(db))
+        }));
     }
 
     #[test]

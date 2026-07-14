@@ -33,8 +33,24 @@ pub enum Region {
     TitleButton(TitleButton),
     TitleBar,
     Resize,
+    /// The bottom-left ADD control, which opens URL/Directory/File choices.
+    AddMenu,
     Body,
     None,
+}
+
+pub const ADD_BUTTON_X: i32 = 14;
+pub const ADD_BUTTON_BOTTOM: i32 = 12;
+pub const ADD_BUTTON_W: i32 = 22;
+pub const ADD_BUTTON_H: i32 = 18;
+
+pub fn add_button_rect(height: i32) -> (i32, i32, i32, i32) {
+    (
+        ADD_BUTTON_X,
+        height - ADD_BUTTON_BOTTOM - ADD_BUTTON_H,
+        ADD_BUTTON_W,
+        ADD_BUTTON_H,
+    )
 }
 
 /// Playlist-window UI state: the rows to show, which track is playing, which rows are selected, and
@@ -56,6 +72,8 @@ pub struct PlState {
     /// Held title button, for depressed feedback until release. The action fires only when release
     /// lands on this same button.
     pub pressed_title: Option<TitleButton>,
+    /// The ADD control stays depressed while its popup menu is open.
+    pub pressed_add: bool,
 }
 
 /// The x coordinate of a 9px playlist title button at `right` pixels from the window's right edge.
@@ -74,6 +92,8 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
     if x < 0 || y < 0 || x >= width || y >= height {
         return Region::None;
     }
+    let (add_x, add_y, add_w, add_h) = add_button_rect(height);
+    let over_add = x >= add_x && x < add_x + add_w && y >= add_y && y < add_y + add_h;
 
     let button_y = sprites::PLEDIT_TITLE_BUTTON_Y;
     let button_h = sprites::PLEDIT_TITLE_BUTTON_W;
@@ -104,6 +124,8 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
         }
     } else if x >= width - 20 && y >= height - 20 {
         Region::Resize
+    } else if over_add {
+        Region::AddMenu
     } else if y < sprites::PLEDIT_TITLE_H {
         Region::TitleBar
     } else {
@@ -295,6 +317,16 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
         w - sprites::PLEDIT_BOTTOM_RIGHT.w,
         mid_y1,
     );
+    if state.pressed_add {
+        let (_, add_y, _, _) = add_button_rect(h);
+        blit(
+            &mut fb,
+            sheet,
+            Rect::new(23, 149, ADD_BUTTON_W, ADD_BUTTON_H),
+            ADD_BUTTON_X,
+            add_y,
+        );
+    }
 
     draw_rows(&mut fb, state, &colors, h, list_w);
     fb
@@ -384,7 +416,38 @@ fn draw_fallback_expanded(
         [colors.normal.r, colors.normal.g, colors.normal.b],
     );
     draw_fallback_title_buttons(fb, state, w);
+    draw_fallback_add_button(fb, state, h, colors);
     draw_rows(fb, state, colors, h, list_w);
+}
+
+fn draw_fallback_add_button(
+    fb: &mut Framebuffer,
+    state: &PlState,
+    height: i32,
+    colors: &xubamp_skin::pledit::PlEdit,
+) {
+    let (x, y, w, h) = add_button_rect(height);
+    let face = if state.pressed_add {
+        colors.selected_bg
+    } else {
+        Rgb::new(34, 64, 76)
+    };
+    let light = Rgb::new(92, 146, 158);
+    let dark = Rgb::new(5, 18, 24);
+    fill_rect(fb, x, y, w, h, face);
+    fill_rect(fb, x, y, w, 1, light);
+    fill_rect(fb, x, y, 1, h, light);
+    fill_rect(fb, x, y + h - 1, w, 1, dark);
+    fill_rect(fb, x + w - 1, y, 1, h, dark);
+    font::draw_text(
+        &mut fb.rgba,
+        fb.width,
+        fb.height,
+        x + 3,
+        y + 6,
+        "ADD",
+        [colors.normal.r, colors.normal.g, colors.normal.b],
+    );
 }
 
 fn draw_pressed_title(
@@ -660,6 +723,12 @@ mod tests {
         );
         assert_eq!(region_at(&expanded, w, h, 40, 7), Region::TitleBar);
         assert_eq!(region_at(&expanded, w, h, 40, 40), Region::Body);
+        let (add_x, add_y, add_w, add_h) = add_button_rect(h);
+        assert_eq!(
+            region_at(&expanded, w, h, add_x + add_w / 2, add_y + add_h / 2),
+            Region::AddMenu,
+            "the resized bottom bar keeps the classic ADD target"
+        );
         assert_eq!(region_at(&expanded, w, h, w - 1, h - 1), Region::Resize);
 
         let shaded = PlState {
@@ -689,6 +758,35 @@ mod tests {
         assert_eq!(
             region_at(&shaded, w, sprites::PLEDIT_SHADE_H, -1, 7),
             Region::None
+        );
+    }
+
+    #[test]
+    fn held_add_control_uses_the_selected_skin_cell() {
+        let mut sheet = solid_sheet(300, 170, [20, 30, 40, 255]);
+        for y in 149..167 {
+            for x in 23..45 {
+                let offset = ((y * sheet.width as i32 + x) * 4) as usize;
+                sheet.rgba[offset..offset + 4].copy_from_slice(&[220, 40, 90, 255]);
+            }
+        }
+        let state = PlState {
+            pressed_add: true,
+            ..Default::default()
+        };
+        let fb = compose(
+            &Skin {
+                pledit: Some(sheet),
+                ..Default::default()
+            },
+            &state,
+            sprites::PLEDIT_W,
+            sprites::PLEDIT_H,
+        );
+        let (x, y, w, h) = add_button_rect(sprites::PLEDIT_H);
+        assert_eq!(
+            px(&fb, (x + w / 2) as u32, (y + h / 2) as u32),
+            [220, 40, 90, 255]
         );
     }
 

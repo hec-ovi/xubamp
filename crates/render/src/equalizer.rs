@@ -61,9 +61,37 @@ pub enum Region {
 pub enum Command {
     Enabled(bool),
     Preamp(f32),
-    Band { index: usize, db: f32 },
+    Band {
+        index: usize,
+        db: f32,
+    },
+    /// Apply a complete menu/file preset atomically at the player boundary.
+    Preset {
+        preamp_db: f32,
+        bands_db: [f32; 10],
+    },
     Volume(u8),
     Balance(i8),
+}
+
+/// One caller-supplied preset shown by the platform menu. The DSP crate remains the canonical
+/// source of built-in and EQF values; this representation only carries them through the
+/// renderer/window boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Preset {
+    pub name: String,
+    pub preamp_db: f32,
+    pub bands_db: [f32; 10],
+}
+
+impl Preset {
+    pub fn sanitized(mut self) -> Self {
+        self.preamp_db = sanitize_db(self.preamp_db);
+        for db in &mut self.bands_db {
+            *db = sanitize_db(*db);
+        }
+        self
+    }
 }
 
 /// Non-audio actions which the platform layer carries out.
@@ -1018,6 +1046,33 @@ mod tests {
         assert_eq!(db_from_y(bottom_center), MIN_DB);
         assert_eq!(db_from_y(-1_000), MAX_DB);
         assert_eq!(db_from_y(1_000), MIN_DB);
+    }
+
+    #[test]
+    fn external_presets_sanitize_every_curve_value() {
+        let preset = Preset {
+            name: "bad input".into(),
+            preamp_db: f32::NAN,
+            bands_db: [
+                -99.0,
+                -12.0,
+                -6.0,
+                0.0,
+                6.0,
+                12.0,
+                99.0,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                1.5,
+            ],
+        }
+        .sanitized();
+        assert_eq!(preset.preamp_db, 0.0);
+        assert_eq!(preset.bands_db[0], MIN_DB);
+        assert_eq!(preset.bands_db[6], MAX_DB);
+        assert_eq!(preset.bands_db[7], 0.0);
+        assert_eq!(preset.bands_db[8], 0.0);
+        assert_eq!(preset.bands_db[9], 1.5);
     }
 
     #[test]

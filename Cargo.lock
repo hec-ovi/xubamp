@@ -1566,6 +1566,7 @@ version = "0.0.1"
 dependencies = [
  "xubamp-audio",
  "xubamp-config",
+ "xubamp-dsp",
  "xubamp-library",
  "xubamp-render",
  "xubamp-skin",

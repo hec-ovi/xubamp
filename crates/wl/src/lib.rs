@@ -46,7 +46,9 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 use xubamp_render::vis::{VisMode, FFT_N};
-use xubamp_render::{compose_main_window, equalizer, hit, jump, marquee, pledit, Framebuffer};
+use xubamp_render::{
+    compose_main_window, equalizer, hit, jump, marquee, menu, pledit, Framebuffer,
+};
 use xubamp_skin::Skin;
 
 // Keyboard shortcuts are gated behind the `keyboard` feature so the host build stays free of the
@@ -90,12 +92,15 @@ type PlaylistSource = Box<dyn FnMut() -> (Vec<pledit::Row>, Option<usize>)>;
 
 /// Applies equalizer-specific controls to the player/configuration owner.
 type EqualizerSink = Box<dyn FnMut(equalizer::Command)>;
+type MenuSink = Box<dyn FnMut(menu::ClassicMenuAction)>;
 
 /// Event sinks and live data sources used by the Wayland event loop. Grouping these keeps the
 /// window constructor stable as secondary panes gain controls.
 pub struct Runtime {
     on_command: Box<dyn FnMut(hit::Command)>,
     on_equalizer: EqualizerSink,
+    on_menu: MenuSink,
+    equalizer_presets: Vec<equalizer::Preset>,
     playback_source: Box<dyn FnMut() -> hit::Playback>,
     sample_source: SampleSource,
     playlist_source: PlaylistSource,
@@ -105,6 +110,8 @@ impl Runtime {
     pub fn new(
         on_command: impl FnMut(hit::Command) + 'static,
         on_equalizer: impl FnMut(equalizer::Command) + 'static,
+        on_menu: impl FnMut(menu::ClassicMenuAction) + 'static,
+        equalizer_presets: Vec<equalizer::Preset>,
         playback_source: impl FnMut() -> hit::Playback + 'static,
         sample_source: impl FnMut(&mut [f32]) + 'static,
         playlist_source: impl FnMut() -> (Vec<pledit::Row>, Option<usize>) + 'static,
@@ -112,6 +119,8 @@ impl Runtime {
         Self {
             on_command: Box::new(on_command),
             on_equalizer: Box::new(on_equalizer),
+            on_menu: Box::new(on_menu),
+            equalizer_presets,
             playback_source: Box::new(playback_source),
             sample_source: Box::new(sample_source),
             playlist_source: Box::new(playlist_source),
@@ -212,6 +221,22 @@ struct EqualizerWin {
     position: panes::Point,
     drag: Option<PaneDrag>,
     title_last_click: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupOwner {
+    EqualizerPresets,
+    PlaylistAdd,
+}
+
+struct PopupMenuWin {
+    owner: PopupOwner,
+    subsurface: wl_subsurface::WlSubsurface,
+    surface: wl_surface::WlSurface,
+    pool: SlotPool,
+    fb: Framebuffer,
+    model: menu::Menu<menu::ClassicMenuAction>,
+    interaction: menu::MenuInteraction,
 }
 
 /// The "Jump to file" dialog window (classic `J`): a standalone toplevel that filters the track
@@ -356,6 +381,8 @@ pub fn run(
         fb,
         on_command: runtime.on_command,
         on_equalizer: runtime.on_equalizer,
+        on_menu: runtime.on_menu,
+        equalizer_presets: runtime.equalizer_presets,
         playback_source: runtime.playback_source,
         sample_source: runtime.sample_source,
         playlist: None,
@@ -392,6 +419,7 @@ pub fn run(
         },
         pending_equalizer_open: pane_layout.equalizer_open,
         pending_playlist_open: pane_layout.playlist_open,
+        popup_menu: None,
         pointer: None,
         seat: None,
         armed_move: None,
@@ -442,6 +470,11 @@ struct App {
     on_command: Box<dyn FnMut(hit::Command)>,
     /// Sink for DSP-specific equalizer changes.
     on_equalizer: EqualizerSink,
+    /// Sink for popup actions whose side effects live above the window layer (file choosers,
+    /// settings, skin selection).
+    on_menu: MenuSink,
+    /// Canonical DSP-provided preset values paired with the labels shown by the popup.
+    equalizer_presets: Vec<equalizer::Preset>,
     /// Polled each redraw tick for the clock snapshot (elapsed, seek-bar position, duration,
     /// playing).
     playback_source: Box<dyn FnMut() -> hit::Playback>,
@@ -505,6 +538,7 @@ struct App {
     /// Restored only after the root's initial xdg configure, when child surfaces may be mapped.
     pending_equalizer_open: bool,
     pending_playlist_open: bool,
+    popup_menu: Option<PopupMenuWin>,
     /// The secondary playlist pane (PLEDIT), or `None` when closed.
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
@@ -841,6 +875,10 @@ impl App {
     fn is_our_surface(&self, surface: &wl_surface::WlSurface) -> bool {
         surface == self.window.wl_surface()
             || self
+                .popup_menu
+                .as_ref()
+                .is_some_and(|popup| surface == &popup.surface)
+            || self
                 .equalizer
                 .as_ref()
                 .is_some_and(|eq| surface == &eq.surface)
@@ -883,6 +921,13 @@ impl App {
     }
 
     fn close_equalizer(&mut self) {
+        if self
+            .popup_menu
+            .as_ref()
+            .is_some_and(|popup| popup.owner == PopupOwner::EqualizerPresets)
+        {
+            self.close_popup_menu();
+        }
         if let Some(equalizer) = self.equalizer.take() {
             equalizer.subsurface.destroy();
             equalizer.surface.destroy();
@@ -973,14 +1018,173 @@ impl App {
             match action {
                 equalizer::Action::SetShade(shaded) => self.set_equalizer_shade(shaded),
                 equalizer::Action::Close => self.close_equalizer(),
-                equalizer::Action::Presets => {
-                    eprintln!("xubamp: equalizer preset menu not implemented yet")
-                }
+                equalizer::Action::Presets => self.open_equalizer_presets_menu(),
             }
         }
         if outcome.redraw && self.equalizer.is_some() {
             self.redraw_equalizer();
         }
+    }
+
+    fn open_equalizer_presets_menu(&mut self) {
+        let names = self
+            .equalizer_presets
+            .iter()
+            .map(|preset| preset.name.clone());
+        let Ok(model) = menu::equalizer_presets_menu(names) else {
+            eprintln!(
+                "xubamp: equalizer preset menu requires {} built-in presets",
+                menu::CLASSIC_EQ_PRESET_COUNT
+            );
+            return;
+        };
+        let mut interaction = menu::MenuInteraction::default();
+        interaction.open(&model);
+        let fb = menu::compose(&model, &interaction);
+        let button = xubamp_skin::sprites::EQ_PRESETS;
+        let position = panes::Point {
+            x: self.equalizer_position.x + button.dst_x + button.src.w - fb.width as i32,
+            y: self.equalizer_position.y + button.dst_y + button.src.h,
+        };
+        self.open_popup_menu(
+            PopupOwner::EqualizerPresets,
+            model,
+            interaction,
+            fb,
+            position,
+        );
+    }
+
+    fn open_playlist_add_menu(&mut self) {
+        if self.playlist_state.shade {
+            return;
+        }
+        let model = menu::playlist_add_menu();
+        let mut interaction = menu::MenuInteraction::default();
+        interaction.open(&model);
+        let fb = menu::compose(&model, &interaction);
+        let Some(playlist) = self.playlist.as_ref() else {
+            return;
+        };
+        let (_, add_y, _, _) = pledit::add_button_rect(playlist.height);
+        let position = panes::Point {
+            x: playlist.position.x + pledit::ADD_BUTTON_X,
+            y: playlist.position.y + add_y - fb.height as i32,
+        };
+        self.open_popup_menu(PopupOwner::PlaylistAdd, model, interaction, fb, position);
+        self.playlist_state.pressed_add = true;
+        self.redraw_playlist();
+    }
+
+    fn open_popup_menu(
+        &mut self,
+        owner: PopupOwner,
+        model: menu::Menu<menu::ClassicMenuAction>,
+        interaction: menu::MenuInteraction,
+        fb: Framebuffer,
+        position: panes::Point,
+    ) {
+        self.close_popup_menu();
+        let (subsurface, surface) = self
+            .subcompositor
+            .create_subsurface(self.window.wl_surface().clone(), &self.qh);
+        subsurface.set_position(position.x, position.y);
+        subsurface.set_desync();
+        // Keep the popup above every persistent pane regardless of the order those siblings were
+        // opened. Reordering is latched by the parent commit below.
+        if let Some(equalizer) = &self.equalizer {
+            equalizer.subsurface.place_below(&surface);
+        }
+        if let Some(playlist) = &self.playlist {
+            playlist.subsurface.place_below(&surface);
+        }
+        let pool = SlotPool::new(fb.width as usize * fb.height as usize * 4, &self.shm)
+            .expect("popup menu pool");
+        self.popup_menu = Some(PopupMenuWin {
+            owner,
+            subsurface,
+            surface,
+            pool,
+            fb,
+            model,
+            interaction,
+        });
+        self.window.wl_surface().commit();
+        self.redraw_popup_menu();
+    }
+
+    fn close_popup_menu(&mut self) {
+        let Some(popup) = self.popup_menu.take() else {
+            return;
+        };
+        popup.subsurface.destroy();
+        popup.surface.destroy();
+        if popup.owner == PopupOwner::PlaylistAdd && self.playlist_state.pressed_add {
+            self.playlist_state.pressed_add = false;
+            self.redraw_playlist();
+        }
+    }
+
+    fn redraw_popup_menu(&mut self) {
+        let Some(popup) = &mut self.popup_menu else {
+            return;
+        };
+        popup.fb = menu::compose(&popup.model, &popup.interaction);
+        popup.present();
+    }
+
+    fn apply_popup_outcome(&mut self, outcome: menu::MenuOutcome<menu::ClassicMenuAction>) {
+        match outcome {
+            menu::MenuOutcome::Unchanged => {}
+            menu::MenuOutcome::Redraw => self.redraw_popup_menu(),
+            menu::MenuOutcome::Dismissed => self.close_popup_menu(),
+            menu::MenuOutcome::Activated(action) => {
+                self.close_popup_menu();
+                self.activate_popup_action(action);
+            }
+        }
+    }
+
+    fn activate_popup_action(&mut self, action: menu::ClassicMenuAction) {
+        if let menu::ClassicMenuAction::EqualizerLoadPreset(index) = action {
+            let Some(preset) = self.equalizer_presets.get(index).cloned() else {
+                return;
+            };
+            let preset = preset.sanitized();
+            self.equalizer_state.preamp_db = preset.preamp_db;
+            self.equalizer_state.bands_db = preset.bands_db;
+            (self.on_equalizer)(equalizer::Command::Preset {
+                preamp_db: preset.preamp_db,
+                bands_db: preset.bands_db,
+            });
+            self.redraw_equalizer();
+            return;
+        }
+        (self.on_menu)(action);
+    }
+
+    fn popup_menu_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        if matches!(kind, PointerEventKind::Enter { .. }) {
+            if let Some(pointer) = &self.pointer {
+                let _ = pointer.set_cursor(conn, CursorIcon::Default);
+            }
+        }
+        let Some(popup) = &mut self.popup_menu else {
+            return;
+        };
+        let outcome = match kind {
+            PointerEventKind::Motion { .. } | PointerEventKind::Enter { .. } => {
+                popup.interaction.pointer_move(&popup.model, x, y)
+            }
+            PointerEventKind::Press { button, .. } if *button == BTN_LEFT => {
+                popup.interaction.pointer_press(&popup.model, x, y)
+            }
+            PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
+                popup.interaction.pointer_release(&popup.model, x, y)
+            }
+            _ => menu::MenuOutcome::Unchanged,
+        };
+        self.apply_popup_outcome(outcome);
     }
 
     /// Open the playlist child pane if it is not already open, and light the PL button on the main
@@ -1023,6 +1227,13 @@ impl App {
 
     /// Close the playlist pane and dim the PL button.
     fn close_playlist(&mut self) {
+        if self
+            .popup_menu
+            .as_ref()
+            .is_some_and(|popup| popup.owner == PopupOwner::PlaylistAdd)
+        {
+            self.close_popup_menu();
+        }
         if let Some(playlist) = self.playlist.take() {
             playlist.subsurface.destroy();
             playlist.surface.destroy();
@@ -1289,6 +1500,15 @@ impl App {
                             pl.resize = None;
                         }
                     }
+                    pledit::Region::AddMenu => {
+                        self.playlist_state.pressed_add = true;
+                        if let Some(pl) = &mut self.playlist {
+                            pl.drag = None;
+                            pl.resize = None;
+                            pl.title_last_click = None;
+                        }
+                        self.redraw_playlist();
+                    }
                     pledit::Region::Body => self.playlist_press_row(x, y),
                     pledit::Region::None => {}
                 }
@@ -1425,6 +1645,19 @@ impl App {
                     pl.drag = None;
                     pl.resize = None;
                 }
+                if self.playlist_state.pressed_add {
+                    self.playlist_state.pressed_add = false;
+                    let fired = self.playlist.as_ref().is_some_and(|pl| {
+                        pledit::region_at(&self.playlist_state, pl.width, pl.height, x, y)
+                            == pledit::Region::AddMenu
+                    });
+                    if fired {
+                        self.open_playlist_add_menu();
+                    } else {
+                        self.redraw_playlist();
+                    }
+                    return;
+                }
                 let Some(pressed) = self.playlist_state.pressed_title.take() else {
                     return;
                 };
@@ -1442,7 +1675,13 @@ impl App {
                 }
             }
             PointerEventKind::Leave { .. } => {
-                let redraw = self.playlist_state.pressed_title.take().is_some();
+                let menu_keeps_add_pressed = self
+                    .popup_menu
+                    .as_ref()
+                    .is_some_and(|popup| popup.owner == PopupOwner::PlaylistAdd);
+                let add_cleared = !menu_keeps_add_pressed
+                    && std::mem::take(&mut self.playlist_state.pressed_add);
+                let redraw = self.playlist_state.pressed_title.take().is_some() || add_cleared;
                 if let Some(pl) = &mut self.playlist {
                     pl.grip_hover = false;
                     // During the implicit button grab, moving the subsurface may cause an enter or
@@ -1699,6 +1938,28 @@ impl EqualizerWin {
     }
 }
 
+impl PopupMenuWin {
+    fn present(&mut self) {
+        let (w, h) = (self.fb.width, self.fb.height);
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .expect("create popup menu wl_shm buffer");
+        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        self.surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer
+            .attach_to(&self.surface)
+            .expect("attach popup menu buffer");
+        self.surface.commit();
+    }
+}
+
 impl CompositorHandler for App {
     fn scale_factor_changed(
         &mut self,
@@ -1882,6 +2143,23 @@ impl PointerHandler for App {
         for event in events {
             let (x, y) = (event.position.0 as i32, event.position.1 as i32);
             let on_main = event.surface == *self.window.wl_surface();
+            let on_popup = !on_main
+                && self
+                    .popup_menu
+                    .as_ref()
+                    .is_some_and(|popup| event.surface == popup.surface);
+            if on_popup {
+                self.popup_menu_pointer(conn, &event.kind, x, y);
+                continue;
+            }
+            if self.popup_menu.is_some()
+                && matches!(
+                    &event.kind,
+                    PointerEventKind::Press { button, .. } if *button == BTN_LEFT
+                )
+            {
+                self.close_popup_menu();
+            }
             let on_equalizer = !on_main
                 && self
                     .equalizer
@@ -2060,6 +2338,10 @@ impl App {
         if !self.keyboard_focus {
             return;
         }
+        if self.popup_menu.is_some() {
+            self.popup_menu_key(event);
+            return;
+        }
         // The jump-to-file dialog captures every key (text, Backspace, arrows, Enter, Escape) while
         // it is open.
         if self.jump_win.is_some() {
@@ -2082,6 +2364,34 @@ impl App {
         }
         let outcome = hit::on_key(&mut self.state, key, is_repeat);
         self.apply(outcome);
+    }
+
+    fn popup_menu_key(&mut self, event: &KeyEvent) {
+        let key = match event.keysym {
+            Keysym::Escape => menu::MenuKey::Escape,
+            Keysym::Return | Keysym::KP_Enter => menu::MenuKey::Enter,
+            Keysym::Up => menu::MenuKey::Up,
+            Keysym::Down => menu::MenuKey::Down,
+            Keysym::Left => menu::MenuKey::Left,
+            Keysym::Right => menu::MenuKey::Right,
+            Keysym::Home => menu::MenuKey::Home,
+            Keysym::End => menu::MenuKey::End,
+            _ => {
+                let Some(character) = event.utf8.as_deref().and_then(|text| text.chars().next())
+                else {
+                    return;
+                };
+                if character.is_control() {
+                    return;
+                }
+                menu::MenuKey::Character(character)
+            }
+        };
+        let Some(popup) = &mut self.popup_menu else {
+            return;
+        };
+        let outcome = popup.interaction.key(&popup.model, key);
+        self.apply_popup_outcome(outcome);
     }
 
     /// Handle a key while the jump dialog is open: printable characters and Backspace edit the

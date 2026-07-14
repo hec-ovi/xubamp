@@ -220,6 +220,65 @@ impl FileChooser {
         async_io::block_on(self.save_eqf_file(suggested_name, current_folder))
     }
 
+    /// Ask for one `.m3u`/`.m3u8`/`.pls` playlist file to load. The chosen path is validated to have
+    /// a playlist extension (portal filters are only advisory).
+    pub async fn open_playlist_file(
+        &self,
+        current_folder: Option<&Path>,
+    ) -> Result<DialogResult<PathBuf>, Error> {
+        let request = SelectedFiles::open_file()
+            .title("Load playlist")
+            .accept_label("Open")
+            .modal(true)
+            .multiple(false)
+            .directory(false)
+            .filter(playlist_filter());
+        let request = self.configure_open_request(request, current_folder)?;
+        map_selected(request.send().await.and_then(|request| request.response()))?
+            .map_selected(expect_one_playlist_path)
+    }
+
+    /// Blocking form of [`Self::open_playlist_file`] for a dedicated worker thread.
+    pub fn open_playlist_file_blocking(
+        &self,
+        current_folder: Option<&Path>,
+    ) -> Result<DialogResult<PathBuf>, Error> {
+        async_io::block_on(self.open_playlist_file(current_folder))
+    }
+
+    /// Ask for a destination to save a playlist. A path with no extension gets `.m3u`; `.m3u8` and
+    /// `.pls` are accepted as-is, and any other extension is rejected.
+    pub async fn save_playlist_file(
+        &self,
+        suggested_name: &str,
+        current_folder: Option<&Path>,
+    ) -> Result<DialogResult<PathBuf>, Error> {
+        let suggested_name = suggested_playlist_name(suggested_name);
+        let mut request = SelectedFiles::save_file()
+            .title("Save playlist")
+            .accept_label("Save")
+            .modal(true)
+            .current_name(suggested_name.as_str())
+            .filter(playlist_filter());
+        if let Some(parent) = &self.parent {
+            request = request.identifier(parent.to_ashpd());
+        }
+        if let Some(folder) = current_folder {
+            request = request.current_folder(folder).map_err(Error::Portal)?;
+        }
+        map_selected(request.send().await.and_then(|request| request.response()))?
+            .map_selected(expect_one_playlist_save_path)
+    }
+
+    /// Blocking form of [`Self::save_playlist_file`] for a dedicated worker thread.
+    pub fn save_playlist_file_blocking(
+        &self,
+        suggested_name: &str,
+        current_folder: Option<&Path>,
+    ) -> Result<DialogResult<PathBuf>, Error> {
+        async_io::block_on(self.save_playlist_file(suggested_name, current_folder))
+    }
+
     fn configure_open_request(
         &self,
         mut request: ashpd::desktop::file_chooser::OpenFileRequest,
@@ -369,6 +428,53 @@ fn has_skin_archive_extension(path: &Path) -> bool {
         })
 }
 
+fn has_playlist_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("m3u")
+                || extension.eq_ignore_ascii_case("m3u8")
+                || extension.eq_ignore_ascii_case("pls")
+        })
+}
+
+fn expect_one_playlist_path(selected: SelectedFiles) -> Result<PathBuf, Error> {
+    let path = expect_one_path(selected)?;
+    if has_playlist_extension(&path) {
+        Ok(path)
+    } else {
+        Err(Error::InvalidSelection(SelectionError::NotPlaylist(path)))
+    }
+}
+
+fn expect_one_playlist_save_path(selected: SelectedFiles) -> Result<PathBuf, Error> {
+    normalize_playlist_save_path(expect_one_path(selected)?).map_err(Error::InvalidSelection)
+}
+
+fn normalize_playlist_save_path(mut path: PathBuf) -> Result<PathBuf, SelectionError> {
+    match path.extension() {
+        None => {
+            path.set_extension("m3u");
+            Ok(path)
+        }
+        Some(_) if has_playlist_extension(&path) => Ok(path),
+        Some(_) => Err(SelectionError::NotPlaylist(path)),
+    }
+}
+
+fn suggested_playlist_name(name: &str) -> String {
+    let name = Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("playlist");
+    if has_playlist_extension(Path::new(name)) {
+        name.to_owned()
+    } else {
+        format!("{name}.m3u")
+    }
+}
+
 fn suggested_eqf_name(name: &str) -> String {
     let name = Path::new(name)
         .file_name()
@@ -409,6 +515,13 @@ fn skin_archive_filter() -> FileFilter {
     FileFilter::new("Winamp skin archives")
         .glob("*.[wW][sS][zZ]")
         .glob("*.[zZ][iI][pP]")
+}
+
+fn playlist_filter() -> FileFilter {
+    FileFilter::new("Playlists")
+        .glob("*.[mM]3[uU]")
+        .glob("*.[mM]3[uU]8")
+        .glob("*.[pP][lL][sS]")
 }
 
 /// Convert a local `file://` URI returned by the portal into a Unix path.
@@ -515,6 +628,7 @@ pub enum SelectionError {
     UnsupportedAudio(PathBuf),
     NotEqf(PathBuf),
     NotSkinArchive(PathBuf),
+    NotPlaylist(PathBuf),
 }
 
 impl fmt::Display for SelectionError {
@@ -534,6 +648,13 @@ impl fmt::Display for SelectionError {
                 write!(
                     formatter,
                     "expected a .wsz or .zip file: {}",
+                    path.display()
+                )
+            }
+            Self::NotPlaylist(path) => {
+                write!(
+                    formatter,
+                    "expected an .m3u, .m3u8, or .pls file: {}",
                     path.display()
                 )
             }
@@ -656,6 +777,32 @@ mod tests {
             skin_archive_filter().pattern_filters(),
             ["*.[wW][sS][zZ]", "*.[zZ][iI][pP]"]
         );
+    }
+
+    #[test]
+    fn playlist_extension_and_save_normalization() {
+        assert_eq!(
+            playlist_filter().pattern_filters(),
+            ["*.[mM]3[uU]", "*.[mM]3[uU]8", "*.[pP][lL][sS]"]
+        );
+        for name in ["list.m3u", "LIST.M3U8", "radio.pls", "Radio.PLS"] {
+            assert!(has_playlist_extension(Path::new(name)), "{name}");
+        }
+        for name in ["song.mp3", "cover.png", "noext"] {
+            assert!(!has_playlist_extension(Path::new(name)), "{name}");
+        }
+        // No extension defaults to .m3u; .pls is kept; a wrong extension is rejected.
+        assert_eq!(
+            normalize_playlist_save_path(PathBuf::from("/m/set")),
+            Ok(PathBuf::from("/m/set.m3u"))
+        );
+        assert_eq!(
+            normalize_playlist_save_path(PathBuf::from("/m/set.pls")),
+            Ok(PathBuf::from("/m/set.pls"))
+        );
+        assert!(normalize_playlist_save_path(PathBuf::from("/m/set.txt")).is_err());
+        assert_eq!(suggested_playlist_name("mix"), "mix.m3u");
+        assert_eq!(suggested_playlist_name("mix.pls"), "mix.pls");
     }
 
     #[test]

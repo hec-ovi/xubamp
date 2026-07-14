@@ -293,6 +293,36 @@ fn playlist_sort_key(sort: xubamp_wl::PlaylistSort, path: &Path) -> String {
     }
 }
 
+/// Read and parse a `.m3u`/`.m3u8`/`.pls` file into its entry paths (relative entries resolved
+/// against the playlist's own directory). Non-audio entries are dropped later by the player.
+#[cfg(feature = "audio")]
+fn load_playlist_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
+    use xubamp_audio::playlist_file;
+    let format = playlist_file::format_from_path(path)
+        .ok_or_else(|| format!("{} is not a playlist file", path.display()))?;
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let entries = playlist_file::parse(&text, format, path.parent());
+    Ok(entries.into_iter().map(|entry| entry.path).collect())
+}
+
+/// Serialize the given entries to `dest`, choosing PLS or extended M3U by the destination's
+/// extension. Paths under the destination's directory are written relative for a portable file.
+#[cfg(feature = "audio")]
+fn write_playlist(
+    dest: &Path,
+    items: &[xubamp_audio::playlist_file::PlaylistEntry],
+) -> Result<(), String> {
+    use xubamp_audio::playlist_file::{self, PlaylistFormat};
+    let base = dest.parent();
+    let text = match playlist_file::format_from_path(dest) {
+        Some(PlaylistFormat::Pls) => playlist_file::write_pls(items, base),
+        _ => playlist_file::write_m3u(items, base),
+    };
+    std::fs::write(dest, text).map_err(|error| format!("cannot write {}: {error}", dest.display()))
+}
+
 /// Eject always invokes the replace-and-play chooser. Play does so only for an empty playlist;
 /// Pause stays inert there instead of becoming another chooser shortcut.
 fn transport_opens_media(t: xubamp_render::hit::Transport, playlist_empty: bool) -> bool {
@@ -607,6 +637,47 @@ fn main() {
                         portal_actions::Completion::Saved(path) => {
                             eprintln!("xubamp: saved equalizer preset to {}", path.display());
                         }
+                        portal_actions::Completion::PlaylistToLoad(file) => {
+                            match load_playlist_paths(&file) {
+                                Ok(paths) => {
+                                    let mut player = player.borrow_mut();
+                                    let count = player.replace_paths(paths);
+                                    if count > 0 {
+                                        player.start();
+                                        eprintln!(
+                                            "xubamp: loaded {count} track(s) from {}",
+                                            file.display()
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "xubamp: {} has no playable tracks",
+                                            file.display()
+                                        );
+                                    }
+                                }
+                                Err(error) => eprintln!("xubamp: {error}"),
+                            }
+                        }
+                        portal_actions::Completion::PlaylistToSave(dest) => {
+                            let items: Vec<_> = player
+                                .borrow()
+                                .playlist_entries()
+                                .into_iter()
+                                .map(|(_, path)| xubamp_audio::playlist_file::PlaylistEntry {
+                                    title: Some(track_title(&path.to_string_lossy())),
+                                    duration_secs: None,
+                                    path,
+                                })
+                                .collect();
+                            match write_playlist(&dest, &items) {
+                                Ok(()) => eprintln!(
+                                    "xubamp: saved {} track(s) to {}",
+                                    items.len(),
+                                    dest.display()
+                                ),
+                                Err(error) => eprintln!("xubamp: {error}"),
+                            }
+                        }
                         portal_actions::Completion::SkinLoaded { path, skin } => {
                             if let Err(error) = persist_skin_path(
                                 settings_path.as_deref(),
@@ -739,6 +810,12 @@ fn main() {
                         }
                         portal_actions::Completion::Saved(path) => {
                             eprintln!("xubamp: saved equalizer preset to {}", path.display());
+                        }
+                        portal_actions::Completion::PlaylistToLoad(_)
+                        | portal_actions::Completion::PlaylistToSave(_) => {
+                            eprintln!(
+                                "xubamp: built without audio; playlist save/load needs `--features audio`"
+                            );
                         }
                         portal_actions::Completion::SkinLoaded { path, skin } => {
                             if let Err(error) = persist_skin_path(

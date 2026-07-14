@@ -13,7 +13,7 @@ use xubamp_render::equalizer;
 use xubamp_render::menu::ClassicMenuAction;
 use xubamp_skin::container::{SkinArchive, MAX_ARCHIVE_BYTES};
 use xubamp_skin::{default_skin, Skin};
-use xubamp_wl::MenuRequest;
+use xubamp_wl::{MenuRequest, PlaylistRequest};
 
 #[derive(Debug)]
 pub(crate) enum Completion {
@@ -28,6 +28,11 @@ pub(crate) enum Completion {
     },
     EqualizerPreset(equalizer::Preset),
     Saved(PathBuf),
+    /// The user picked a playlist file to load; the application layer reads and parses it (parsing
+    /// lives with the audio-gated player, not in this shared worker).
+    PlaylistToLoad(PathBuf),
+    /// The user picked a destination to save the current playlist to.
+    PlaylistToSave(PathBuf),
     Error(String),
 }
 
@@ -135,6 +140,7 @@ fn is_supported(request: &MenuRequest) -> bool {
                     | ClassicMenuAction::EqualizerLoadEqf
             )
             | MenuRequest::SaveEqualizer(_)
+            | MenuRequest::Playlist(PlaylistRequest::Load | PlaylistRequest::Save)
     )
 }
 
@@ -233,6 +239,20 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
                 .map_err(|error| format!("cannot save {}: {error}", path.display()))?;
             Ok(Some(Completion::Saved(path)))
         }
+        MenuRequest::Playlist(PlaylistRequest::Load) => chooser
+            .open_playlist_file_blocking(None)
+            .map_err(|error| format!("cannot open playlist file chooser: {error}"))
+            .map(|result| match result {
+                DialogResult::Selected(path) => Some(Completion::PlaylistToLoad(path)),
+                DialogResult::Cancelled => None,
+            }),
+        MenuRequest::Playlist(PlaylistRequest::Save) => chooser
+            .save_playlist_file_blocking("playlist.m3u", None)
+            .map_err(|error| format!("cannot open playlist save dialog: {error}"))
+            .map(|result| match result {
+                DialogResult::Selected(path) => Some(Completion::PlaylistToSave(path)),
+                DialogResult::Cancelled => None,
+            }),
         _ => Ok(None),
     }
 }

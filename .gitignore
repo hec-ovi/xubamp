@@ -8,3 +8,5 @@ Cargo.lock.bak
 # Docker dev-build caches (cargo registry + target); never committed.
 /.docker/
 .research/
+# Local agent resume state; never part of a source archive.
+/session

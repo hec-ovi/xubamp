@@ -1,0 +1,18 @@
+[package]
+name = "xubamp-portal"
+description = "XDG desktop portal file chooser integration for xubamp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# FileChooser request setup is deceptively subtle: the Response signal must be subscribed before
+# the method call to avoid losing an immediate response. ashpd implements that protocol and keeps
+# this crate independent of a GUI toolkit. Only the async-io runtime and FileChooser bindings are
+# enabled; GTK, PipeWire, screencast, and all unrelated portals remain out of the build.
+ashpd = { version = "0.13.12", default-features = false, features = ["async-io", "file_chooser"] }
+async-io = "2.6"
+xubamp-library = { path = "../library" }

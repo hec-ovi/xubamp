@@ -6,6 +6,8 @@
 //! into the shm buffer. This layer needs a live compositor, so it is verified by running
 //! on Ubuntu 26.04 rather than by unit tests.
 
+mod panes;
+
 use std::error::Error;
 use std::time::{Duration, Instant};
 
@@ -14,11 +16,10 @@ use smithay_client_toolkit::reexports::calloop::{
     EventLoop,
 };
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
-use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
-    delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    delegate_shm, delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -32,15 +33,16 @@ use smithay_client_toolkit::{
     shell::{
         xdg::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
-            XdgShell,
+            XdgShell, XdgSurface,
         },
         WaylandSurface,
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
+    subcompositor::SubcompositorState,
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
     Connection, QueueHandle,
 };
 use xubamp_render::vis::{VisMode, FFT_N};
@@ -86,21 +88,40 @@ type SampleSource = Box<dyn FnMut(&mut [f32])>;
 /// playlist window follows track changes. The window layer keeps selection/scroll itself.
 type PlaylistSource = Box<dyn FnMut() -> (Vec<pledit::Row>, Option<usize>)>;
 
-/// The secondary playlist (PLEDIT) window's Wayland resources. Held in an `Option` on [`App`]: `None`
-/// means closed, and dropping it destroys the `xdg_toplevel` (SCTK has no hide/unmap). The playlist
-/// content and selection/scroll live in `App::playlist_state`, so a close/reopen loses nothing.
-struct PlaylistWin {
-    window: Window,
-    pool: SlotPool,
-    fb: Framebuffer,
-    configured: bool,
-    /// Current window size in px (at least the default). Grown by dragging the bottom-right grip; the
-    /// compositor drives the change via `configure` events, and the tiled frame is recomposed to
-    /// match whatever size it hands us.
+#[derive(Clone, Copy, Debug)]
+struct PaneDrag {
+    /// Pointer position in parent-surface coordinates when the press began.
+    press: panes::Point,
+    /// Pane position when the press began.
+    origin: panes::Point,
+    moved: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PaneResize {
+    /// Pointer position in parent-surface coordinates when the press began.
+    press: panes::Point,
     width: i32,
     height: i32,
-    /// A title-bar press deferred into a compositor move (same threshold as the main window).
-    armed_move: Option<(i32, i32, u32)>,
+}
+
+/// The playlist is a child surface of the main `xdg_toplevel`, not another toplevel. Wayland lets a
+/// client position subsurfaces, so this preserves classic edge snapping and makes the panes travel
+/// together when Mutter moves the main window. Content and selection live in `App::playlist_state`,
+/// so close/reopen loses nothing.
+struct PlaylistWin {
+    subsurface: wl_subsurface::WlSubsurface,
+    surface: wl_surface::WlSurface,
+    pool: SlotPool,
+    fb: Framebuffer,
+    /// Position relative to the main surface. Subsurfaces may extend outside their parent and keep
+    /// receiving pointer input there.
+    position: panes::Point,
+    /// Current pane size in px (at least the classic minimum).
+    width: i32,
+    height: i32,
+    drag: Option<PaneDrag>,
+    resize: Option<PaneResize>,
     /// The last bare title-bar click, for double-click windowshade toggling. Button clicks and moves
     /// do not participate.
     title_last_click: Option<Instant>,
@@ -146,27 +167,8 @@ impl JumpWin {
     }
 }
 
-/// Apply the playlist's mode-specific size contract. Expanded mode has the classic minimum and no
-/// maximum. Windowshade mode is fixed at 14px high while its width remains resizable.
-fn set_playlist_constraints(window: &Window, shaded: bool) {
-    if shaded {
-        window.set_min_size(Some((
-            xubamp_skin::sprites::PLEDIT_W as u32,
-            xubamp_skin::sprites::PLEDIT_SHADE_H as u32,
-        )));
-        // A zero width means "unspecified" in xdg_toplevel, so only height is capped.
-        window.set_max_size(Some((0, xubamp_skin::sprites::PLEDIT_SHADE_H as u32)));
-    } else {
-        window.set_min_size(Some((
-            xubamp_skin::sprites::PLEDIT_W as u32,
-            xubamp_skin::sprites::PLEDIT_H as u32,
-        )));
-        window.set_max_size(None);
-    }
-}
-
-/// Resolve a compositor suggestion into the actual playlist buffer size and the remembered
-/// expanded size. While shaded, only width updates; restoring recovers the pre-shade height.
+/// Resolve a requested playlist size into the actual buffer size and the remembered expanded size.
+/// While shaded, only width updates; restoring recovers the pre-shade height.
 fn playlist_configured_size(
     shaded: bool,
     expanded: (i32, i32),
@@ -213,6 +215,8 @@ pub fn run(
     let qh = event_queue.handle();
 
     let compositor = CompositorState::bind(&globals, &qh)?;
+    let subcompositor =
+        SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)?;
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
 
@@ -231,6 +235,9 @@ pub fn run(
     // Classic main window is a fixed size.
     window.set_min_size(Some((w, h)));
     window.set_max_size(Some((w, h)));
+    // Child panes extend outside the root surface. Keep the xdg window geometry pinned to the main
+    // pane so their bounding box does not change Mutter's placement or resize calculations.
+    window.set_window_geometry(0, 0, w, h);
     window.commit();
 
     let pool = SlotPool::new(w as usize * h as usize * 4, &shm)?;
@@ -254,6 +261,8 @@ pub fn run(
         output_state: OutputState::new(&globals, &qh),
         seat_state: SeatState::new(&globals, &qh),
         compositor,
+        subcompositor,
+        #[cfg(feature = "keyboard")]
         xdg_shell,
         shm,
         pool,
@@ -270,6 +279,10 @@ pub fn run(
             xubamp_skin::sprites::PLEDIT_W,
             xubamp_skin::sprites::PLEDIT_H,
         ),
+        pl_position: panes::Point {
+            x: 0,
+            y: xubamp_skin::sprites::MAIN_H,
+        },
         jump_win: None,
         jump_state: jump::JumpState::default(),
         playlist_source: Box::new(playlist_source),
@@ -343,7 +356,10 @@ struct App {
     last_marquee: Instant,
     /// The compositor, kept so a cursor surface can be created when the pointer is set up.
     compositor: CompositorState,
-    /// The xdg shell, kept alive so the playlist window (a second toplevel) can be created on demand.
+    /// Positions the playlist and equalizer as child panes of the main toplevel.
+    subcompositor: SubcompositorState,
+    /// The xdg shell, kept alive so standalone dialogs can be created on demand.
+    #[cfg(feature = "keyboard")]
     xdg_shell: XdgShell,
     /// The pointer, once the seat reports the capability. A themed pointer so we can set a proper
     /// arrow cursor on enter (without it the window inherits whatever cursor was last active).
@@ -384,13 +400,14 @@ struct App {
     /// Whether playback is stopped (vs paused), from the last poll. Stop settles the visualizer to
     /// baseline; a pause freezes it on its last frame.
     stopped: bool,
-    /// The secondary playlist window (PLEDIT), or `None` when closed.
+    /// The secondary playlist pane (PLEDIT), or `None` when closed.
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
     playlist_state: pledit::PlState,
-    /// The playlist window's last size, remembered so reopening it restores the size (its on-screen
-    /// position cannot be restored: Wayland does not let a client set its toplevel's position).
+    /// The playlist pane's last expanded size, remembered across shade and close/reopen.
     pl_size: (i32, i32),
+    /// Last child-surface position, remembered across close/reopen.
+    pl_position: panes::Point,
     /// The "Jump to file" dialog window, or `None` when closed.
     jump_win: Option<JumpWin>,
     /// The jump dialog's search query, track list, and result selection.
@@ -454,15 +471,49 @@ impl App {
     /// and immediately attach a matching buffer. Size hints do not require the compositor to send a
     /// new configure, so waiting for one can leave the old-size surface visible indefinitely.
     fn toggle_shade(&mut self) {
+        let old_h = if self.state.shade {
+            xubamp_skin::sprites::MAIN_SHADE_H
+        } else {
+            xubamp_skin::sprites::MAIN_H
+        };
         self.state.shade = !self.state.shade;
         let w = xubamp_skin::sprites::MAIN_W as u32;
         let h = if self.state.shade {
             xubamp_skin::sprites::MAIN_SHADE_H
         } else {
             xubamp_skin::sprites::MAIN_H
-        } as u32;
+        };
+
+        // Preserve a playlist attached to the main pane's bottom edge or aligned bottom edge. The
+        // position is updated even while closed so reopening after a shade toggle stays docked.
+        let visible_playlist_h = if self.playlist_state.shade {
+            xubamp_skin::sprites::PLEDIT_SHADE_H
+        } else {
+            self.pl_size.1
+        };
+        let old_main = panes::Rect {
+            x: 0,
+            y: 0,
+            width: xubamp_skin::sprites::MAIN_W,
+            height: old_h,
+        };
+        let new_main = panes::Rect {
+            height: h,
+            ..old_main
+        };
+        let playlist_rect = panes::Rect::at(self.pl_position, self.pl_size.0, visible_playlist_h);
+        self.pl_position = panes::preserve_resize_attachment(playlist_rect, old_main, new_main);
+        if let Some(playlist) = &mut self.playlist {
+            playlist.position = self.pl_position;
+            playlist
+                .subsurface
+                .set_position(self.pl_position.x, self.pl_position.y);
+        }
+
+        let h = h as u32;
         self.window.set_min_size(Some((w, h)));
         self.window.set_max_size(Some((w, h)));
+        self.window.set_window_geometry(0, 0, w, h);
         self.window.commit();
         if self.configured {
             self.redraw();
@@ -619,7 +670,7 @@ impl App {
         surface.commit();
     }
 
-    /// Whether `surface` is one of our windows (the main window or the playlist window). Used only by
+    /// Whether `surface` is one of our panes or dialogs. Used only by
     /// the keyboard-focus handlers, so it is gated with them.
     #[cfg(feature = "keyboard")]
     fn is_our_surface(&self, surface: &wl_surface::WlSurface) -> bool {
@@ -627,51 +678,57 @@ impl App {
             || self
                 .playlist
                 .as_ref()
-                .is_some_and(|pl| surface == pl.window.wl_surface())
+                .is_some_and(|pl| surface == &pl.surface)
             || self
                 .jump_win
                 .as_ref()
                 .is_some_and(|j| surface == j.window.wl_surface())
     }
 
-    /// Open the playlist window (a second toplevel) if it is not already open, and light the PL
-    /// button on the main window. No-op if already open.
+    /// Open the playlist child pane if it is not already open, and light the PL button on the main
+    /// window. No-op if already open.
     fn open_playlist(&mut self) {
         if self.playlist.is_some() {
             return;
         }
-        // Reopen at the remembered expanded width; a shaded playlist keeps that width but maps only
-        // its 14px strip. Position cannot be restored on Wayland.
+        // Reopen at the remembered position and expanded width; a shaded playlist keeps that width
+        // but maps only its 14px strip.
         let ((w, h), _) =
             playlist_configured_size(self.playlist_state.shade, self.pl_size, (None, None));
         let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
-        let surface = self.compositor.create_surface(&self.qh);
-        let window =
-            self.xdg_shell
-                .create_window(surface, WindowDecorations::RequestClient, &self.qh);
-        window.set_title("xubamp playlist");
-        window.set_app_id("xubamp");
-        set_playlist_constraints(&window, self.playlist_state.shade);
-        window.commit();
+        let (subsurface, surface) = self
+            .subcompositor
+            .create_subsurface(self.window.wl_surface().clone(), &self.qh);
+        subsurface.set_position(self.pl_position.x, self.pl_position.y);
+        // The playlist is static and can publish independently of the visualizer-driven parent.
+        subsurface.set_desync();
+        // A subsurface position is parent state and takes effect on the parent's next commit.
+        self.window.wl_surface().commit();
         let pool = SlotPool::new(w as usize * h as usize * 4, &self.shm).expect("playlist pool");
         self.playlist = Some(PlaylistWin {
-            window,
+            subsurface,
+            surface,
             pool,
             fb,
-            configured: false,
+            position: self.pl_position,
             width: w,
             height: h,
-            armed_move: None,
+            drag: None,
+            resize: None,
             title_last_click: None,
             grip_hover: false,
         });
         self.state.pl_open = true;
         self.redraw(); // relight the PL button on the main window
+        self.redraw_playlist();
     }
 
-    /// Close the playlist window (drops it, destroying the toplevel) and dim the PL button.
+    /// Close the playlist pane and dim the PL button.
     fn close_playlist(&mut self) {
-        self.playlist = None;
+        if let Some(playlist) = self.playlist.take() {
+            playlist.subsurface.destroy();
+            playlist.surface.destroy();
+        }
         self.playlist_state.pressed_title = None;
         self.state.pl_open = false;
         self.redraw();
@@ -685,9 +742,8 @@ impl App {
         }
     }
 
-    /// Toggle the playlist's own windowshade without losing its expanded resize. The compositor is
-    /// given matching constraints, then a matching buffer immediately, because changing hints alone
-    /// does not guarantee another configure event.
+    /// Toggle the playlist's own windowshade without losing its expanded resize. The child surface
+    /// is resized immediately, independent of compositor configure events.
     fn toggle_playlist_shade(&mut self) {
         if self.playlist.is_none() {
             return;
@@ -697,26 +753,25 @@ impl App {
         let ((w, h), expanded) =
             playlist_configured_size(self.playlist_state.shade, self.pl_size, (None, None));
         self.pl_size = expanded;
+
         if let Some(pl) = &mut self.playlist {
             pl.width = w;
             pl.height = h;
-            pl.armed_move = None;
+            pl.position = self.pl_position;
+            pl.drag = None;
+            pl.resize = None;
             pl.title_last_click = None;
             pl.grip_hover = false;
-            set_playlist_constraints(&pl.window, self.playlist_state.shade);
-            pl.window.commit();
+            pl.subsurface
+                .set_position(self.pl_position.x, self.pl_position.y);
+            self.window.wl_surface().commit();
         }
         self.redraw_playlist();
     }
 
-    /// Recompose and present the playlist window from `playlist_state`, if it is open and mapped.
+    /// Recompose and present the playlist pane from `playlist_state`, if it is open.
     fn redraw_playlist(&mut self) {
-        let Some((w, h)) = self
-            .playlist
-            .as_ref()
-            .filter(|pl| pl.configured)
-            .map(|pl| (pl.width, pl.height))
-        else {
+        let Some((w, h)) = self.playlist.as_ref().map(|pl| (pl.width, pl.height)) else {
             return;
         };
         let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
@@ -734,7 +789,7 @@ impl App {
                     let _ = pointer.set_cursor(conn, CursorIcon::Default);
                 }
             }
-            PointerEventKind::Press { button, serial, .. } if *button == BTN_LEFT => {
+            PointerEventKind::Press { button, .. } if *button == BTN_LEFT => {
                 let Some((width, height)) = self.playlist.as_ref().map(|pl| (pl.width, pl.height))
                 else {
                     return;
@@ -743,23 +798,27 @@ impl App {
                     pledit::Region::TitleButton(button) => {
                         self.playlist_state.pressed_title = Some(button);
                         if let Some(pl) = &mut self.playlist {
-                            pl.armed_move = None;
+                            pl.drag = None;
+                            pl.resize = None;
                             pl.title_last_click = None;
                         }
                         self.redraw_playlist();
                     }
                     pledit::Region::Resize => {
-                        // Windowshade remains width-resizable; expanded mode uses the bottom-right
-                        // grip. The compositor reports the result through configure.
-                        if let Some(pl) = &self.playlist {
-                            let edge = if self.playlist_state.shade {
-                                ResizeEdge::Right
-                            } else {
-                                ResizeEdge::BottomRight
-                            };
-                            if let Some(seat) = &self.seat {
-                                pl.window.resize(seat, *serial, edge);
-                            }
+                        // Child panes are client-positioned. Record the pointer in parent-surface
+                        // coordinates so resizing remains stable while motion is reported relative
+                        // to this child surface.
+                        if let Some(pl) = &mut self.playlist {
+                            pl.resize = Some(PaneResize {
+                                press: panes::Point {
+                                    x: pl.position.x + x,
+                                    y: pl.position.y + y,
+                                },
+                                width: pl.width,
+                                height: pl.height,
+                            });
+                            pl.drag = None;
+                            pl.title_last_click = None;
                         }
                     }
                     pledit::Region::TitleBar => {
@@ -772,12 +831,21 @@ impl App {
                         if double {
                             if let Some(pl) = &mut self.playlist {
                                 pl.title_last_click = None;
-                                pl.armed_move = None;
+                                pl.drag = None;
+                                pl.resize = None;
                             }
                             self.toggle_playlist_shade();
                         } else if let Some(pl) = &mut self.playlist {
                             pl.title_last_click = Some(now);
-                            pl.armed_move = Some((x, y, *serial));
+                            pl.drag = Some(PaneDrag {
+                                press: panes::Point {
+                                    x: pl.position.x + x,
+                                    y: pl.position.y + y,
+                                },
+                                origin: pl.position,
+                                moved: false,
+                            });
+                            pl.resize = None;
                         }
                     }
                     pledit::Region::Body => self.playlist_press_row(x, y),
@@ -805,6 +873,74 @@ impl App {
                 }
             }
             PointerEventKind::Motion { .. } => {
+                let drag_snapshot = self
+                    .playlist
+                    .as_ref()
+                    .and_then(|pl| pl.drag.map(|drag| (drag, pl.position, pl.width, pl.height)));
+                if let Some((mut drag, current, width, height)) = drag_snapshot {
+                    let pointer = panes::Point {
+                        x: current.x + x,
+                        y: current.y + y,
+                    };
+                    let dx = pointer.x - drag.press.x;
+                    let dy = pointer.y - drag.press.y;
+                    if drag.moved || hit::exceeds_move_threshold(dx, dy) {
+                        drag.moved = true;
+                        let proposed = panes::Rect {
+                            x: drag.origin.x + dx,
+                            y: drag.origin.y + dy,
+                            width,
+                            height,
+                        };
+                        let main = panes::Rect {
+                            x: 0,
+                            y: 0,
+                            width: xubamp_skin::sprites::MAIN_W,
+                            height: if self.state.shade {
+                                xubamp_skin::sprites::MAIN_SHADE_H
+                            } else {
+                                xubamp_skin::sprites::MAIN_H
+                            },
+                        };
+                        let position = panes::snap_to_many(proposed, &[main]);
+                        self.pl_position = position;
+                        if let Some(pl) = &mut self.playlist {
+                            pl.position = position;
+                            pl.drag = Some(drag);
+                            pl.title_last_click = None;
+                            pl.subsurface.set_position(position.x, position.y);
+                        }
+                        // Subsurface positions are latched by a parent commit.
+                        self.window.wl_surface().commit();
+                    }
+                    return;
+                }
+
+                let resize_snapshot = self.playlist.as_ref().and_then(|pl| {
+                    pl.resize
+                        .map(|resize| (resize, pl.position, pl.width, pl.height))
+                });
+                if let Some((resize, position, _, _)) = resize_snapshot {
+                    let pointer = panes::Point {
+                        x: position.x + x,
+                        y: position.y + y,
+                    };
+                    let requested_w = resize.width + pointer.x - resize.press.x;
+                    let requested_h = resize.height + pointer.y - resize.press.y;
+                    let ((width, height), expanded) = playlist_configured_size(
+                        self.playlist_state.shade,
+                        self.pl_size,
+                        (Some(requested_w), Some(requested_h)),
+                    );
+                    self.pl_size = expanded;
+                    if let Some(pl) = &mut self.playlist {
+                        pl.width = width;
+                        pl.height = height;
+                    }
+                    self.redraw_playlist();
+                    return;
+                }
+
                 let over_grip = self.playlist.as_ref().is_some_and(|pl| {
                     pledit::region_at(&self.playlist_state, pl.width, pl.height, x, y)
                         == pledit::Region::Resize
@@ -830,22 +966,11 @@ impl App {
                         pl.grip_hover = over_grip;
                     }
                 }
-                let start = self
-                    .playlist
-                    .as_ref()
-                    .and_then(|pl| pl.armed_move)
-                    .filter(|&(px, py, _)| hit::exceeds_move_threshold(x - px, y - py));
-                if let Some((_, _, serial)) = start {
-                    if let (Some(seat), Some(pl)) = (self.seat.clone(), self.playlist.as_mut()) {
-                        pl.window.move_(&seat, serial);
-                        pl.armed_move = None;
-                        pl.title_last_click = None;
-                    }
-                }
             }
             PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
                 if let Some(pl) = &mut self.playlist {
-                    pl.armed_move = None;
+                    pl.drag = None;
+                    pl.resize = None;
                 }
                 let Some(pressed) = self.playlist_state.pressed_title.take() else {
                     return;
@@ -866,9 +991,12 @@ impl App {
             PointerEventKind::Leave { .. } => {
                 let redraw = self.playlist_state.pressed_title.take().is_some();
                 if let Some(pl) = &mut self.playlist {
-                    pl.armed_move = None;
-                    pl.title_last_click = None;
                     pl.grip_hover = false;
+                    // During the implicit button grab, moving the subsurface may cause an enter or
+                    // leave transition. Keep the active drag/resize alive until button release.
+                    if pl.drag.is_none() && pl.resize.is_none() {
+                        pl.title_last_click = None;
+                    }
                 }
                 if redraw {
                     self.redraw_playlist();
@@ -1075,7 +1203,7 @@ impl App {
 }
 
 impl PlaylistWin {
-    /// Upload `self.fb` to the window's shm buffer and commit. No frame callback: the playlist is
+    /// Upload `self.fb` to the child surface's shm buffer and commit. No frame callback: playlist is
     /// static (redrawn only on interaction / track change), so it does not drive an animation loop.
     fn present(&mut self) {
         let (w, h) = (self.fb.width, self.fb.height);
@@ -1090,10 +1218,9 @@ impl PlaylistWin {
             dst[2] = src[0];
             dst[3] = src[3];
         }
-        let surface = self.window.wl_surface();
-        surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(surface).expect("attach buffer");
-        surface.commit();
+        self.surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer.attach_to(&self.surface).expect("attach buffer");
+        self.surface.commit();
     }
 }
 
@@ -1146,13 +1273,12 @@ impl CompositorHandler for App {
 
 impl WindowHandler for App {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
-        // Closing the main window quits; closing a secondary window just drops it.
+        // Closing the main window quits; closing the standalone jump dialog drops only it. Child
+        // panes close through their own rendered buttons and never receive xdg close requests.
         if *window == self.window {
             self.exit = true;
         } else if self.jump_win.as_ref().is_some_and(|j| *window == j.window) {
             self.close_jump();
-        } else {
-            self.close_playlist();
         }
     }
     fn configure(
@@ -1160,7 +1286,7 @@ impl WindowHandler for App {
         _: &Connection,
         _: &QueueHandle<Self>,
         window: &Window,
-        configure: WindowConfigure,
+        _configure: WindowConfigure,
         _: u32,
     ) {
         if *window == self.window {
@@ -1168,27 +1294,6 @@ impl WindowHandler for App {
             // Initial configure maps the surface. Later configures reassert the framebuffer that
             // matches current shade state; toggles already attach it immediately.
             self.redraw();
-        } else if self
-            .playlist
-            .as_ref()
-            .is_some_and(|pl| *window == pl.window)
-        {
-            // A shaded playlist accepts only the suggested width and stays exactly 14px tall; its
-            // remembered expanded height is untouched. Expanded mode accepts both dimensions and
-            // clamps them to the classic minimum.
-            let suggested = (
-                configure.new_size.0.map(|w| w.get() as i32),
-                configure.new_size.1.map(|h| h.get() as i32),
-            );
-            let ((w, h), expanded) =
-                playlist_configured_size(self.playlist_state.shade, self.pl_size, suggested);
-            self.pl_size = expanded;
-            if let Some(pl) = &mut self.playlist {
-                pl.width = w;
-                pl.height = h;
-                pl.configured = true;
-            }
-            self.redraw_playlist();
         } else if self.jump_win.as_ref().is_some_and(|j| *window == j.window) {
             if let Some(j) = &mut self.jump_win {
                 j.configured = true;
@@ -1295,7 +1400,7 @@ impl PointerHandler for App {
                 && self
                     .playlist
                     .as_ref()
-                    .is_some_and(|pl| event.surface == *pl.window.wl_surface());
+                    .is_some_and(|pl| event.surface == pl.surface);
             if on_playlist {
                 self.playlist_pointer(conn, &event.kind, x, y);
                 continue;
@@ -1566,6 +1671,7 @@ delegate_pointer!(App);
 #[cfg(feature = "keyboard")]
 delegate_keyboard!(App);
 delegate_shm!(App);
+delegate_subcompositor!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);
 delegate_registry!(App);

@@ -98,6 +98,8 @@ type EqualizerSink = Box<dyn FnMut(equalizer::Command)>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuRequest {
     Action(menu::ClassicMenuAction),
+    /// Main/playlist Eject and Play-on-empty use the file chooser's replace-and-play behavior.
+    OpenMedia,
     SaveEqualizer(equalizer::Preset),
 }
 

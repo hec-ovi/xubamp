@@ -217,6 +217,18 @@ fn classic_equalizer_presets() -> Vec<xubamp_render::equalizer::Preset> {
         .collect()
 }
 
+fn dispatch_portal_request(launcher: &portal_actions::Launcher, request: xubamp_wl::MenuRequest) {
+    match launcher.launch(request.clone()) {
+        portal_actions::LaunchResult::Started => {}
+        portal_actions::LaunchResult::Busy => {
+            eprintln!("xubamp: a file chooser is already open")
+        }
+        portal_actions::LaunchResult::Unsupported => {
+            eprintln!("xubamp: menu action pending integration: {request:?}")
+        }
+    }
+}
+
 /// A primitive engine operation. Transport commands (Play/Pause/Stop) map to a short sequence of
 /// these; keeping the mapping pure (independent of the live engine) lets the play/pause/stop policy
 /// be unit-tested on the host without PipeWire. Only compiled with `audio` (where it is used) or
@@ -359,11 +371,29 @@ fn main() {
             let player = Rc::clone(&player);
             let settings = Rc::clone(&settings);
             let settings_path = settings_path.clone();
+            let portal_launcher = portal_launcher.clone();
             move |command: xubamp_render::hit::Command| {
                 use xubamp_render::hit::Command;
                 let mut player = player.borrow_mut();
                 match command {
-                    Command::Transport(t) => player.transport(t),
+                    Command::Transport(t) => {
+                        let opens_media = matches!(t, xubamp_render::hit::Transport::Eject)
+                            || (player.is_empty()
+                                && matches!(
+                                    t,
+                                    xubamp_render::hit::Transport::Play
+                                        | xubamp_render::hit::Transport::Pause
+                                ));
+                        if opens_media {
+                            drop(player);
+                            dispatch_portal_request(
+                                &portal_launcher,
+                                xubamp_wl::MenuRequest::OpenMedia,
+                            );
+                        } else {
+                            player.transport(t);
+                        }
+                    }
                     Command::Volume(v) => player.set_volume(v),
                     Command::Balance(b) => player.set_balance(b),
                     Command::Seek(fraction) => player.seek_fraction(fraction),
@@ -432,14 +462,8 @@ fn main() {
         };
         let on_menu = {
             let portal_launcher = portal_launcher.clone();
-            move |request: xubamp_wl::MenuRequest| match portal_launcher.launch(request.clone()) {
-                portal_actions::LaunchResult::Started => {}
-                portal_actions::LaunchResult::Busy => {
-                    eprintln!("xubamp: a file chooser is already open")
-                }
-                portal_actions::LaunchResult::Unsupported => {
-                    eprintln!("xubamp: menu action pending integration: {request:?}")
-                }
+            move |request: xubamp_wl::MenuRequest| {
+                dispatch_portal_request(&portal_launcher, request);
             }
         };
         let playback_source = {
@@ -471,6 +495,14 @@ fn main() {
                             }
                             let count = player.borrow_mut().append_paths(paths).len();
                             eprintln!("xubamp: added {count} audio file(s) to the playlist");
+                        }
+                        portal_actions::Completion::OpenPaths(paths) => {
+                            let mut player = player.borrow_mut();
+                            let count = player.replace_paths(paths);
+                            if count > 0 {
+                                player.start();
+                                eprintln!("xubamp: opened {count} audio file(s)");
+                            }
                         }
                         portal_actions::Completion::EqualizerPreset(preset) => {
                             events.push(xubamp_wl::ExternalEvent::EqualizerPreset(preset))
@@ -527,21 +559,26 @@ fn main() {
         }
         let (portal_launcher, mut portal_receiver) =
             portal_actions::bridge(settings.library.recurse);
-        let on_command =
-            |command: xubamp_render::hit::Command| eprintln!("xubamp: command {command:?}");
+        let on_command = {
+            let portal_launcher = portal_launcher.clone();
+            move |command: xubamp_render::hit::Command| {
+                use xubamp_render::hit::{Command, Transport};
+                if matches!(
+                    command,
+                    Command::Transport(Transport::Play | Transport::Pause | Transport::Eject)
+                ) {
+                    dispatch_portal_request(&portal_launcher, xubamp_wl::MenuRequest::OpenMedia);
+                } else {
+                    eprintln!("xubamp: command {command:?}");
+                }
+            }
+        };
         let on_equalizer = |command: xubamp_render::equalizer::Command| {
             eprintln!("xubamp: equalizer command {command:?}")
         };
-        let on_menu =
-            move |request: xubamp_wl::MenuRequest| match portal_launcher.launch(request.clone()) {
-                portal_actions::LaunchResult::Started => {}
-                portal_actions::LaunchResult::Busy => {
-                    eprintln!("xubamp: a file chooser is already open")
-                }
-                portal_actions::LaunchResult::Unsupported => {
-                    eprintln!("xubamp: menu action pending integration: {request:?}")
-                }
-            };
+        let on_menu = move |request: xubamp_wl::MenuRequest| {
+            dispatch_portal_request(&portal_launcher, request);
+        };
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
@@ -559,6 +596,12 @@ fn main() {
                         }
                         eprintln!(
                             "xubamp: built without audio; {} selected file(s) were not added",
+                            paths.len()
+                        );
+                    }
+                    portal_actions::Completion::OpenPaths(paths) => {
+                        eprintln!(
+                            "xubamp: built without audio; {} opened file(s) were not played",
                             paths.len()
                         );
                     }

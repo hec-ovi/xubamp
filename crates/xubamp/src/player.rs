@@ -91,6 +91,31 @@ impl Player {
             .extend(paths.into_iter().filter(|path| is_audio_path(path)))
     }
 
+    /// Replace the playlist with supported local audio paths, preserving player-wide modes,
+    /// volume, balance, and equalizer settings. The accepted first entry becomes current but is not
+    /// decoded until [`Self::start`], allowing a cancelled or invalid picker result to leave the
+    /// existing playlist untouched.
+    pub fn replace_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> usize {
+        let accepted: Vec<_> = paths
+            .into_iter()
+            .filter(|path| is_audio_path(path))
+            .collect();
+        if accepted.is_empty() {
+            return 0;
+        }
+        let repeat = self.playlist.repeat();
+        self.engine = None;
+        self.playlist = Playlist::new(accepted);
+        self.playlist.set_repeat(repeat);
+        self.shuffle_cycle.anchor(&self.playlist);
+        self.stopped = true;
+        self.playlist.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.playlist.is_empty()
+    }
+
     /// Start playing the current track (called once at startup). No-op on an empty playlist.
     pub fn start(&mut self) {
         let Some(current) = self.playlist.current_id() else {
@@ -174,7 +199,7 @@ impl Player {
 
     /// Carry out a transport command. Play/Pause/Stop go through the shared [`transport_ops`] policy
     /// applied to the current engine; Prev/Next move through the playlist (loading a new track);
-    /// Eject awaits the file dialog.
+    /// Eject is intercepted by the application layer to open the desktop file chooser.
     pub fn transport(&mut self, t: Transport) {
         match t {
             Transport::Prev => {
@@ -185,7 +210,7 @@ impl Player {
                 let active = self.navigation_autoplays();
                 self.advance(active);
             }
-            Transport::Eject => eprintln!("xubamp: Eject (load file) not implemented yet"),
+            Transport::Eject => {}
             Transport::Play | Transport::Pause | Transport::Stop => {
                 // Stop clears the visualizer (a reset); Play/Pause do not.
                 let was_stopped = self.stopped;
@@ -794,6 +819,51 @@ mod tests {
             pending.len(),
             "playlist edits do not duplicate a pending shuffle member"
         );
+    }
+
+    #[test]
+    fn replace_paths_is_transactional_and_preserves_player_wide_settings() {
+        let equalizer = EqSettings {
+            enabled: false,
+            preamp_db: 5.0,
+            bands_db: [1.0; 10],
+        };
+        let mut player = Player::with_settings(
+            ["old-a.mp3", "old-b.wav"].map(PathBuf::from).to_vec(),
+            true,
+            true,
+            equalizer,
+        );
+        player.set_volume(37);
+        player.set_balance(-22);
+
+        assert_eq!(player.replace_paths([PathBuf::from("movie.mp4")]), 0);
+        assert_eq!(
+            player.playlist.tracks().collect::<Vec<_>>(),
+            ["old-a.mp3", "old-b.wav"].map(Path::new),
+            "an invalid picker result leaves the old playlist intact"
+        );
+
+        assert_eq!(
+            player.replace_paths([
+                PathBuf::from("new-a.WAV"),
+                PathBuf::from("notes.txt"),
+                PathBuf::from("new-b.mp3"),
+            ]),
+            2
+        );
+        assert_eq!(
+            player.playlist.tracks().collect::<Vec<_>>(),
+            ["new-a.WAV", "new-b.mp3"].map(Path::new)
+        );
+        assert_eq!(player.playlist.current_index(), Some(0));
+        assert!(player.shuffle());
+        assert!(player.repeat());
+        assert_eq!(player.equalizer_settings(), equalizer);
+        assert_eq!(player.volume, 37);
+        assert_eq!(player.balance, -22);
+        assert!(player.engine.is_none());
+        assert!(player.stopped);
     }
 
     /// Write a dependency-free 16-bit PCM stereo WAV of a 440 Hz sine, `seconds` long.

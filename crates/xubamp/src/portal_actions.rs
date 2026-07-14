@@ -19,6 +19,7 @@ pub(crate) enum Completion {
         paths: Vec<PathBuf>,
         warnings: Vec<String>,
     },
+    OpenPaths(Vec<PathBuf>),
     EqualizerPreset(equalizer::Preset),
     Saved(PathBuf),
     Error(String),
@@ -123,17 +124,26 @@ impl Drop for BusyReset {
 fn is_supported(request: &MenuRequest) -> bool {
     matches!(
         request,
-        MenuRequest::Action(
-            ClassicMenuAction::PlaylistAddDirectory
-                | ClassicMenuAction::PlaylistAddFile
-                | ClassicMenuAction::EqualizerLoadEqf
-        ) | MenuRequest::SaveEqualizer(_)
+        MenuRequest::OpenMedia
+            | MenuRequest::Action(
+                ClassicMenuAction::PlaylistAddDirectory
+                    | ClassicMenuAction::PlaylistAddFile
+                    | ClassicMenuAction::EqualizerLoadEqf
+            )
+            | MenuRequest::SaveEqualizer(_)
     )
 }
 
 fn execute(request: MenuRequest, recurse: bool) -> Result<Option<Completion>, String> {
     let chooser = FileChooser::new();
     match request {
+        MenuRequest::OpenMedia => chooser
+            .open_audio_files_blocking(None)
+            .map_err(|error| format!("cannot open audio file chooser: {error}"))
+            .map(|result| match result {
+                DialogResult::Selected(paths) => Some(Completion::OpenPaths(paths)),
+                DialogResult::Cancelled => None,
+            }),
         MenuRequest::Action(ClassicMenuAction::PlaylistAddFile) => chooser
             .open_audio_files_blocking(None)
             .map_err(|error| format!("cannot open audio file chooser: {error}"))

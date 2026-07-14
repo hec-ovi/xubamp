@@ -41,7 +41,7 @@ fn loop_px_width(title: &str) -> u32 {
 /// width, returning `true` (it moved). Otherwise pin the offset to 0 and return `false`, so the
 /// caller can slow its timer back down when nothing is animating.
 pub fn advance(state: &mut UiState) -> bool {
-    if !is_scrolling(&state.title) {
+    if !state.scroll_title || !is_scrolling(&state.title) {
         state.marquee_offset = 0;
         return false;
     }
@@ -199,6 +199,21 @@ mod tests {
         };
         assert!(!advance(&mut short), "a fitting title does not scroll");
         assert_eq!(short.marquee_offset, 0, "offset is pinned back to zero");
+    }
+
+    #[test]
+    fn advance_is_inert_and_resets_when_title_scrolling_is_disabled() {
+        let mut state = UiState {
+            title: "a".repeat(40),
+            scroll_title: false,
+            marquee_offset: 73,
+            ..Default::default()
+        };
+
+        assert!(!advance(&mut state), "disabled scrolling does not animate a long title");
+        assert_eq!(state.marquee_offset, 0, "a stale animation offset is discarded");
+        assert!(!advance(&mut state), "later timer ticks remain inert");
+        assert_eq!(state.marquee_offset, 0);
     }
 
     #[test]

@@ -147,7 +147,16 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
             Some(hit::Slider::Balance) => {
                 marquee::draw(&mut fb, text, &balance_readout(state.balance), 0);
             }
-            _ => marquee::draw(&mut fb, text, &state.title, state.marquee_offset),
+            _ => marquee::draw(
+                &mut fb,
+                text,
+                &state.title,
+                if state.scroll_title {
+                    state.marquee_offset
+                } else {
+                    0
+                },
+            ),
         }
     }
     // Volume and balance sliders: each drawn from its own sheet at the current value, with the
@@ -762,6 +771,54 @@ mod tests {
     }
 
     #[test]
+    fn disabled_title_scrolling_draws_a_long_title_from_offset_zero() {
+        // Give A and B distinct source-cell colours. At a one-glyph offset, normal scrolling puts
+        // B at the strip origin; disabling the setting must put A there even if state still carries
+        // an old offset from the preceding animated frame.
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        let mut text = solid(155, 18, [0, 0, 0, 255]);
+        for y in 0..6u32 {
+            for x in 0..5u32 {
+                let a = ((y * text.width + x) * 4) as usize;
+                text.rgba[a..a + 4].copy_from_slice(&GREEN);
+                let b = ((y * text.width + 5 + x) * 4) as usize;
+                text.rgba[b..b + 4].copy_from_slice(&BLUE);
+            }
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            text: Some(text),
+            ..Default::default()
+        };
+        let state = hit::UiState {
+            title: format!("AB{}", "A".repeat(40)),
+            marquee_offset: 5,
+            ..Default::default()
+        };
+        let (mx, my) = (sprites::MARQUEE_X as u32, sprites::MARQUEE_Y as u32);
+
+        let moving = compose_main_window(&skin, &state);
+        assert_eq!(
+            px(&moving, mx, my),
+            BLUE,
+            "saved offset normally shifts B into view"
+        );
+
+        let static_title = compose_main_window(
+            &skin,
+            &hit::UiState {
+                scroll_title: false,
+                ..state
+            },
+        );
+        assert_eq!(
+            px(&static_title, mx, my),
+            GREEN,
+            "static title ignores stale offset and begins with A"
+        );
+    }
+
+    #[test]
     fn balance_readout_matches_winamp() {
         assert_eq!(balance_readout(0), "Balance: Center");
         assert_eq!(balance_readout(-12), "Balance: 12% Left");
@@ -812,6 +869,21 @@ mod tests {
             px(&fb, mx, my),
             GREEN,
             "balance readout drawn while dragging"
+        );
+
+        // Disabling song-title scrolling must not suppress these temporary classic readouts.
+        let static_vol = hit::UiState {
+            scroll_title: false,
+            marquee_offset: 45,
+            dragging: Some(hit::Slider::Volume),
+            volume: 73,
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &static_vol);
+        assert_eq!(
+            px(&fb, mx, my),
+            GREEN,
+            "volume readout remains visible while title scrolling is disabled"
         );
     }
 

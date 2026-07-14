@@ -380,8 +380,12 @@ pub struct UiState {
     /// The song title shown in the marquee. Empty draws nothing. When it overruns the marquee
     /// width it scrolls, paced by the platform timer through [`crate::marquee::advance`].
     pub title: String,
+    /// Whether an overlong song title scrolls. Classic Winamp enables this by default. When
+    /// disabled, composition pins the title to its first character and marquee ticks stay inert.
+    pub scroll_title: bool,
     /// Horizontal scroll offset of the marquee, in pixels, wrapped over the looping title.
-    /// Only meaningful while the title scrolls; held at 0 for a title that fits.
+    /// Only meaningful while title scrolling is enabled and the title overruns the strip; held at
+    /// 0 otherwise.
     pub marquee_offset: u32,
     /// Volume level, 0..=100. Defaults to full so a fresh window matches the engine's unity gain.
     pub volume: u8,
@@ -429,6 +433,7 @@ impl Default for UiState {
             time_display: TimeDisplay::Elapsed,
             elapsed: None,
             title: String::new(),
+            scroll_title: true,
             marquee_offset: 0,
             volume: 100,
             balance: 0,
@@ -446,6 +451,18 @@ impl Default for UiState {
 }
 
 impl UiState {
+    /// Enable or disable automatic title scrolling. Disabling also discards a stale offset
+    /// immediately, so re-enabling later starts the title from its first character. Returns
+    /// whether visible state changed and a redraw is needed.
+    pub fn set_scroll_title(&mut self, enabled: bool) -> bool {
+        let changed = self.scroll_title != enabled || (!enabled && self.marquee_offset != 0);
+        self.scroll_title = enabled;
+        if !enabled {
+            self.marquee_offset = 0;
+        }
+        changed
+    }
+
     /// Whole seconds to draw in the clock, or `None` when the selected representation is not
     /// available. Remaining time needs both values and saturates at zero when an imprecise or stale
     /// playback clock briefly reports elapsed time beyond the track duration.
@@ -1038,7 +1055,39 @@ mod tests {
         assert_eq!(s.balance, 0, "centered");
         assert_eq!(s.dragging, None);
         assert_eq!(s.time_display, TimeDisplay::Elapsed);
+        assert!(s.scroll_title, "classic title scrolling starts enabled");
         assert!(!s.shade, "the window starts expanded, not collapsed");
+    }
+
+    #[test]
+    fn disabling_title_scroll_resets_a_stale_offset_immediately() {
+        let mut state = UiState {
+            title: "a long title that has already moved".to_string(),
+            marquee_offset: 42,
+            ..Default::default()
+        };
+
+        assert!(
+            state.set_scroll_title(false),
+            "setting and pixels both change"
+        );
+        assert!(!state.scroll_title);
+        assert_eq!(
+            state.marquee_offset, 0,
+            "the title snaps back without waiting for a tick"
+        );
+        assert!(
+            !state.set_scroll_title(false),
+            "reapplying an already settled setting is inert"
+        );
+        assert!(
+            state.set_scroll_title(true),
+            "re-enabling changes visible state"
+        );
+        assert_eq!(
+            state.marquee_offset, 0,
+            "re-enabled scrolling starts from the beginning"
+        );
     }
 
     #[test]

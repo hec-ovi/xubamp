@@ -11,8 +11,6 @@
 
 use std::path::{Path, PathBuf};
 
-use xubamp_skin::bmp::Image;
-use xubamp_skin::container::SkinArchive;
 use xubamp_skin::{default_skin, Skin};
 
 /// The playlist-to-engine player. Only with the audio feature (it owns the PipeWire-backed engine).
@@ -60,33 +58,8 @@ fn classify<I: IntoIterator<Item = String>>(args: I) -> (Option<String>, Vec<Str
     (skin, media)
 }
 
-fn load_skin(path: &Path) -> Skin {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| {
-        eprintln!("xubamp: cannot read {}: {e}", path.display());
-        std::process::exit(1);
-    });
-    let archive = SkinArchive::from_bytes(&bytes).unwrap_or_else(|e| {
-        eprintln!(
-            "xubamp: {} is not a readable skin archive: {e:?}",
-            path.display()
-        );
-        std::process::exit(1);
-    });
-    let skin = Skin::from_archive(&archive);
-    let dim = |img: &Option<Image>| {
-        img.as_ref()
-            .map(|i| format!("{}x{}", i.width, i.height))
-            .unwrap_or_else(|| "missing".into())
-    };
-    eprintln!(
-        "xubamp: loaded {}: {} members, main={} titlebar={} cbuttons={}",
-        path.display(),
-        archive.len(),
-        dim(&skin.main),
-        dim(&skin.titlebar),
-        dim(&skin.cbuttons),
-    );
-    skin
+fn load_skin(path: &Path) -> Result<Skin, String> {
+    portal_actions::load_skin_archive(path)
 }
 
 /// Select an archive in priority order. A missing saved archive is deliberately skipped: stale
@@ -116,18 +89,22 @@ fn resolve_skin(cli: Option<&str>, saved: Option<&Path>) -> Skin {
         );
     }
     let dev_exists = Path::new(DEV_SKIN).exists();
-    let selected = preferred_skin_path(
-        cli,
-        std::env::var_os("XUBAMP_SKIN"),
-        saved,
-        saved_exists,
-        dev_exists,
-    );
+    let environment = std::env::var_os("XUBAMP_SKIN");
+    let selected = preferred_skin_path(cli, environment.clone(), saved, saved_exists, dev_exists);
     if let Some(path) = selected {
         if path == Path::new(DEV_SKIN) {
             eprintln!("xubamp: using local dev skin {DEV_SKIN}");
         }
-        return load_skin(&path);
+        match load_skin(&path) {
+            Ok(skin) => return skin,
+            Err(error) if cli.is_some() || environment.is_some() => {
+                eprintln!("xubamp: {error}");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                eprintln!("xubamp: {error}; falling back to the built-in default skin");
+            }
+        }
     }
     eprintln!("xubamp: no skin given, using the built-in default skin");
     default_skin()
@@ -176,6 +153,20 @@ fn persist_playback_modes(
 ) -> std::io::Result<()> {
     settings.playback.shuffle = shuffle;
     settings.playback.repeat = repeat;
+    match path {
+        Some(path) => xubamp_config::save(path, settings),
+        None => Ok(()),
+    }
+}
+
+/// Save a validated live skin selection, or clear it when the authored base skin is selected.
+/// Updating memory even without an XDG config path keeps the current session coherent.
+fn persist_skin_path(
+    path: Option<&Path>,
+    settings: &mut xubamp_config::Settings,
+    skin_path: Option<PathBuf>,
+) -> std::io::Result<()> {
+    settings.skin_path = skin_path;
     match path {
         Some(path) => xubamp_config::save(path, settings),
         None => Ok(()),
@@ -462,8 +453,25 @@ fn main() {
         };
         let on_menu = {
             let portal_launcher = portal_launcher.clone();
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
             move |request: xubamp_wl::MenuRequest| {
-                dispatch_portal_request(&portal_launcher, request);
+                if matches!(
+                    request,
+                    xubamp_wl::MenuRequest::Action(
+                        xubamp_render::menu::ClassicMenuAction::UseBaseSkin
+                    )
+                ) {
+                    if let Err(error) = persist_skin_path(
+                        settings_path.as_deref(),
+                        &mut settings.borrow_mut(),
+                        None,
+                    ) {
+                        eprintln!("xubamp: cannot save base skin selection: {error}");
+                    }
+                } else {
+                    dispatch_portal_request(&portal_launcher, request);
+                }
             }
         };
         let playback_source = {
@@ -484,6 +492,8 @@ fn main() {
         };
         let external_source = {
             let player = Rc::clone(&player);
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
             move || {
                 let (completions, pending) = portal_receiver.poll();
                 let mut events = Vec::new();
@@ -510,11 +520,16 @@ fn main() {
                         portal_actions::Completion::Saved(path) => {
                             eprintln!("xubamp: saved equalizer preset to {}", path.display());
                         }
-                        portal_actions::Completion::SkinArchive(path) => {
-                            eprintln!(
-                                "xubamp: selected skin archive {}; runtime loading is pending",
-                                path.display()
-                            );
+                        portal_actions::Completion::SkinLoaded { path, skin } => {
+                            if let Err(error) = persist_skin_path(
+                                settings_path.as_deref(),
+                                &mut settings.borrow_mut(),
+                                Some(path.clone()),
+                            ) {
+                                eprintln!("xubamp: cannot save skin selection: {error}");
+                            }
+                            eprintln!("xubamp: loaded skin {}", path.display());
+                            events.push(xubamp_wl::ExternalEvent::SkinLoaded(skin));
                         }
                         portal_actions::Completion::Error(error) => {
                             eprintln!("xubamp: {error}");
@@ -560,9 +575,13 @@ fn main() {
     // Without the audio feature: no playback, commands are logged, the clock stays blank.
     #[cfg(not(feature = "audio"))]
     {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
         if !media_args.is_empty() {
             eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
         }
+        let settings = Rc::new(RefCell::new(settings));
         let (portal_launcher, mut portal_receiver) = portal_actions::bridge();
         let on_command = {
             let portal_launcher = portal_launcher.clone();
@@ -578,48 +597,77 @@ fn main() {
         let on_equalizer = |command: xubamp_render::equalizer::Command| {
             eprintln!("xubamp: equalizer command {command:?}")
         };
-        let on_menu = move |request: xubamp_wl::MenuRequest| {
-            dispatch_portal_request(&portal_launcher, request);
+        let on_menu = {
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
+            let portal_launcher = portal_launcher.clone();
+            move |request: xubamp_wl::MenuRequest| {
+                if matches!(
+                    request,
+                    xubamp_wl::MenuRequest::Action(
+                        xubamp_render::menu::ClassicMenuAction::UseBaseSkin
+                    )
+                ) {
+                    if let Err(error) = persist_skin_path(
+                        settings_path.as_deref(),
+                        &mut settings.borrow_mut(),
+                        None,
+                    ) {
+                        eprintln!("xubamp: cannot save base skin selection: {error}");
+                    }
+                } else {
+                    dispatch_portal_request(&portal_launcher, request);
+                }
+            }
         };
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
-        let external_source = move || {
-            let (completions, pending) = portal_receiver.poll();
-            let mut events = Vec::new();
-            for completion in completions {
-                match completion {
-                    portal_actions::Completion::EqualizerPreset(preset) => {
-                        events.push(xubamp_wl::ExternalEvent::EqualizerPreset(preset));
-                    }
-                    portal_actions::Completion::AddPaths { paths, warnings } => {
-                        for warning in warnings {
-                            eprintln!("xubamp: directory scan warning: {warning}");
+        let external_source = {
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
+            move || {
+                let (completions, pending) = portal_receiver.poll();
+                let mut events = Vec::new();
+                for completion in completions {
+                    match completion {
+                        portal_actions::Completion::EqualizerPreset(preset) => {
+                            events.push(xubamp_wl::ExternalEvent::EqualizerPreset(preset));
                         }
-                        eprintln!(
-                            "xubamp: built without audio; {} selected file(s) were not added",
-                            paths.len()
-                        );
+                        portal_actions::Completion::AddPaths { paths, warnings } => {
+                            for warning in warnings {
+                                eprintln!("xubamp: directory scan warning: {warning}");
+                            }
+                            eprintln!(
+                                "xubamp: built without audio; {} selected file(s) were not added",
+                                paths.len()
+                            );
+                        }
+                        portal_actions::Completion::OpenPaths(paths) => {
+                            eprintln!(
+                                "xubamp: built without audio; {} opened file(s) were not played",
+                                paths.len()
+                            );
+                        }
+                        portal_actions::Completion::Saved(path) => {
+                            eprintln!("xubamp: saved equalizer preset to {}", path.display());
+                        }
+                        portal_actions::Completion::SkinLoaded { path, skin } => {
+                            if let Err(error) = persist_skin_path(
+                                settings_path.as_deref(),
+                                &mut settings.borrow_mut(),
+                                Some(path.clone()),
+                            ) {
+                                eprintln!("xubamp: cannot save skin selection: {error}");
+                            }
+                            eprintln!("xubamp: loaded skin {}", path.display());
+                            events.push(xubamp_wl::ExternalEvent::SkinLoaded(skin));
+                        }
+                        portal_actions::Completion::Error(error) => eprintln!("xubamp: {error}"),
                     }
-                    portal_actions::Completion::OpenPaths(paths) => {
-                        eprintln!(
-                            "xubamp: built without audio; {} opened file(s) were not played",
-                            paths.len()
-                        );
-                    }
-                    portal_actions::Completion::Saved(path) => {
-                        eprintln!("xubamp: saved equalizer preset to {}", path.display());
-                    }
-                    portal_actions::Completion::SkinArchive(path) => {
-                        eprintln!(
-                            "xubamp: selected skin archive {}; runtime loading is pending",
-                            path.display()
-                        );
-                    }
-                    portal_actions::Completion::Error(error) => eprintln!("xubamp: {error}"),
                 }
+                xubamp_wl::ExternalPoll { events, pending }
             }
-            xubamp_wl::ExternalPoll { events, pending }
         };
         match xubamp_wl::run(
             skin,
@@ -638,10 +686,9 @@ fn main() {
             .with_external_source(external_source),
         ) {
             Ok(session) => {
-                let mut settings = settings;
-                apply_ui_session(&mut settings, session);
+                apply_ui_session(&mut settings.borrow_mut(), session);
                 if let Some(path) = settings_path.as_deref() {
-                    if let Err(error) = xubamp_config::save(path, &settings) {
+                    if let Err(error) = xubamp_config::save(path, &settings.borrow()) {
                         eprintln!("xubamp: cannot save settings on exit: {error}");
                     }
                 }
@@ -658,8 +705,8 @@ fn main() {
 mod tests {
     use super::{
         apply_ui_session, classic_equalizer_presets, classify, persist_playback_modes,
-        preferred_skin_path, track_title, transport_opens_media, transport_ops, EngineOp,
-        TransportState, DEV_SKIN,
+        persist_skin_path, preferred_skin_path, track_title, transport_opens_media, transport_ops,
+        EngineOp, TransportState, DEV_SKIN,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -750,6 +797,20 @@ mod tests {
         persist_playback_modes(None, &mut settings, true, false).unwrap();
         assert!(settings.playback.shuffle);
         assert!(!settings.playback.repeat);
+    }
+
+    #[test]
+    fn skin_persistence_switches_between_validated_archive_and_base() {
+        let path = temp_settings_path();
+        let mut settings = xubamp_config::Settings::default();
+        let archive = PathBuf::from("/skins/selected.wsz");
+
+        persist_skin_path(Some(&path), &mut settings, Some(archive.clone())).unwrap();
+        assert_eq!(xubamp_config::load(&path).unwrap().settings.skin_path, Some(archive));
+
+        persist_skin_path(Some(&path), &mut settings, None).unwrap();
+        assert_eq!(xubamp_config::load(&path).unwrap().settings.skin_path, None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

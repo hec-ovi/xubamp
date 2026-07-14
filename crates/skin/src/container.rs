@@ -37,7 +37,9 @@ const METHOD_DEFLATE: u16 = 8;
 /// Classic skins are normally a few megabytes with a few dozen members. These
 /// deliberately generous ceilings preserve large custom skins while bounding every
 /// attacker-controlled dimension before allocation or decompression.
-const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum compressed `.wsz`/ZIP input accepted by the parser. Callers that read from disk should
+/// stop after one byte beyond this limit so a hostile file is rejected before an unbounded read.
+pub const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 1_024;
 const MAX_MEMBER_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;

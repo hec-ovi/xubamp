@@ -7,7 +7,7 @@ use crate::viscolor::VisColor;
 
 /// Decoded skin sheets. Each is `None` when the skin omits it (the renderer then falls
 /// back to the bundled default). Sheets are added here as later phases render them.
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Skin {
     pub main: Option<Image>,
     pub titlebar: Option<Image>,
@@ -79,6 +79,52 @@ impl Skin {
                 .get("pledit.txt")
                 .map(|b| PlEdit::parse(&String::from_utf8_lossy(b))),
         }
+    }
+
+    /// Whether the archive contributed at least one decodable bitmap sheet. Text-only or wholly
+    /// malformed archives are not useful skins and should not replace a working live skin.
+    pub fn has_visual_assets(&self) -> bool {
+        self.main.is_some()
+            || self.titlebar.is_some()
+            || self.cbuttons.is_some()
+            || self.numbers.is_some()
+            || self.text.is_some()
+            || self.volume.is_some()
+            || self.balance.is_some()
+            || self.posbar.is_some()
+            || self.monoster.is_some()
+            || self.shufrep.is_some()
+            || self.eqmain.is_some()
+            || self.eq_ex.is_some()
+            || self.pledit.is_some()
+    }
+
+    /// Fill sheets and parsed resources omitted by a custom skin from an authored fallback. This
+    /// keeps every pane operable while preserving every resource the selected archive did supply.
+    pub fn with_fallback(mut self, mut fallback: Skin) -> Skin {
+        macro_rules! fill {
+            ($field:ident) => {
+                if self.$field.is_none() {
+                    self.$field = fallback.$field.take();
+                }
+            };
+        }
+        fill!(main);
+        fill!(titlebar);
+        fill!(cbuttons);
+        fill!(numbers);
+        fill!(text);
+        fill!(volume);
+        fill!(balance);
+        fill!(posbar);
+        fill!(viscolor);
+        fill!(monoster);
+        fill!(shufrep);
+        fill!(eqmain);
+        fill!(eq_ex);
+        fill!(pledit);
+        fill!(pledit_colors);
+        self
     }
 }
 
@@ -230,5 +276,36 @@ mod tests {
             "the 99-wide classic sheet"
         );
         assert_eq!(&img.rgba[0..4], &[9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn visual_asset_check_rejects_text_only_and_malformed_archives() {
+        let text_only = wsz_stored(&[("VISCOLOR.TXT", b"1,2,3\n"), ("MAIN.BMP", b"bad")]);
+        let archive = SkinArchive::from_bytes(&text_only).unwrap();
+        assert!(!Skin::from_archive(&archive).has_visual_assets());
+
+        let main = solid_bmp_24(2, 2, 1, 2, 3);
+        let with_bitmap = wsz_stored(&[("MAIN.BMP", &main)]);
+        let archive = SkinArchive::from_bytes(&with_bitmap).unwrap();
+        assert!(Skin::from_archive(&archive).has_visual_assets());
+    }
+
+    #[test]
+    fn fallback_fills_missing_resources_without_replacing_custom_ones() {
+        let custom_main = solid_bmp_24(2, 2, 1, 2, 3);
+        let fallback_main = solid_bmp_24(2, 2, 9, 9, 9);
+        let fallback_title = solid_bmp_24(2, 2, 4, 5, 6);
+        let custom_archive =
+            SkinArchive::from_bytes(&wsz_stored(&[("MAIN.BMP", &custom_main)])).unwrap();
+        let fallback_archive = SkinArchive::from_bytes(&wsz_stored(&[
+            ("MAIN.BMP", &fallback_main),
+            ("TITLEBAR.BMP", &fallback_title),
+        ]))
+        .unwrap();
+
+        let skin = Skin::from_archive(&custom_archive)
+            .with_fallback(Skin::from_archive(&fallback_archive));
+        assert_eq!(&skin.main.unwrap().rgba[..4], &[1, 2, 3, 255]);
+        assert_eq!(&skin.titlebar.unwrap().rgba[..4], &[4, 5, 6, 255]);
     }
 }

@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use xubamp_portal::{DialogResult, FileChooser};
 use xubamp_render::equalizer;
 use xubamp_render::menu::ClassicMenuAction;
+use xubamp_skin::container::{SkinArchive, MAX_ARCHIVE_BYTES};
+use xubamp_skin::{default_skin, Skin};
 use xubamp_wl::MenuRequest;
 
 #[derive(Debug)]
@@ -20,7 +22,10 @@ pub(crate) enum Completion {
         warnings: Vec<String>,
     },
     OpenPaths(Vec<PathBuf>),
-    SkinArchive(PathBuf),
+    SkinLoaded {
+        path: PathBuf,
+        skin: Box<Skin>,
+    },
     EqualizerPreset(equalizer::Preset),
     Saved(PathBuf),
     Error(String),
@@ -170,10 +175,19 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
                 }
                 DialogResult::Cancelled => None,
             }),
-        MenuRequest::Action(ClassicMenuAction::LoadSkin) => chooser
-            .open_skin_archive_blocking(None)
-            .map_err(|error| format!("cannot open skin file chooser: {error}"))
-            .map(skin_archive_completion),
+        MenuRequest::Action(ClassicMenuAction::LoadSkin) => {
+            let result = chooser
+                .open_skin_archive_blocking(None)
+                .map_err(|error| format!("cannot open skin file chooser: {error}"))?;
+            let DialogResult::Selected(path) = result else {
+                return Ok(None);
+            };
+            let skin = load_skin_archive(&path)?;
+            Ok(Some(Completion::SkinLoaded {
+                path,
+                skin: Box::new(skin),
+            }))
+        }
         MenuRequest::Action(ClassicMenuAction::EqualizerLoadEqf) => {
             let result = chooser
                 .open_eqf_file_blocking(None)
@@ -223,11 +237,23 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
     }
 }
 
-fn skin_archive_completion(result: DialogResult<PathBuf>) -> Option<Completion> {
-    match result {
-        DialogResult::Selected(path) => Some(Completion::SkinArchive(path)),
-        DialogResult::Cancelled => None,
+pub(crate) fn load_skin_archive(path: &Path) -> Result<Skin, String> {
+    let file =
+        File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_ARCHIVE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let archive = SkinArchive::from_bytes(&bytes)
+        .map_err(|error| format!("cannot load {}: {error:?}", path.display()))?;
+    let skin = Skin::from_archive(&archive);
+    if !skin.has_visual_assets() {
+        return Err(format!(
+            "cannot load {}: archive contains no decodable bitmap sheets",
+            path.display()
+        ));
     }
+    Ok(skin.with_fallback(default_skin()))
 }
 
 /// Playlist Add Directory is a one-shot recursive import. Library recursion is a separate catalog
@@ -340,15 +366,13 @@ mod tests {
     }
 
     #[test]
-    fn skin_archive_completion_preserves_selection_and_cancellation() {
-        assert!(skin_archive_completion(DialogResult::Cancelled).is_none());
-
-        let path = PathBuf::from("/tmp/Classic.wsz");
-        let completion = skin_archive_completion(DialogResult::Selected(path.clone()));
-        assert!(matches!(
-            completion,
-            Some(Completion::SkinArchive(selected)) if selected == path
-        ));
+    fn invalid_skin_archive_never_produces_a_replacement() {
+        let dir = temp_dir("invalid-skin");
+        let path = dir.join("invalid.wsz");
+        fs::write(&path, b"not a zip").unwrap();
+        let result = load_skin_archive(&path);
+        fs::remove_dir_all(dir).unwrap();
+        assert!(result.is_err());
     }
 
     #[test]

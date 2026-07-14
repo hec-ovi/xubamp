@@ -49,7 +49,7 @@ use xubamp_render::vis::{VisMode, FFT_N};
 use xubamp_render::{
     compose_main_window, equalizer, hit, jump, marquee, menu, pledit, Framebuffer,
 };
-use xubamp_skin::Skin;
+use xubamp_skin::{default_skin, Skin};
 
 // Keyboard shortcuts are gated behind the `keyboard` feature so the host build stays free of the
 // libxkbcommon build dependency (see Cargo.toml). These imports exist only when it is enabled.
@@ -109,6 +109,8 @@ type MenuSink = Box<dyn FnMut(MenuRequest)>;
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExternalEvent {
     EqualizerPreset(equalizer::Preset),
+    /// A fully decoded and fallback-completed skin produced off the Wayland event thread.
+    SkinLoaded(Box<Skin>),
 }
 
 /// Result of polling application work such as a desktop-portal dialog. `pending` keeps the poll
@@ -896,7 +898,17 @@ impl App {
                 });
                 self.redraw_equalizer();
             }
+            ExternalEvent::SkinLoaded(skin) => self.replace_skin(*skin),
         }
+    }
+
+    /// Swap every skin-backed pane as one UI-thread operation. Playback, selection, control state,
+    /// geometry, and shade state live outside `Skin`, so they survive unchanged.
+    fn replace_skin(&mut self, skin: Skin) {
+        self.skin = skin;
+        self.redraw();
+        self.redraw_equalizer();
+        self.redraw_playlist();
     }
 
     fn draw(&mut self) {
@@ -1254,6 +1266,10 @@ impl App {
             menu::ClassicMenuAction::ForwardFiveSeconds => {
                 let outcome = hit::on_key(&mut self.state, hit::KeyPress::Right, false);
                 self.apply(outcome);
+            }
+            menu::ClassicMenuAction::UseBaseSkin => {
+                self.replace_skin(default_skin());
+                (self.on_menu)(MenuRequest::Action(action));
             }
             menu::ClassicMenuAction::Exit => self.exit = true,
             menu::ClassicMenuAction::EqualizerLoadPreset(index) => {

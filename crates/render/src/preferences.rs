@@ -28,6 +28,13 @@ const CONTROL_H: i32 = 22;
 const CHECK_SIZE: i32 = 12;
 const BUTTON_W: i32 = 116;
 const ROOT_ROW_H: i32 = 20;
+const SLIDER_THUMB_W: i32 = 11;
+const SLIDER_THUMB_H: i32 = 20;
+
+/// Values matching the classic persisted shuffle morph range.
+pub const SHUFFLE_MORPH_RATE_MIN: u8 = 0;
+pub const SHUFFLE_MORPH_RATE_MAX: u8 = 50;
+pub const DEFAULT_SHUFFLE_MORPH_RATE: u8 = SHUFFLE_MORPH_RATE_MAX;
 
 const BG: [u8; 3] = [226, 226, 222];
 const FACE: [u8; 3] = [214, 214, 210];
@@ -101,7 +108,9 @@ pub enum VisualizationMode {
 /// Caller-owned values displayed and edited by the preferences window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreferencesModel {
-    pub shuffle: bool,
+    /// Shuffle is enabled from the main player. This independent value controls how much the
+    /// generated order changes between repeated cycles.
+    pub shuffle_morph_rate: u8,
     pub visualization_mode: VisualizationMode,
     pub visualization_show_peaks: bool,
     pub display_time: TimeDisplay,
@@ -117,7 +126,7 @@ pub struct PreferencesModel {
 impl Default for PreferencesModel {
     fn default() -> Self {
         Self {
-            shuffle: false,
+            shuffle_morph_rate: DEFAULT_SHUFFLE_MORPH_RATE,
             visualization_mode: VisualizationMode::Spectrum,
             visualization_show_peaks: true,
             display_time: TimeDisplay::Elapsed,
@@ -135,7 +144,7 @@ impl Default for PreferencesModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlId {
     Section(Section),
-    Shuffle,
+    ShuffleMorphRate,
     VisualizationSpectrum,
     VisualizationOscilloscope,
     VisualizationOff,
@@ -159,8 +168,18 @@ pub enum ControlRole {
     Tab,
     CheckBox,
     RadioButton,
+    Slider,
     ListItem,
     Button,
+}
+
+/// Accessible value metadata for a range control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeInfo {
+    pub value: u8,
+    pub minimum: u8,
+    pub maximum: u8,
+    pub step: u8,
 }
 
 /// Integer rectangle using inclusive top/left and exclusive bottom/right edges.
@@ -189,6 +208,8 @@ pub struct ControlInfo {
     pub selected: bool,
     /// Present only for check boxes and radio buttons.
     pub checked: Option<bool>,
+    /// Present only for sliders.
+    pub range: Option<RangeInfo>,
     pub focused: bool,
 }
 
@@ -197,7 +218,7 @@ pub struct ControlInfo {
 /// [`PreferencesState::set_skin_path`] to obtain the corresponding persisted-field command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    SetShuffle(bool),
+    SetShuffleMorphRate(u8),
     SetVisualizationMode(VisualizationMode),
     SetVisualizationShowPeaks(bool),
     SetDisplayTime(TimeDisplay),
@@ -254,6 +275,9 @@ impl Default for PreferencesState {
 
 impl PreferencesState {
     pub fn new(mut model: PreferencesModel) -> Self {
+        model.shuffle_morph_rate = model
+            .shuffle_morph_rate
+            .clamp(SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX);
         // A hand-built caller model can contain duplicate roots. Persisting duplicate scan work is
         // never useful, so canonicalize while preserving the first-seen order.
         let mut seen = HashSet::new();
@@ -339,6 +363,7 @@ impl PreferencesState {
                 enabled: true,
                 selected: section == self.section,
                 checked: None,
+                range: None,
                 focused: self.focus == ControlId::Section(section),
             });
         }
@@ -359,18 +384,33 @@ impl PreferencesState {
             enabled: true,
             selected: false,
             checked: Some(checked),
+            range: None,
             focused: self.focus == id,
         };
 
         match self.section {
             Section::Shuffle => {
-                controls.push(check(
-                    ControlId::Shuffle,
-                    "Enable shuffle",
-                    content.y + 54,
-                    self.model.shuffle,
-                    ControlRole::CheckBox,
-                ));
+                controls.push(ControlInfo {
+                    id: ControlId::ShuffleMorphRate,
+                    role: ControlRole::Slider,
+                    label: "Shuffle morph rate".into(),
+                    rect: Rect {
+                        x,
+                        y: content.y + 52,
+                        width: control_width,
+                        height: 52,
+                    },
+                    enabled: true,
+                    selected: false,
+                    checked: None,
+                    range: Some(RangeInfo {
+                        value: self.model.shuffle_morph_rate,
+                        minimum: SHUFFLE_MORPH_RATE_MIN,
+                        maximum: SHUFFLE_MORPH_RATE_MAX,
+                        step: 1,
+                    }),
+                    focused: self.focus == ControlId::ShuffleMorphRate,
+                });
             }
             Section::Visualization => {
                 controls.push(check(
@@ -458,6 +498,7 @@ impl PreferencesState {
                         enabled: true,
                         selected: self.library_selected == Some(index),
                         checked: None,
+                        range: None,
                         focused: self.focus == id,
                     });
                 }
@@ -544,11 +585,41 @@ impl PreferencesState {
         }
         self.focus = control.id;
         self.pressed = Some(control.id);
-        Outcome::Redraw
+        if control.id == ControlId::ShuffleMorphRate {
+            self.set_shuffle_morph_rate(slider_value_at_x(control.rect, x))
+        } else {
+            Outcome::Redraw
+        }
+    }
+
+    /// Update a pressed slider while the pointer is dragged. The value clamps at either end even
+    /// when the pointer moves beyond the visible track.
+    pub fn pointer_motion(&mut self, x: i32, width: i32, height: i32) -> Outcome {
+        if self.pressed != Some(ControlId::ShuffleMorphRate) {
+            return Outcome::Unchanged;
+        }
+        let Some(control) = self
+            .controls(width, height)
+            .into_iter()
+            .find(|control| control.id == ControlId::ShuffleMorphRate)
+        else {
+            return Outcome::Unchanged;
+        };
+        self.set_shuffle_morph_rate(slider_value_at_x(control.rect, x))
     }
 
     pub fn pointer_release(&mut self, x: i32, y: i32, width: i32, height: i32) -> Outcome {
         let pressed = self.pressed.take();
+        if pressed == Some(ControlId::ShuffleMorphRate) {
+            let Some(control) = self
+                .controls(width, height)
+                .into_iter()
+                .find(|control| control.id == ControlId::ShuffleMorphRate)
+            else {
+                return Outcome::Redraw;
+            };
+            return self.set_shuffle_morph_rate(slider_value_at_x(control.rect, x));
+        }
         let released = self
             .hit_test(x, y, width, height)
             .filter(|control| control.enabled)
@@ -578,6 +649,18 @@ impl PreferencesState {
             Key::Tab => self.move_tab(1, width, height),
             Key::BackTab => self.move_tab(-1, width, height),
             Key::Space | Key::Enter => self.activate(self.focus, height),
+            Key::Left | Key::Down if self.focus == ControlId::ShuffleMorphRate => {
+                self.adjust_shuffle_morph_rate(-1)
+            }
+            Key::Right | Key::Up if self.focus == ControlId::ShuffleMorphRate => {
+                self.adjust_shuffle_morph_rate(1)
+            }
+            Key::Home if self.focus == ControlId::ShuffleMorphRate => {
+                self.set_shuffle_morph_rate(SHUFFLE_MORPH_RATE_MIN)
+            }
+            Key::End if self.focus == ControlId::ShuffleMorphRate => {
+                self.set_shuffle_morph_rate(SHUFFLE_MORPH_RATE_MAX)
+            }
             Key::Up | Key::Down if matches!(self.focus, ControlId::Section(_)) => {
                 let delta = if key == Key::Up { -1 } else { 1 };
                 let next = self.section.offset(delta);
@@ -631,10 +714,7 @@ impl PreferencesState {
                 self.set_section(section);
                 Outcome::Redraw
             }
-            ControlId::Shuffle => {
-                self.model.shuffle = !self.model.shuffle;
-                Outcome::Command(Command::SetShuffle(self.model.shuffle))
-            }
+            ControlId::ShuffleMorphRate => Outcome::Redraw,
             ControlId::VisualizationSpectrum => {
                 self.set_visualization_mode(VisualizationMode::Spectrum)
             }
@@ -696,6 +776,24 @@ impl PreferencesState {
             self.model.visualization_mode = mode;
             Outcome::Command(Command::SetVisualizationMode(mode))
         }
+    }
+
+    fn set_shuffle_morph_rate(&mut self, rate: u8) -> Outcome {
+        let rate = rate.clamp(SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX);
+        if self.model.shuffle_morph_rate == rate {
+            Outcome::Redraw
+        } else {
+            self.model.shuffle_morph_rate = rate;
+            Outcome::Command(Command::SetShuffleMorphRate(rate))
+        }
+    }
+
+    fn adjust_shuffle_morph_rate(&mut self, delta: i8) -> Outcome {
+        let rate = i16::from(self.model.shuffle_morph_rate) + i16::from(delta);
+        self.set_shuffle_morph_rate(rate.clamp(
+            i16::from(SHUFFLE_MORPH_RATE_MIN),
+            i16::from(SHUFFLE_MORPH_RATE_MAX),
+        ) as u8)
     }
 
     fn set_display_time(&mut self, time: TimeDisplay) -> Outcome {
@@ -924,7 +1022,13 @@ pub fn compose(state: &PreferencesState, width: i32, height: i32) -> Framebuffer
 fn draw_page_static(fb: &mut Framebuffer, state: &PreferencesState, content: Rect) {
     match state.section {
         Section::Shuffle => {
-            draw_text(fb, content.x + 18, content.y + 34, "Playback order", DIM);
+            draw_text(
+                fb,
+                content.x + 18,
+                content.y + 34,
+                "Shuffle morph rate",
+                DIM,
+            );
         }
         Section::Visualization => {
             draw_text(
@@ -1009,6 +1113,7 @@ fn draw_control(fb: &mut Framebuffer, control: &ControlInfo, pressed: bool) {
         ControlRole::RadioButton => {
             draw_check(fb, control, true);
         }
+        ControlRole::Slider => draw_slider(fb, control, pressed),
         ControlRole::ListItem => {
             if control.selected {
                 fill(fb, control.rect, SELECTED);
@@ -1039,6 +1144,50 @@ fn draw_control(fb: &mut Framebuffer, control: &ControlInfo, pressed: bool) {
         }
         ControlRole::Button => draw_button(fb, control, pressed),
         ControlRole::Tab => {}
+    }
+}
+
+fn draw_slider(fb: &mut Framebuffer, control: &ControlInfo, pressed: bool) {
+    let Some(range) = control.range else {
+        return;
+    };
+    let track = Rect {
+        x: control.rect.x + SLIDER_THUMB_W / 2,
+        y: control.rect.y + 7,
+        width: (control.rect.width - SLIDER_THUMB_W + 1).max(1),
+        height: 5,
+    };
+    panel_inset(fb, track);
+
+    let span = (track.width - 1).max(1);
+    let value_span = i32::from(range.maximum.saturating_sub(range.minimum)).max(1);
+    let offset = i32::from(range.value.saturating_sub(range.minimum)) * span / value_span;
+    let thumb = Rect {
+        x: track.x + offset - SLIDER_THUMB_W / 2,
+        y: control.rect.y,
+        width: SLIDER_THUMB_W,
+        height: SLIDER_THUMB_H,
+    };
+    fill(fb, thumb, FACE);
+    let (top, bottom) = if pressed {
+        (DARK, LIGHT)
+    } else {
+        (LIGHT, DARK)
+    };
+    line_h(fb, thumb.x, thumb.y, thumb.width, top);
+    line_v(fb, thumb.x, thumb.y, thumb.height, top);
+    line_h(fb, thumb.x, thumb.y + thumb.height - 1, thumb.width, bottom);
+    line_v(fb, thumb.x + thumb.width - 1, thumb.y, thumb.height, bottom);
+
+    let labels_y = control.rect.y + 27;
+    draw_text(fb, control.rect.x, labels_y, "Slow", DIM);
+    let fast_x = control.rect.x + control.rect.width - font::text_width("Fast") as i32;
+    draw_text(fb, fast_x, labels_y, "Fast", DIM);
+    let value = range.value.to_string();
+    let value_x = control.rect.x + (control.rect.width - font::text_width(&value) as i32) / 2;
+    draw_text(fb, value_x, labels_y, &value, TEXT);
+    if control.focused {
+        focus_rect(fb, inset(control.rect, 1), DARK);
     }
 }
 
@@ -1163,6 +1312,7 @@ fn button_info(
         enabled,
         selected: false,
         checked: None,
+        range: None,
         focused: focus == id,
     }
 }
@@ -1187,6 +1337,15 @@ fn close_rect(width: i32, height: i32) -> Rect {
         width: 82,
         height: CONTROL_H,
     }
+}
+
+fn slider_value_at_x(rect: Rect, x: i32) -> u8 {
+    let start = rect.x + SLIDER_THUMB_W / 2;
+    let span = (rect.width - SLIDER_THUMB_W).max(1);
+    let position = (x - start).clamp(0, span);
+    let value_span = i32::from(SHUFFLE_MORPH_RATE_MAX - SHUFFLE_MORPH_RATE_MIN);
+    let rounded = (position * value_span + span / 2) / span;
+    SHUFFLE_MORPH_RATE_MIN + rounded as u8
 }
 
 fn library_list_rect(content: Rect) -> Rect {
@@ -1349,21 +1508,87 @@ mod tests {
     }
 
     #[test]
-    fn pointer_toggles_shuffle_only_after_matching_release() {
-        let mut state = PreferencesState::default();
-        let rect = control(&state, ControlId::Shuffle).rect;
-        state.pointer_press(rect.x + 1, rect.y + 1, PREFERENCES_W, PREFERENCES_H);
+    fn shuffle_page_exposes_an_accessible_clamped_morph_slider() {
+        let state = PreferencesState::new(PreferencesModel {
+            shuffle_morph_rate: u8::MAX,
+            ..PreferencesModel::default()
+        });
+        assert_eq!(state.model.shuffle_morph_rate, SHUFFLE_MORPH_RATE_MAX);
+        let slider = control(&state, ControlId::ShuffleMorphRate);
+        assert_eq!(slider.role, ControlRole::Slider);
+        assert_eq!(slider.label, "Shuffle morph rate");
+        assert_eq!(slider.checked, None);
         assert_eq!(
-            state.pointer_release(-1, -1, PREFERENCES_W, PREFERENCES_H),
+            slider.range,
+            Some(RangeInfo {
+                value: SHUFFLE_MORPH_RATE_MAX,
+                minimum: SHUFFLE_MORPH_RATE_MIN,
+                maximum: SHUFFLE_MORPH_RATE_MAX,
+                step: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn pointer_click_and_drag_update_the_shuffle_morph_rate_continuously() {
+        let mut state = PreferencesState::default();
+        let rect = control(&state, ControlId::ShuffleMorphRate).rect;
+        assert_eq!(
+            state.pointer_press(rect.x, rect.y + 1, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetShuffleMorphRate(SHUFFLE_MORPH_RATE_MIN))
+        );
+        assert_eq!(state.model.shuffle_morph_rate, SHUFFLE_MORPH_RATE_MIN);
+        assert_eq!(
+            state.pointer_motion(rect.x + rect.width + 100, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetShuffleMorphRate(SHUFFLE_MORPH_RATE_MAX))
+        );
+        assert_eq!(state.model.shuffle_morph_rate, SHUFFLE_MORPH_RATE_MAX);
+        assert_eq!(
+            state.pointer_release(
+                rect.x + rect.width + 100,
+                rect.y + 1,
+                PREFERENCES_W,
+                PREFERENCES_H
+            ),
             Outcome::Redraw
         );
-        assert!(!state.model.shuffle);
-
         assert_eq!(
-            click(&mut state, ControlId::Shuffle),
-            Outcome::Command(Command::SetShuffle(true))
+            state.pointer_motion(rect.x, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Unchanged,
+            "release ends the drag"
         );
-        assert!(state.model.shuffle);
+    }
+
+    #[test]
+    fn shuffle_morph_slider_supports_range_keyboard_conventions() {
+        let mut state = PreferencesState::default();
+        assert_eq!(
+            state.key(Key::Tab, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Redraw
+        );
+        assert_eq!(state.focused_control(), ControlId::ShuffleMorphRate);
+        assert_eq!(
+            state.key(Key::Left, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetShuffleMorphRate(49))
+        );
+        assert_eq!(
+            state.key(Key::Home, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetShuffleMorphRate(0))
+        );
+        assert_eq!(
+            state.key(Key::Down, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Redraw,
+            "decrementing at the minimum clamps"
+        );
+        assert_eq!(
+            state.key(Key::End, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetShuffleMorphRate(50))
+        );
+        assert_eq!(
+            state.key(Key::Up, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Redraw,
+            "incrementing at the maximum clamps"
+        );
     }
 
     #[test]

@@ -18,6 +18,10 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const BAND_FREQUENCIES: [u32; 10] = [
     60, 170, 310, 600, 1_000, 3_000, 6_000, 12_000, 14_000, 16_000,
 ];
+/// Classic Winamp stores the shuffle morph rate as an integer from slow (0) to fast (50).
+pub const SHUFFLE_MORPH_RATE_MIN: u8 = 0;
+pub const SHUFFLE_MORPH_RATE_MAX: u8 = 50;
+pub const DEFAULT_SHUFFLE_MORPH_RATE: u8 = SHUFFLE_MORPH_RATE_MAX;
 
 /// There is intentionally no plugin discovery or loading surface. Preferences can display this as
 /// unavailable, but a config file cannot turn it on.
@@ -38,10 +42,23 @@ pub enum VisualizationMode {
     Off,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackSettings {
     pub shuffle: bool,
     pub repeat: bool,
+    /// Controls how much a completed shuffle order changes before a repeated cycle.
+    /// This does not enable shuffle.
+    pub shuffle_morph_rate: u8,
+}
+
+impl Default for PlaybackSettings {
+    fn default() -> Self {
+        Self {
+            shuffle: false,
+            repeat: false,
+            shuffle_morph_rate: DEFAULT_SHUFFLE_MORPH_RATE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +249,13 @@ impl Settings {
                     key,
                     &mut warnings,
                 ),
+                "playback.shuffle_morph_rate" => set_shuffle_morph_rate(
+                    value,
+                    &mut settings.playback.shuffle_morph_rate,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
                 "display.time" => match value {
                     "elapsed" => settings.display.time = TimeDisplay::Elapsed,
                     "remaining" => settings.display.time = TimeDisplay::Remaining,
@@ -351,6 +375,13 @@ impl Settings {
         line(&mut out, "playback.repeat", self.playback.repeat);
         line(
             &mut out,
+            "playback.shuffle_morph_rate",
+            self.playback
+                .shuffle_morph_rate
+                .clamp(SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX),
+        );
+        line(
+            &mut out,
             "display.time",
             match self.display.time {
                 TimeDisplay::Elapsed => "elapsed",
@@ -413,6 +444,42 @@ fn set_bool(value: &str, dst: &mut bool, line: usize, key: &str, warnings: &mut 
             line,
             key: key.into(),
             message: "expected true or false".into(),
+        }),
+    }
+}
+
+fn set_shuffle_morph_rate(
+    value: &str,
+    dst: &mut u8,
+    line: usize,
+    key: &str,
+    warnings: &mut Vec<Warning>,
+) {
+    match value.parse::<i32>() {
+        Ok(value) => {
+            let clamped = value.clamp(
+                i32::from(SHUFFLE_MORPH_RATE_MIN),
+                i32::from(SHUFFLE_MORPH_RATE_MAX),
+            ) as u8;
+            *dst = clamped;
+            if i32::from(clamped) != value {
+                warnings.push(Warning {
+                    line,
+                    key: key.into(),
+                    message: format!(
+                        "clamped to the supported {} to {} range",
+                        SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX
+                    ),
+                });
+            }
+        }
+        Err(_) => warnings.push(Warning {
+            line,
+            key: key.into(),
+            message: format!(
+                "expected an integer from {} to {}",
+                SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX
+            ),
         }),
     }
 }
@@ -614,6 +681,7 @@ mod tests {
     fn defaults_match_the_supported_product_surface() {
         let s = Settings::default();
         assert!(!s.playback.shuffle && !s.playback.repeat);
+        assert_eq!(s.playback.shuffle_morph_rate, DEFAULT_SHUFFLE_MORPH_RATE);
         assert_eq!(s.display.time, TimeDisplay::Elapsed);
         assert_eq!(s.visualization.mode, VisualizationMode::Spectrum);
         assert!(s.library.roots.is_empty() && s.library.recurse);
@@ -633,6 +701,7 @@ mod tests {
         let mut s = Settings::default();
         s.playback.shuffle = true;
         s.playback.repeat = true;
+        s.playback.shuffle_morph_rate = 17;
         s.display.time = TimeDisplay::Remaining;
         s.display.double_size = true;
         s.display.scroll_title = false;
@@ -683,6 +752,51 @@ mod tests {
         );
         assert_eq!(report.warnings.len(), 5);
         assert!(report.warnings.iter().any(|w| w.key == "plugins.enabled"));
+    }
+
+    #[test]
+    fn legacy_settings_without_a_morph_rate_keep_the_classic_default() {
+        let report = Settings::parse("version=1\nplayback.shuffle=true\nplayback.repeat=true\n");
+        assert!(report.warnings.is_empty());
+        assert!(report.settings.playback.shuffle);
+        assert!(report.settings.playback.repeat);
+        assert_eq!(
+            report.settings.playback.shuffle_morph_rate,
+            DEFAULT_SHUFFLE_MORPH_RATE
+        );
+    }
+
+    #[test]
+    fn shuffle_morph_rate_parses_and_serializes_only_the_classic_range() {
+        let slow = Settings::parse("playback.shuffle_morph_rate=0\n");
+        let fast = Settings::parse("playback.shuffle_morph_rate=50\n");
+        assert!(slow.warnings.is_empty());
+        assert!(fast.warnings.is_empty());
+        assert_eq!(slow.settings.playback.shuffle_morph_rate, 0);
+        assert_eq!(fast.settings.playback.shuffle_morph_rate, 50);
+
+        let below = Settings::parse("playback.shuffle_morph_rate=-3\n");
+        let above = Settings::parse("playback.shuffle_morph_rate=99\n");
+        assert_eq!(below.settings.playback.shuffle_morph_rate, 0);
+        assert_eq!(above.settings.playback.shuffle_morph_rate, 50);
+        assert_eq!(below.warnings.len(), 1);
+        assert_eq!(above.warnings.len(), 1);
+
+        let malformed = Settings::parse("playback.shuffle_morph_rate=fast\n");
+        assert_eq!(
+            malformed.settings.playback.shuffle_morph_rate,
+            DEFAULT_SHUFFLE_MORPH_RATE
+        );
+        assert_eq!(malformed.warnings.len(), 1);
+
+        let mut hand_built = Settings::default();
+        hand_built.playback.shuffle_morph_rate = u8::MAX;
+        let text = hand_built.to_text();
+        assert!(text.contains("playback.shuffle_morph_rate=50\n"));
+        assert_eq!(
+            Settings::parse(&text).settings.playback.shuffle_morph_rate,
+            50
+        );
     }
 
     #[test]

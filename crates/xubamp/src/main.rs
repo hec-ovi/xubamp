@@ -181,6 +181,27 @@ fn persist_playback_modes(
     }
 }
 
+/// Copy the final, user-visible window and equalizer state out of the Wayland event loop before the
+/// settings file is saved. Runtime-only hover/drag state never crosses this boundary.
+fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::SessionState) {
+    let panes = session.panes;
+    settings.windows.main.open = true;
+    settings.windows.main.shaded = panes.main_shaded;
+    settings.windows.equalizer.open = panes.equalizer_open;
+    settings.windows.equalizer.shaded = session.equalizer_shaded;
+    settings.windows.equalizer.x = panes.equalizer_position.0;
+    settings.windows.equalizer.y = panes.equalizer_position.1;
+    settings.windows.playlist.open = panes.playlist_open;
+    settings.windows.playlist.shaded = panes.playlist_shaded;
+    settings.windows.playlist.x = panes.playlist_position.0;
+    settings.windows.playlist.y = panes.playlist_position.1;
+    settings.windows.playlist.width = panes.playlist_size.0;
+    settings.windows.playlist.height = panes.playlist_size.1;
+    settings.equalizer.enabled = session.equalizer_enabled;
+    settings.equalizer.preamp_db = session.equalizer_preamp_db;
+    settings.equalizer.bands_db = session.equalizer_bands_db;
+}
+
 /// A primitive engine operation. Transport commands (Play/Pause/Stop) map to a short sequence of
 /// these; keeping the mapping pure (independent of the live engine) lets the play/pause/stop policy
 /// be unit-tested on the host without PipeWire. Only compiled with `audio` (where it is used) or
@@ -407,8 +428,11 @@ fn main() {
                 playlist_source,
             ),
         );
-        // Equalizer sliders update live audio continuously, but the final state reaches disk once
-        // when the event loop exits rather than once per pointer-motion event.
+        if let Ok(session) = result.as_ref() {
+            apply_ui_session(&mut settings.borrow_mut(), *session);
+        }
+        // Equalizer sliders update live audio continuously, but the final state and pane layout
+        // reach disk once when the event loop exits rather than once per pointer-motion event.
         if let Some(path) = settings_path.as_deref() {
             if let Err(error) = xubamp_config::save(path, &settings.borrow()) {
                 eprintln!("xubamp: cannot save settings on exit: {error}");
@@ -434,7 +458,7 @@ fn main() {
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
-        if let Err(e) = xubamp_wl::run(
+        match xubamp_wl::run(
             skin,
             title,
             equalizer_state,
@@ -447,8 +471,19 @@ fn main() {
                 playlist_source,
             ),
         ) {
-            eprintln!("xubamp: {e}");
-            std::process::exit(1);
+            Ok(session) => {
+                let mut settings = settings;
+                apply_ui_session(&mut settings, session);
+                if let Some(path) = settings_path.as_deref() {
+                    if let Err(error) = xubamp_config::save(path, &settings) {
+                        eprintln!("xubamp: cannot save settings on exit: {error}");
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("xubamp: {error}");
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -456,8 +491,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify, persist_playback_modes, preferred_skin_path, track_title, transport_ops,
-        EngineOp, TransportState, DEV_SKIN,
+        apply_ui_session, classify, persist_playback_modes, preferred_skin_path, track_title,
+        transport_ops, EngineOp, TransportState, DEV_SKIN,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -525,6 +560,57 @@ mod tests {
         persist_playback_modes(None, &mut settings, true, false).unwrap();
         assert!(settings.playback.shuffle);
         assert!(!settings.playback.repeat);
+    }
+
+    #[test]
+    fn final_ui_session_updates_panes_and_equalizer_without_losing_other_settings() {
+        let mut settings = xubamp_config::Settings::default();
+        settings.playback.shuffle = true;
+        settings.skin_path = Some(PathBuf::from("/skins/kept.wsz"));
+        let session = xubamp_wl::SessionState {
+            panes: xubamp_wl::PaneLayout {
+                main_shaded: true,
+                equalizer_open: true,
+                equalizer_position: (-12, 14),
+                playlist_open: true,
+                playlist_shaded: true,
+                playlist_position: (263, 14),
+                playlist_size: (550, 232),
+            },
+            equalizer_enabled: false,
+            equalizer_shaded: true,
+            equalizer_preamp_db: 3.5,
+            equalizer_bands_db: [-12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 1.5],
+        };
+
+        apply_ui_session(&mut settings, session);
+
+        assert!(settings.windows.main.shaded);
+        assert!(settings.windows.equalizer.open);
+        assert!(settings.windows.equalizer.shaded);
+        assert_eq!(
+            (settings.windows.equalizer.x, settings.windows.equalizer.y),
+            (-12, 14)
+        );
+        assert!(settings.windows.playlist.open);
+        assert!(settings.windows.playlist.shaded);
+        assert_eq!(
+            (
+                settings.windows.playlist.x,
+                settings.windows.playlist.y,
+                settings.windows.playlist.width,
+                settings.windows.playlist.height,
+            ),
+            (263, 14, 550, 232)
+        );
+        assert!(!settings.equalizer.enabled);
+        assert_eq!(settings.equalizer.preamp_db, 3.5);
+        assert_eq!(settings.equalizer.bands_db, session.equalizer_bands_db);
+        assert!(
+            settings.playback.shuffle,
+            "unrelated playback state is kept"
+        );
+        assert_eq!(settings.skin_path, Some(PathBuf::from("/skins/kept.wsz")));
     }
 
     #[test]

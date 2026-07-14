@@ -132,6 +132,17 @@ pub struct PaneLayout {
     pub playlist_size: (u32, u32),
 }
 
+/// User-visible UI state returned after the main window closes. Transient interaction fields such
+/// as hovered buttons and active pointer drags are deliberately excluded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SessionState {
+    pub panes: PaneLayout,
+    pub equalizer_enabled: bool,
+    pub equalizer_shaded: bool,
+    pub equalizer_preamp_db: f32,
+    pub equalizer_bands_db: [f32; 10],
+}
+
 impl Default for PaneLayout {
     fn default() -> Self {
         Self {
@@ -281,7 +292,7 @@ pub fn run(
     equalizer_state: equalizer::EqState,
     pane_layout: PaneLayout,
     runtime: Runtime,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<SessionState, Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
@@ -410,7 +421,7 @@ pub fn run(
     while !app.exit {
         event_loop.dispatch(None, &mut app)?;
     }
-    Ok(())
+    Ok(app.session_state())
 }
 
 struct App {
@@ -525,6 +536,30 @@ struct App {
 }
 
 impl App {
+    fn session_state(&self) -> SessionState {
+        let playlist_width = u32::try_from(self.pl_size.0)
+            .unwrap_or(xubamp_skin::sprites::PLEDIT_W as u32)
+            .max(xubamp_skin::sprites::PLEDIT_W as u32);
+        let playlist_height = u32::try_from(self.pl_size.1)
+            .unwrap_or(xubamp_skin::sprites::PLEDIT_H as u32)
+            .max(xubamp_skin::sprites::PLEDIT_H as u32);
+        SessionState {
+            panes: PaneLayout {
+                main_shaded: self.state.shade,
+                equalizer_open: self.equalizer.is_some(),
+                equalizer_position: (self.equalizer_position.x, self.equalizer_position.y),
+                playlist_open: self.playlist.is_some(),
+                playlist_shaded: self.playlist_state.shade,
+                playlist_position: (self.pl_position.x, self.pl_position.y),
+                playlist_size: (playlist_width, playlist_height),
+            },
+            equalizer_enabled: self.equalizer_state.enabled,
+            equalizer_shaded: self.equalizer_state.shade,
+            equalizer_preamp_db: self.equalizer_state.preamp_db,
+            equalizer_bands_db: self.equalizer_state.bands_db,
+        }
+    }
+
     /// Recompose the frame from the current UI state and push it to the screen. Cheap (the
     /// window is 275x116), so we just rebuild the whole frame on any state change.
     fn redraw(&mut self) {

@@ -187,6 +187,52 @@ fn config_time_display(display: xubamp_render::hit::TimeDisplay) -> xubamp_confi
     }
 }
 
+fn vis_analyzer_style(style: xubamp_config::AnalyzerStyle) -> xubamp_render::vis::AnalyzerStyle {
+    match style {
+        xubamp_config::AnalyzerStyle::Normal => xubamp_render::vis::AnalyzerStyle::Normal,
+        xubamp_config::AnalyzerStyle::Fire => xubamp_render::vis::AnalyzerStyle::Fire,
+        xubamp_config::AnalyzerStyle::Line => xubamp_render::vis::AnalyzerStyle::Line,
+    }
+}
+
+fn config_analyzer_style(style: xubamp_render::vis::AnalyzerStyle) -> xubamp_config::AnalyzerStyle {
+    match style {
+        xubamp_render::vis::AnalyzerStyle::Normal => xubamp_config::AnalyzerStyle::Normal,
+        xubamp_render::vis::AnalyzerStyle::Fire => xubamp_config::AnalyzerStyle::Fire,
+        xubamp_render::vis::AnalyzerStyle::Line => xubamp_config::AnalyzerStyle::Line,
+    }
+}
+
+fn vis_band_width(width: xubamp_config::BandWidth) -> xubamp_render::vis::BandWidth {
+    match width {
+        xubamp_config::BandWidth::Thick => xubamp_render::vis::BandWidth::Thick,
+        xubamp_config::BandWidth::Thin => xubamp_render::vis::BandWidth::Thin,
+    }
+}
+
+fn config_band_width(width: xubamp_render::vis::BandWidth) -> xubamp_config::BandWidth {
+    match width {
+        xubamp_render::vis::BandWidth::Thick => xubamp_config::BandWidth::Thick,
+        xubamp_render::vis::BandWidth::Thin => xubamp_config::BandWidth::Thin,
+    }
+}
+
+fn vis_osc_style(style: xubamp_config::OscilloscopeStyle) -> xubamp_render::vis::OscStyle {
+    match style {
+        xubamp_config::OscilloscopeStyle::Dots => xubamp_render::vis::OscStyle::Dots,
+        xubamp_config::OscilloscopeStyle::Lines => xubamp_render::vis::OscStyle::Lines,
+        xubamp_config::OscilloscopeStyle::Solid => xubamp_render::vis::OscStyle::Solid,
+    }
+}
+
+fn config_osc_style(style: xubamp_render::vis::OscStyle) -> xubamp_config::OscilloscopeStyle {
+    match style {
+        xubamp_render::vis::OscStyle::Dots => xubamp_config::OscilloscopeStyle::Dots,
+        xubamp_render::vis::OscStyle::Lines => xubamp_config::OscilloscopeStyle::Lines,
+        xubamp_render::vis::OscStyle::Solid => xubamp_config::OscilloscopeStyle::Solid,
+    }
+}
+
 /// Seed the Preferences window's model from the persisted settings so it opens showing the user's
 /// real values rather than defaults.
 fn preferences_model_from(
@@ -286,6 +332,12 @@ fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::
         xubamp_render::vis::VisMode::Off => xubamp_config::VisualizationMode::Off,
     };
     settings.visualization.show_peaks = session.visualization_show_peaks;
+    settings.visualization.analyzer_style = config_analyzer_style(session.analyzer_style);
+    settings.visualization.band_width = config_band_width(session.band_width);
+    settings.visualization.oscilloscope_style = config_osc_style(session.oscilloscope_style);
+    settings.visualization.bar_falloff = session.bar_falloff;
+    settings.visualization.peak_falloff = session.peak_falloff;
+    settings.visualization.refresh_rate = session.refresh_rate;
 }
 
 fn classic_equalizer_presets() -> Vec<xubamp_render::equalizer::Preset> {
@@ -486,6 +538,12 @@ fn main() {
             xubamp_config::VisualizationMode::Off => xubamp_render::vis::VisMode::Off,
         },
         visualization_show_peaks: settings.visualization.show_peaks,
+        analyzer_style: vis_analyzer_style(settings.visualization.analyzer_style),
+        band_width: vis_band_width(settings.visualization.band_width),
+        oscilloscope_style: vis_osc_style(settings.visualization.oscilloscope_style),
+        bar_falloff: settings.visualization.bar_falloff,
+        peak_falloff: settings.visualization.peak_falloff,
+        refresh_rate: settings.visualization.refresh_rate,
         // Native (non-skin) menus and dialogs follow the desktop's light/dark preference, read once
         // at startup from the settings portal. Unreachable portal falls back to light.
         dark: matches!(
@@ -1167,6 +1225,12 @@ mod tests {
             scroll_title: false,
             visualization_mode: xubamp_render::vis::VisMode::Oscilloscope,
             visualization_show_peaks: false,
+            analyzer_style: xubamp_render::vis::AnalyzerStyle::Fire,
+            band_width: xubamp_render::vis::BandWidth::Thin,
+            oscilloscope_style: xubamp_render::vis::OscStyle::Solid,
+            bar_falloff: 3,
+            peak_falloff: 9,
+            refresh_rate: 4,
         };
 
         apply_ui_session(&mut settings, session);

@@ -45,7 +45,7 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
     Connection, QueueHandle,
 };
-use xubamp_render::vis::{VisMode, FFT_N};
+use xubamp_render::vis::{AnalyzerStyle, BandWidth, OscStyle, VisMode, FFT_N};
 use xubamp_render::{
     adwaita, compose_main_window, equalizer, hit, jump, marquee, menu, pledit, preferences,
     Framebuffer,
@@ -67,11 +67,15 @@ use wayland_client::protocol::wl_keyboard;
 /// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
 
-/// While the frame-callback loop drives the visualizer at the display's refresh rate (see
-/// [`App::draw`]/[`App::on_frame`]), the timer only needs to poll the clock and re-arm the loop if
-/// it ever stalls; a slow cadence keeps that cheap. When paused the visualizer is frozen, so the
-/// timer just keeps the clock and marquee moving.
-const FRAME_FALLBACK: Duration = Duration::from_millis(250);
+/// Timer backstop for the visualizer while animating. The frame-callback loop (see
+/// [`App::draw`]/[`App::on_frame`]) normally drives it at the display's refresh rate, but the timer
+/// re-arms and redraws the loop at this cadence too, so if the compositor throttles or drops the
+/// frame callbacks the analyzer still moves at the chosen refresh rate instead of crawling. Rate
+/// 1..=10 maps to roughly 100 ms (10 fps) down to 16 ms (~60 fps).
+fn frame_fallback(refresh_rate: u8) -> Duration {
+    let ms = (100u64 / u64::from(refresh_rate.clamp(1, 10))).clamp(16, 100);
+    Duration::from_millis(ms)
+}
 
 /// Redraw cadence while the visualizer settles to baseline after a Stop (~30 fps): a few frames of
 /// smooth decay, then it goes quiet.
@@ -223,6 +227,12 @@ pub struct UiOptions {
     pub scroll_title: bool,
     pub visualization_mode: VisMode,
     pub visualization_show_peaks: bool,
+    pub analyzer_style: AnalyzerStyle,
+    pub band_width: BandWidth,
+    pub oscilloscope_style: OscStyle,
+    pub bar_falloff: u8,
+    pub peak_falloff: u8,
+    pub refresh_rate: u8,
     /// Whether the desktop prefers a dark color scheme, so the native (non-skin) menus and dialogs
     /// use the Adwaita dark palette. Read from the settings portal by the application at startup.
     pub dark: bool,
@@ -235,6 +245,12 @@ impl Default for UiOptions {
             scroll_title: true,
             visualization_mode: VisMode::Bars,
             visualization_show_peaks: true,
+            analyzer_style: AnalyzerStyle::Normal,
+            band_width: BandWidth::Thick,
+            oscilloscope_style: OscStyle::Lines,
+            bar_falloff: 7,
+            peak_falloff: 6,
+            refresh_rate: 8,
             dark: false,
         }
     }
@@ -266,6 +282,12 @@ pub struct SessionState {
     pub scroll_title: bool,
     pub visualization_mode: VisMode,
     pub visualization_show_peaks: bool,
+    pub analyzer_style: AnalyzerStyle,
+    pub band_width: BandWidth,
+    pub oscilloscope_style: OscStyle,
+    pub bar_falloff: u8,
+    pub peak_falloff: u8,
+    pub refresh_rate: u8,
 }
 
 impl Default for PaneLayout {
@@ -486,6 +508,12 @@ pub fn run(
     let mut visualization = xubamp_render::vis::VisState::default();
     visualization.mode = runtime.ui_options.visualization_mode;
     visualization.show_peaks = runtime.ui_options.visualization_show_peaks;
+    visualization.analyzer_style = runtime.ui_options.analyzer_style;
+    visualization.band_width = runtime.ui_options.band_width;
+    visualization.osc_style = runtime.ui_options.oscilloscope_style;
+    visualization.bar_falloff = runtime.ui_options.bar_falloff;
+    visualization.peak_falloff = runtime.ui_options.peak_falloff;
+    visualization.refresh_rate = runtime.ui_options.refresh_rate;
     let state = hit::UiState {
         title,
         shade: pane_layout.main_shaded,
@@ -782,6 +810,12 @@ impl App {
             scroll_title: self.state.scroll_title,
             visualization_mode: self.state.vis.mode,
             visualization_show_peaks: self.state.vis.show_peaks,
+            analyzer_style: self.state.vis.analyzer_style,
+            band_width: self.state.vis.band_width,
+            oscilloscope_style: self.state.vis.osc_style,
+            bar_falloff: self.state.vis.bar_falloff,
+            peak_falloff: self.state.vis.peak_falloff,
+            refresh_rate: self.state.vis.refresh_rate,
         }
     }
 
@@ -1041,7 +1075,7 @@ impl App {
             if changed || !self.frame_pending {
                 self.redraw();
             }
-            FRAME_FALLBACK
+            frame_fallback(self.state.vis.refresh_rate)
         } else {
             // Not animating, so we neither hold nor want a frame callback. Clear the in-flight flag:
             // if a requested callback was dropped (surface minimized/occluded while it was playing)
@@ -1352,6 +1386,11 @@ impl App {
                 hit::TimeDisplay::Elapsed => menu::TimeDisplay::Elapsed,
                 hit::TimeDisplay::Remaining => menu::TimeDisplay::Remaining,
             },
+            vis_mode: self.state.vis.mode,
+            analyzer_style: self.state.vis.analyzer_style,
+            band_width: self.state.vis.band_width,
+            osc_style: self.state.vis.osc_style,
+            show_peaks: self.state.vis.show_peaks,
             ..menu::MainMenuState::default()
         });
         let mut interaction = menu::MenuInteraction::default();
@@ -1523,6 +1562,36 @@ impl App {
                 self.set_time_display(hit::TimeDisplay::Remaining);
             }
             menu::ClassicMenuAction::OpenPreferences => self.open_preferences(),
+            menu::ClassicMenuAction::SetVisualizationMode(mode) => {
+                if self.state.vis.mode != mode {
+                    self.state.vis.mode = mode;
+                    self.redraw();
+                    self.sync_preferences_from_ui();
+                }
+            }
+            menu::ClassicMenuAction::SetAnalyzerStyle(style) => {
+                if self.state.vis.analyzer_style != style {
+                    self.state.vis.analyzer_style = style;
+                    self.redraw();
+                }
+            }
+            menu::ClassicMenuAction::SetBandWidth(width) => {
+                if self.state.vis.band_width != width {
+                    self.state.vis.band_width = width;
+                    self.redraw();
+                }
+            }
+            menu::ClassicMenuAction::SetOscilloscopeStyle(style) => {
+                if self.state.vis.osc_style != style {
+                    self.state.vis.osc_style = style;
+                    self.redraw();
+                }
+            }
+            menu::ClassicMenuAction::ToggleVisualizationPeaks => {
+                self.state.vis.show_peaks = !self.state.vis.show_peaks;
+                self.redraw();
+                self.sync_preferences_from_ui();
+            }
             menu::ClassicMenuAction::UseBaseSkin => {
                 self.replace_skin(default_skin());
                 (self.on_menu)(MenuRequest::Action(action));

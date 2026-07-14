@@ -9,6 +9,7 @@ use std::fmt;
 use xubamp_skin::font;
 
 use crate::adwaita::{self, Palette, UiFont};
+use crate::vis::{AnalyzerStyle, BandWidth, OscStyle, VisMode};
 use crate::Framebuffer;
 
 /// Height of an ordinary menu row in pixels.
@@ -171,6 +172,11 @@ pub enum ClassicMenuAction {
     ToggleRepeat,
     ToggleShuffle,
     OpenPreferences,
+    SetVisualizationMode(VisMode),
+    SetAnalyzerStyle(AnalyzerStyle),
+    SetBandWidth(BandWidth),
+    SetOscilloscopeStyle(OscStyle),
+    ToggleVisualizationPeaks,
     Previous,
     Pause,
     Stop,
@@ -222,6 +228,11 @@ pub struct MainMenuState {
     pub double_size: bool,
     pub repeat: bool,
     pub shuffle: bool,
+    pub vis_mode: VisMode,
+    pub analyzer_style: AnalyzerStyle,
+    pub band_width: BandWidth,
+    pub osc_style: OscStyle,
+    pub show_peaks: bool,
 }
 
 impl Default for MainMenuState {
@@ -234,6 +245,11 @@ impl Default for MainMenuState {
             double_size: false,
             repeat: false,
             shuffle: false,
+            vis_mode: VisMode::Bars,
+            analyzer_style: AnalyzerStyle::Normal,
+            band_width: BandWidth::Thick,
+            osc_style: OscStyle::Lines,
+            show_peaks: true,
         }
     }
 }
@@ -292,6 +308,7 @@ pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
         ClassicMenuAction::OpenMedia,
     )
     .with_shortcut("L")]);
+    let visualization = visualization_menu(state);
 
     Menu::new(vec![
         MenuItem::submenu("Play", play),
@@ -307,8 +324,57 @@ pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
         MenuItem::separator(),
         MenuItem::submenu("Options", options),
         MenuItem::submenu("Playback", playback),
+        MenuItem::submenu("Visualization", visualization),
         MenuItem::separator(),
         MenuItem::action("Exit", ClassicMenuAction::Exit),
+    ])
+}
+
+/// The Visualization submenu: the mode plus the classic analyzer, oscilloscope, band-width, and
+/// peak options, each reflecting the current setting as a radio/check.
+fn visualization_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
+    let analyzer = Menu::new(vec![
+        MenuItem::action("Normal", ClassicMenuAction::SetAnalyzerStyle(AnalyzerStyle::Normal))
+            .with_mark(ItemMark::Radio(state.analyzer_style == AnalyzerStyle::Normal)),
+        MenuItem::action("Fire", ClassicMenuAction::SetAnalyzerStyle(AnalyzerStyle::Fire))
+            .with_mark(ItemMark::Radio(state.analyzer_style == AnalyzerStyle::Fire)),
+        MenuItem::action("Line", ClassicMenuAction::SetAnalyzerStyle(AnalyzerStyle::Line))
+            .with_mark(ItemMark::Radio(state.analyzer_style == AnalyzerStyle::Line)),
+    ]);
+    let oscilloscope = Menu::new(vec![
+        MenuItem::action("Dots", ClassicMenuAction::SetOscilloscopeStyle(OscStyle::Dots))
+            .with_mark(ItemMark::Radio(state.osc_style == OscStyle::Dots)),
+        MenuItem::action("Lines", ClassicMenuAction::SetOscilloscopeStyle(OscStyle::Lines))
+            .with_mark(ItemMark::Radio(state.osc_style == OscStyle::Lines)),
+        MenuItem::action("Solid", ClassicMenuAction::SetOscilloscopeStyle(OscStyle::Solid))
+            .with_mark(ItemMark::Radio(state.osc_style == OscStyle::Solid)),
+    ]);
+    let band = Menu::new(vec![
+        MenuItem::action("Thick", ClassicMenuAction::SetBandWidth(BandWidth::Thick))
+            .with_mark(ItemMark::Radio(state.band_width == BandWidth::Thick)),
+        MenuItem::action("Thin", ClassicMenuAction::SetBandWidth(BandWidth::Thin))
+            .with_mark(ItemMark::Radio(state.band_width == BandWidth::Thin)),
+    ]);
+    Menu::new(vec![
+        MenuItem::action(
+            "Spectrum analyzer",
+            ClassicMenuAction::SetVisualizationMode(VisMode::Bars),
+        )
+        .with_mark(ItemMark::Radio(state.vis_mode == VisMode::Bars)),
+        MenuItem::action(
+            "Oscilloscope",
+            ClassicMenuAction::SetVisualizationMode(VisMode::Oscilloscope),
+        )
+        .with_mark(ItemMark::Radio(state.vis_mode == VisMode::Oscilloscope)),
+        MenuItem::action("Off", ClassicMenuAction::SetVisualizationMode(VisMode::Off))
+            .with_mark(ItemMark::Radio(state.vis_mode == VisMode::Off)),
+        MenuItem::separator(),
+        MenuItem::submenu("Analyzer style", analyzer),
+        MenuItem::submenu("Oscilloscope style", oscilloscope),
+        MenuItem::submenu("Band width", band),
+        MenuItem::separator(),
+        MenuItem::action("Show peaks", ClassicMenuAction::ToggleVisualizationPeaks)
+            .with_mark(ItemMark::Check(state.show_peaks)),
     ])
 }
 
@@ -1315,6 +1381,7 @@ mod tests {
                 "Skins",
                 "Options",
                 "Playback",
+                "Visualization",
                 "Exit"
             ]
         );
@@ -1384,6 +1451,32 @@ mod tests {
             labels(&playlist_add_menu()),
             ["URL...", "Directory...", "File..."]
         );
+    }
+
+    #[test]
+    fn visualization_submenu_reflects_the_current_settings() {
+        let menu = main_menu(MainMenuState {
+            vis_mode: VisMode::Oscilloscope,
+            analyzer_style: AnalyzerStyle::Fire,
+            band_width: BandWidth::Thin,
+            osc_style: OscStyle::Solid,
+            show_peaks: false,
+            ..MainMenuState::default()
+        });
+        let vis = submenu(&menu, "Visualization");
+        assert_eq!(vis.items[0].label, "Spectrum analyzer");
+        assert_eq!(vis.items[0].state.mark, ItemMark::Radio(false));
+        assert_eq!(vis.items[1].label, "Oscilloscope");
+        assert_eq!(vis.items[1].state.mark, ItemMark::Radio(true));
+        let peaks = vis.items.last().unwrap();
+        assert_eq!(peaks.label, "Show peaks");
+        assert_eq!(peaks.state.mark, ItemMark::Check(false));
+        let analyzer = submenu(vis, "Analyzer style");
+        let fire = analyzer.items.iter().find(|i| i.label == "Fire").unwrap();
+        assert_eq!(fire.state.mark, ItemMark::Radio(true));
+        let band = submenu(vis, "Band width");
+        let thin = band.items.iter().find(|i| i.label == "Thin").unwrap();
+        assert_eq!(thin.state.mark, ItemMark::Radio(true));
     }
 
     #[test]

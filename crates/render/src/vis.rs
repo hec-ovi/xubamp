@@ -118,6 +118,9 @@ pub struct VisState {
     pub bar_falloff: u8,
     /// Peak-dot drop speed (1..=SPEED_MAX); higher falls faster.
     pub peak_falloff: u8,
+    /// Redraw rate (1..=SPEED_MAX); not used by drawing, carried here so the window layer can pace
+    /// the visualizer from one place.
+    pub refresh_rate: u8,
     bars: [f32; VIS_COLS],
     peaks: [f32; VIS_COLS],
     peak_vel: [f32; VIS_COLS],
@@ -135,6 +138,7 @@ impl Default for VisState {
             // Snappier than the old fixed feel out of the box; both are user adjustable.
             bar_falloff: 7,
             peak_falloff: 6,
+            refresh_rate: 8,
             bars: [0.0; VIS_COLS],
             peaks: [0.0; VIS_COLS],
             peak_vel: [0.0; VIS_COLS],

@@ -116,21 +116,32 @@ enum EngineOp {
     SetActive(bool),
 }
 
-/// The engine operations a transport button maps to, given whether audio is currently `playing` and
-/// whether the track has `finished`. Classic Winamp semantics for the Play button: a no-op while
-/// already playing; a restart from the top once the track has finished; otherwise (paused, or
-/// stopped which already rewound to 0) a plain resume in place. Pause toggles pause/resume; Stop
-/// halts and rewinds. Prev/Next/Eject need a playlist, so they map to nothing yet. (The `x` hotkey's
-/// unconditional restart is a separate `Command::Restart`, not routed through here.)
+/// Playback state relevant to the classic transport buttons. `Paused` and `Stopped` are both
+/// inactive at the audio backend, but Play must resume the former in place and restart the latter.
 #[cfg(any(feature = "audio", test))]
-fn transport_ops(t: xubamp_render::hit::Transport, playing: bool, finished: bool) -> Vec<EngineOp> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportState {
+    Playing,
+    Paused,
+    Stopped,
+    Finished,
+}
+
+/// The engine operations a transport button maps to. Play restarts unless playback is paused, in
+/// which case it resumes in place. Pause toggles while playing/paused and acts like Play from a
+/// stopped or naturally-finished state. Stop halts and rewinds. This mirrors Webamp's media entry
+/// point: `play()` seeks to zero for every state except Paused, while the Pause action dispatches
+/// Play whenever it is not currently playing.
+#[cfg(any(feature = "audio", test))]
+fn transport_ops(t: xubamp_render::hit::Transport, state: TransportState) -> Vec<EngineOp> {
     use xubamp_render::hit::Transport;
     use EngineOp::{SeekToStart, SetActive};
     match t {
-        Transport::Play if playing => Vec::new(),
-        Transport::Play if finished => vec![SeekToStart, SetActive(true)],
-        Transport::Play => vec![SetActive(true)],
-        Transport::Pause => vec![SetActive(!playing)],
+        Transport::Play if state == TransportState::Paused => vec![SetActive(true)],
+        Transport::Play => vec![SeekToStart, SetActive(true)],
+        Transport::Pause if state == TransportState::Playing => vec![SetActive(false)],
+        Transport::Pause if state == TransportState::Paused => vec![SetActive(true)],
+        Transport::Pause => vec![SeekToStart, SetActive(true)],
         Transport::Stop => vec![SetActive(false), SeekToStart],
         Transport::Prev | Transport::Next | Transport::Eject => Vec::new(),
     }
@@ -142,7 +153,10 @@ fn main() {
 
     // The marquee shows the first track's file name (tag-based titles arrive later); it updates per
     // track as the playlist advances.
-    let title = media_args.first().map(|p| track_title(p)).unwrap_or_default();
+    let title = media_args
+        .first()
+        .map(|p| track_title(p))
+        .unwrap_or_default();
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
     // window would display, then exit without opening a window. `XUBAMP_TITLE` overrides the
@@ -154,13 +168,22 @@ fn main() {
             title: std::env::var("XUBAMP_TITLE").unwrap_or_else(|_| title.clone()),
             ..Default::default()
         };
-        if let Some(v) = std::env::var("XUBAMP_VOLUME").ok().and_then(|s| s.parse().ok()) {
+        if let Some(v) = std::env::var("XUBAMP_VOLUME")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             state.volume = v;
         }
-        if let Some(b) = std::env::var("XUBAMP_BALANCE").ok().and_then(|s| s.parse().ok()) {
+        if let Some(b) = std::env::var("XUBAMP_BALANCE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             state.balance = b;
         }
-        if let Some(p) = std::env::var("XUBAMP_POSITION").ok().and_then(|s| s.parse().ok()) {
+        if let Some(p) = std::env::var("XUBAMP_POSITION")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             state.position = Some(p);
         }
         let fb = xubamp_render::compose_main_window(&skin, &state);
@@ -216,9 +239,14 @@ fn main() {
             move || player.borrow().playlist_view()
         };
 
-        if let Err(e) =
-            xubamp_wl::run(skin, title, on_command, playback_source, sample_source, playlist_source)
-        {
+        if let Err(e) = xubamp_wl::run(
+            skin,
+            title,
+            on_command,
+            playback_source,
+            sample_source,
+            playlist_source,
+        ) {
             eprintln!("xubamp: {e}");
             std::process::exit(1);
         }
@@ -235,9 +263,14 @@ fn main() {
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
-        if let Err(e) =
-            xubamp_wl::run(skin, title, on_command, playback_source, sample_source, playlist_source)
-        {
+        if let Err(e) = xubamp_wl::run(
+            skin,
+            title,
+            on_command,
+            playback_source,
+            sample_source,
+            playlist_source,
+        ) {
             eprintln!("xubamp: {e}");
             std::process::exit(1);
         }
@@ -246,7 +279,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, track_title, transport_ops, EngineOp};
+    use super::{classify, track_title, transport_ops, EngineOp, TransportState};
     use xubamp_render::hit::Transport;
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -254,43 +287,54 @@ mod tests {
     }
 
     #[test]
-    fn play_button_resumes_when_paused_restarts_when_finished_and_is_a_noop_while_playing() {
-        // Already playing: no-op.
-        assert!(transport_ops(Transport::Play, true, false).is_empty(), "playing: Play does nothing");
-        // Paused or stopped (not playing, not finished): resume in place. Stop already rewound to 0,
-        // so this doubles as "play from the top" after a Stop, while Pause resumes where it paused.
+    fn play_resumes_only_when_paused_and_otherwise_restarts() {
+        // Already playing: restart from the beginning, like the X hotkey.
         assert_eq!(
-            transport_ops(Transport::Play, false, false),
-            vec![EngineOp::SetActive(true)],
-            "paused/stopped: Play resumes in place",
-        );
-        // Finished: restart from the top (resume in place would find nothing left to play).
-        assert_eq!(
-            transport_ops(Transport::Play, false, true),
+            transport_ops(Transport::Play, TransportState::Playing),
             vec![EngineOp::SeekToStart, EngineOp::SetActive(true)],
-            "finished: Play restarts from the top",
+            "playing: Play restarts",
         );
+        // Paused: resume in place.
+        assert_eq!(
+            transport_ops(Transport::Play, TransportState::Paused),
+            vec![EngineOp::SetActive(true)],
+            "paused: Play resumes in place",
+        );
+        for state in [TransportState::Stopped, TransportState::Finished] {
+            assert_eq!(
+                transport_ops(Transport::Play, state),
+                vec![EngineOp::SeekToStart, EngineOp::SetActive(true)],
+                "{state:?}: Play starts from the top",
+            );
+        }
     }
 
     #[test]
     fn pause_toggles_from_the_live_playing_state() {
         assert_eq!(
-            transport_ops(Transport::Pause, true, false),
+            transport_ops(Transport::Pause, TransportState::Playing),
             vec![EngineOp::SetActive(false)],
             "playing -> pause",
         );
         assert_eq!(
-            transport_ops(Transport::Pause, false, false),
+            transport_ops(Transport::Pause, TransportState::Paused),
             vec![EngineOp::SetActive(true)],
             "paused -> resume",
         );
+        for state in [TransportState::Stopped, TransportState::Finished] {
+            assert_eq!(
+                transport_ops(Transport::Pause, state),
+                vec![EngineOp::SeekToStart, EngineOp::SetActive(true)],
+                "{state:?}: Pause acts like Play",
+            );
+        }
     }
 
     #[test]
     fn stop_halts_and_rewinds() {
         // Order matters: deactivate first, then rewind, so the clock shows 00:00 stopped.
         assert_eq!(
-            transport_ops(Transport::Stop, true, false),
+            transport_ops(Transport::Stop, TransportState::Playing),
             vec![EngineOp::SetActive(false), EngineOp::SeekToStart],
         );
     }
@@ -298,13 +342,19 @@ mod tests {
     #[test]
     fn skip_commands_map_to_nothing_until_a_playlist() {
         for t in [Transport::Prev, Transport::Next, Transport::Eject] {
-            assert!(transport_ops(t, true, false).is_empty(), "{t:?} maps to nothing yet");
+            assert!(
+                transport_ops(t, TransportState::Playing).is_empty(),
+                "{t:?} maps to nothing yet"
+            );
         }
     }
 
     #[test]
     fn track_title_is_the_file_stem() {
-        assert_eq!(track_title("/music/Aphex Twin - Xtal.mp3"), "Aphex Twin - Xtal");
+        assert_eq!(
+            track_title("/music/Aphex Twin - Xtal.mp3"),
+            "Aphex Twin - Xtal"
+        );
         assert_eq!(track_title("song.flac"), "song");
         assert_eq!(track_title("no_extension"), "no_extension");
         assert_eq!(track_title(""), "");
@@ -330,7 +380,11 @@ mod tests {
     fn first_skin_wins_all_media_kept_in_order_unknown_ignored() {
         let (skin, media) = classify(s(&["notes.txt", "a.mp3", "b.wav", "one.wsz", "two.wsz"]));
         assert_eq!(skin.as_deref(), Some("one.wsz"), "the first skin wins");
-        assert_eq!(media, ["a.mp3", "b.wav"], "every media file is kept as a playlist, in order");
+        assert_eq!(
+            media,
+            ["a.mp3", "b.wav"],
+            "every media file is kept as a playlist, in order"
+        );
     }
 
     #[test]

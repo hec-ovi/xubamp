@@ -11,7 +11,7 @@ use xubamp_audio::playlist::Playlist;
 use xubamp_render::hit::{ModeButton, Playback, Transport};
 use xubamp_render::pledit;
 
-use crate::{track_title, transport_ops, EngineOp};
+use crate::{track_title, transport_ops, EngineOp, TransportState};
 
 pub struct Player {
     playlist: Playlist,
@@ -92,14 +92,26 @@ impl Player {
                     self.load_current();
                 }
             }
-            Transport::Next => self.advance(),
+            Transport::Next => {
+                self.advance();
+            }
             Transport::Eject => eprintln!("xubamp: Eject (load file) not implemented yet"),
             Transport::Play | Transport::Pause | Transport::Stop => {
                 // Stop clears the visualizer (a reset); Play/Pause do not.
+                let was_stopped = self.stopped;
                 self.stopped = matches!(t, Transport::Stop);
                 if let Some(engine) = &self.engine {
                     let h = engine.handle();
-                    for op in transport_ops(t, h.is_playing(), h.is_finished()) {
+                    let state = if h.is_finished() {
+                        TransportState::Finished
+                    } else if h.is_playing() {
+                        TransportState::Playing
+                    } else if was_stopped {
+                        TransportState::Stopped
+                    } else {
+                        TransportState::Paused
+                    };
+                    for op in transport_ops(t, state) {
                         match op {
                             EngineOp::SeekToStart => h.seek_to_start(),
                             EngineOp::SetActive(active) => h.set_active(active),
@@ -113,7 +125,7 @@ impl Player {
     /// Advance to the next track (Next button or auto-advance): redo a stepped-back track if any,
     /// else a random one in shuffle mode or the next in order (wrapping when repeat is on). Loads and
     /// plays whatever it lands on; a no-op at a hard end. Remembers the departing track for Back.
-    fn advance(&mut self) {
+    fn advance(&mut self) -> bool {
         let moved = if self.shuffle && self.playlist.len() > 1 {
             // Redo a stepped-back track if any, else a fresh random pick; both remember the trail.
             let fresh = Some(self.next_random());
@@ -125,6 +137,7 @@ impl Player {
         if moved {
             self.load_current();
         }
+        moved
     }
 
     /// Play the playlist track at index `i` (a double-click in the playlist window). Remembers the
@@ -213,8 +226,13 @@ impl Player {
 
     /// Called each UI tick: auto-advance to the next track when the current one has played out.
     pub fn poll(&mut self) {
-        if self.engine.as_ref().is_some_and(AudioEngine::is_finished) {
-            self.advance();
+        if self.stopped || !self.engine.as_ref().is_some_and(AudioEngine::is_finished) {
+            return;
+        }
+        if !self.advance() {
+            // Natural end at a hard playlist boundary: leave the decoder and clock at the end. The
+            // stopped marker prevents this poll from retrying forever; Play/Pause can restart it.
+            self.stopped = true;
         }
     }
 
@@ -277,5 +295,129 @@ impl Player {
             Some(engine) => engine.handle().read_scope(out),
             None => out.iter_mut().for_each(|s| *s = 0.0),
         }
+    }
+}
+
+/// End-to-end tests of the player against the real PipeWire-backed engine: they play short WAVs to
+/// their end and assert the playlist behaviour at the boundary. Ignored by default (they need a
+/// running PipeWire session); in the dev container route them to a silent sink to stay quiet:
+///   cargo test -p xubamp --features audio player -- --ignored --nocapture
+/// (set PIPEWIRE_NODE=<null-sink> first for silence.)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    /// Write a dependency-free 16-bit PCM stereo WAV of a 440 Hz sine, `seconds` long.
+    fn write_wav(path: &Path, rate: u32, seconds: u32) {
+        let channels: u16 = 2;
+        let bits: u16 = 16;
+        let frames = rate * seconds;
+        let data_len = frames * channels as u32 * (bits / 8) as u32;
+        let byte_rate = rate * channels as u32 * (bits / 8) as u32;
+        let block_align = channels * (bits / 8);
+        let mut buf = Vec::with_capacity(44 + data_len as usize);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36 + data_len).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&channels.to_le_bytes());
+        buf.extend_from_slice(&rate.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        let step = std::f64::consts::TAU * 440.0 / rate as f64;
+        for i in 0..frames {
+            let s = ((i as f64 * step).sin() * 0.2 * 32767.0) as i16;
+            buf.extend_from_slice(&s.to_le_bytes()); // L
+            buf.extend_from_slice(&s.to_le_bytes()); // R
+        }
+        std::fs::write(path, buf).expect("write wav");
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn a_single_track_stops_at_the_end_without_rewinding() {
+        let path = std::env::temp_dir().join("xubamp_player_eos.wav");
+        write_wav(&path, 48_000, 1); // one second, finishes quickly
+        let mut player = Player::new(vec![path.clone()]);
+        player.start();
+
+        // Poll as the UI loop does; the track should play out and then STOP (not hang finished).
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            player.poll();
+            if player.playback().stopped {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "single track never stopped at its end: {:?}",
+                player.playback(),
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+
+        // The hard end is handled once, but the decoder/clock remains at the final position. This is
+        // distinct from pressing Stop, which explicitly rewinds to zero.
+        thread::sleep(Duration::from_millis(400));
+        player.poll();
+        let pb = player.playback();
+        assert!(!pb.playing, "stopped at the end, not left playing");
+        assert!(pb.stopped, "the end-of-playlist stop holds");
+        assert!(
+            pb.position.unwrap_or(0.0) > 0.95,
+            "position remains at the end ({:?})",
+            pb.position
+        );
+        assert!(
+            pb.elapsed.unwrap_or(0) >= 1,
+            "clock remains at the end ({:?})",
+            pb.elapsed
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn a_finished_track_auto_advances_to_the_next() {
+        let a = std::env::temp_dir().join("xubamp_player_adv_a.wav");
+        let b = std::env::temp_dir().join("xubamp_player_adv_b.wav");
+        write_wav(&a, 48_000, 1);
+        write_wav(&b, 48_000, 2); // longer, so there is a window to observe it playing
+        let mut player = Player::new(vec![a.clone(), b.clone()]);
+        player.start();
+        assert_eq!(
+            player.playlist_view().1,
+            Some(0),
+            "starts on the first track"
+        );
+
+        // The first track plays out; the auto-advance poll should move to the second and play it.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            player.poll();
+            if player.playlist_view().1 == Some(1) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the first track did not auto-advance to the second: {:?}",
+                player.playback(),
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+        // On the second track it is playing again, not in the stopped end state.
+        let pb = player.playback();
+        assert!(!pb.stopped, "advancing to the next track is not a stop");
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 }

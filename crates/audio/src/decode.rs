@@ -31,6 +31,36 @@ pub struct Source {
     pub total_frames: Option<u64>,
 }
 
+/// Header-only duration probe: open the container, read the default audio track's frame count and
+/// sample rate, and return whole seconds. No decoding happens, so it is cheap enough to run over a
+/// whole playlist as tracks are added. Returns `None` when the length or rate is not carried in the
+/// header (e.g. a VBR MP3 with no Xing header) or the file cannot be read, so a caller shows a blank
+/// time rather than a wrong one.
+pub fn probe_duration_secs(path: &Path) -> Option<u32> {
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)?;
+    let frames = track.codec_params.n_frames?;
+    let rate = u64::from(track.codec_params.sample_rate?);
+    (rate > 0).then(|| (frames / rate) as u32)
+}
+
 impl Source {
     /// Open a file and prepare its default audio track for decoding.
     pub fn open(path: &Path) -> Result<Self, Error> {

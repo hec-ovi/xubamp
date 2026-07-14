@@ -3,7 +3,7 @@
 //! its own PipeWire stream at its native rate, so no resampler is needed to move between tracks of
 //! different rates). It lives on the main/UI thread, so it needs no locking.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use xubamp_audio::engine::AudioEngine;
@@ -51,6 +51,10 @@ pub struct Player {
     /// Equalizer controls persist across tracks. Every newly loaded engine starts with this exact
     /// snapshot, while an in-flight engine receives changes through its lock-free control handle.
     equalizer: EqSettings,
+    /// Header-probed track lengths in seconds, keyed by path, so the playlist window can show each
+    /// row's duration and the selected/total running time without decoding. Filled as tracks are
+    /// added; a path that has no header length simply stays absent (shown blank).
+    durations: HashMap<PathBuf, u32>,
 }
 
 impl Player {
@@ -66,6 +70,7 @@ impl Player {
             shuffle: false,
             shuffle_cycle: ShuffleCycle::from_entropy(),
             equalizer: EqSettings::default(),
+            durations: HashMap::new(),
         };
         player.append_paths(tracks);
         player.shuffle_cycle.anchor(&player.playlist);
@@ -100,8 +105,21 @@ impl Player {
     /// The returned stable IDs correspond one-for-one with accepted MP3/WAV paths. Unsupported
     /// extensions are ignored as a final audio-only guard after file or directory selection.
     pub fn append_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Vec<TrackId> {
-        self.playlist
-            .extend(paths.into_iter().filter(|path| is_audio_path(path)))
+        let accepted: Vec<PathBuf> = paths.into_iter().filter(|path| is_audio_path(path)).collect();
+        self.probe_durations(&accepted);
+        self.playlist.extend(accepted)
+    }
+
+    /// Header-probe any not-yet-known paths and cache their lengths for the playlist display. Errors
+    /// and headerless files are simply skipped, so one bad file never blocks the rest.
+    fn probe_durations(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            if !self.durations.contains_key(path) {
+                if let Some(secs) = xubamp_audio::decode::probe_duration_secs(path) {
+                    self.durations.insert(path.clone(), secs);
+                }
+            }
+        }
     }
 
     /// Replace the playlist with supported local audio paths, preserving player-wide modes,
@@ -116,6 +134,7 @@ impl Player {
         if accepted.is_empty() {
             return 0;
         }
+        self.probe_durations(&accepted);
         let repeat = self.playlist.repeat();
         self.engine = None;
         self.playlist = Playlist::new(accepted);
@@ -669,10 +688,13 @@ impl Player {
             .playlist
             .tracks()
             .enumerate()
-            .map(|(i, path)| pledit::Row {
-                title: format!("{}. {}", i + 1, track_title(&path.to_string_lossy())),
-                duration: String::new(),
-                duration_secs: None,
+            .map(|(i, path)| {
+                let duration_secs = self.durations.get(path).copied();
+                pledit::Row {
+                    title: format!("{}. {}", i + 1, track_title(&path.to_string_lossy())),
+                    duration: duration_secs.map(fmt_mmss).unwrap_or_default(),
+                    duration_secs,
+                }
             })
             .collect();
         (rows, self.playlist.current_index())
@@ -734,6 +756,11 @@ fn skip_target(current: usize, len: usize, delta: i32) -> Option<usize> {
     Some((current as i32 + delta).clamp(0, len as i32 - 1) as usize)
 }
 
+/// Format a whole-second track length as classic Winamp M:SS (minutes are not zero-padded).
+fn fmt_mmss(secs: u32) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 /// End-to-end tests of the player against the real PipeWire-backed engine: they play short WAVs to
 /// their end and assert the playlist behaviour at the boundary. Ignored by default (they need a
 /// running PipeWire session); in the dev container route them to a silent sink to stay quiet:
@@ -742,6 +769,29 @@ fn skip_target(current: usize, len: usize, delta: i32) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_mmss_matches_classic_winamp() {
+        assert_eq!(fmt_mmss(0), "0:00");
+        assert_eq!(fmt_mmss(9), "0:09");
+        assert_eq!(fmt_mmss(65), "1:05");
+        assert_eq!(fmt_mmss(600), "10:00");
+        assert_eq!(fmt_mmss(3599), "59:59");
+    }
+
+    #[test]
+    fn playlist_view_shows_probed_durations() {
+        let dir = std::env::temp_dir().join(format!("xubamp-dur-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.wav");
+        write_wav(&path, 48_000, 2); // ~2 seconds at 48 kHz
+        let player = Player::new(vec![path.clone()]);
+        let (rows, _) = player.playlist_view();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].duration_secs, Some(2), "header duration probed");
+        assert_eq!(rows[0].duration, "0:02");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn skip_target_clamps_to_the_playlist_ends() {

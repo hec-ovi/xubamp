@@ -3,16 +3,22 @@
 //! its own PipeWire stream at its native rate, so no resampler is needed to move between tracks of
 //! different rates). It lives on the main/UI thread, so it needs no locking.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use xubamp_audio::engine::AudioEngine;
-use xubamp_audio::playlist::Playlist;
+use xubamp_audio::playlist::{Playlist, ShuffleCycle, TrackId};
 use xubamp_audio::EqSettings;
 use xubamp_render::hit::{ModeButton, Playback, Transport};
 use xubamp_render::pledit;
 
 use crate::{track_title, transport_ops, EngineOp, TransportState};
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Forward,
+    Backward,
+}
 
 pub struct Player {
     playlist: Playlist,
@@ -25,33 +31,32 @@ pub struct Player {
     /// Whether the last transport was Stop (as opposed to Pause), so the visualizer can clear rather
     /// than freeze. Reset by any action that (re)starts or changes the track.
     stopped: bool,
-    /// Shuffle mode: when on, advancing plays a random track. (Repeat mode lives on the playlist.)
+    /// Shuffle mode traverses a stable-ID permutation. Repeat mode lives on the playlist.
     shuffle: bool,
+    /// The pending permutation is independent of display order, so playlist edits cannot silently
+    /// retarget a choice to the entry that inherited an old index.
+    shuffle_cycle: ShuffleCycle,
     /// Equalizer controls persist across tracks. Every newly loaded engine starts with this exact
     /// snapshot, while an in-flight engine receives changes through its lock-free control handle.
     equalizer: EqSettings,
-    /// xorshift PRNG state for shuffle, seeded once at startup.
-    rng: u64,
 }
 
 impl Player {
     /// Construct a player with the classic defaults. Kept for callers and tests that do not restore
     /// persisted settings.
     pub fn new(tracks: Vec<PathBuf>) -> Self {
+        let playlist = Playlist::new(tracks);
+        let mut shuffle_cycle = ShuffleCycle::from_entropy();
+        shuffle_cycle.anchor(&playlist);
         Self {
-            playlist: Playlist::new(tracks),
+            playlist,
             engine: None,
             volume: 100,
             balance: 0,
             stopped: false,
             shuffle: false,
+            shuffle_cycle,
             equalizer: EqSettings::default(),
-            // Seed the PRNG from the wall clock; `| 1` avoids the all-zero state xorshift can't leave.
-            rng: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x9E37_79B9_7F4A_7C15)
-                | 1,
         }
     }
 
@@ -67,31 +72,90 @@ impl Player {
         player.shuffle = shuffle;
         player.playlist.set_repeat(repeat);
         player.set_equalizer_settings(equalizer);
+        if shuffle {
+            player.shuffle_cycle.anchor(&player.playlist);
+        }
         player
     }
 
     /// Start playing the current track (called once at startup). No-op on an empty playlist.
     pub fn start(&mut self) {
-        self.load_current();
-    }
-
-    /// Drop the old engine (joining its threads and freeing its stream) and start a fresh one for
-    /// the current track, applying the persisted volume/balance. A load failure leaves no engine.
-    fn load_current(&mut self) {
-        self.stopped = false; // a (re)loaded track is playing, not stopped
-        self.engine = None; // drop first: join the old threads before opening a new stream
-        let Some(path) = self.playlist.current().map(Path::to_path_buf) else {
+        let Some(current) = self.playlist.current_id() else {
+            self.stopped = true;
             return;
         };
+
+        // Try lazily: precomputing a shuffled candidate list would consume the whole permutation
+        // even when the first file loads. A broken first file still scans at most each stable ID
+        // once, and repeat can never turn an all-broken playlist into an infinite retry loop.
+        if self.try_load(current, true) {
+            self.playlist.clear_history();
+            return;
+        }
+        if self.shuffle {
+            let mut seen = HashSet::from([current]);
+            let max_steps = self.playlist.len().saturating_mul(2);
+            for _ in 0..max_steps {
+                if seen.len() >= self.playlist.len() {
+                    break;
+                }
+                let Some(id) = self
+                    .shuffle_cycle
+                    .next(&self.playlist, self.playlist.repeat())
+                else {
+                    break;
+                };
+                if !seen.insert(id) {
+                    continue;
+                }
+                if self.try_load(id, true) {
+                    self.playlist.select_track(id);
+                    self.playlist.clear_history();
+                    return;
+                }
+            }
+        } else if let Some(index) = self.playlist.current_index() {
+            let candidates = self.linear_candidates(index, Direction::Forward, true);
+            for id in candidates.into_iter().skip(1) {
+                if self.try_load(id, true) {
+                    self.playlist.select_track(id);
+                    self.playlist.clear_history();
+                    return;
+                }
+            }
+        }
+        self.stopped = true;
+    }
+
+    /// Drop the old engine and try one stable-ID candidate. When `active` is false the destination
+    /// is still decoded and ready, but remains in the classic stopped state at its beginning.
+    fn try_load(&mut self, id: TrackId, active: bool) -> bool {
+        let Some(path) = self.playlist.path_for_id(id).map(Path::to_path_buf) else {
+            return false;
+        };
+        self.engine = None; // join old workers before opening the replacement stream
         match AudioEngine::play_with_equalizer(&path, self.equalizer_settings()) {
             Ok(engine) => {
                 let h = engine.handle();
                 h.set_volume(self.volume);
                 h.set_balance(self.balance);
-                eprintln!("xubamp: playing {}", path.display());
+                if !active {
+                    h.set_active(false);
+                    h.seek_to_start();
+                }
+                self.stopped = !active;
+                eprintln!(
+                    "xubamp: {} {}",
+                    if active { "playing" } else { "loaded" },
+                    path.display()
+                );
                 self.engine = Some(engine);
+                true
             }
-            Err(e) => eprintln!("xubamp: cannot play {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("xubamp: cannot play {}: {e}", path.display());
+                false
+            }
         }
     }
 
@@ -101,81 +165,202 @@ impl Player {
     pub fn transport(&mut self, t: Transport) {
         match t {
             Transport::Prev => {
-                // In shuffle, Back retraces the real play order (the history stack) so it returns to
-                // the track you actually just heard. In order, Prev is simply the previous track, so
-                // toggling shuffle off gives plain sequential navigation.
-                let moved = if self.shuffle {
-                    let fresh = self.playlist.peek_prev();
-                    self.playlist.back(fresh).is_some()
-                } else {
-                    self.playlist.prev().is_some()
-                };
-                if moved {
-                    self.load_current();
-                }
+                let active = self.navigation_autoplays();
+                self.navigate_previous(active);
             }
             Transport::Next => {
-                self.advance();
+                let active = self.navigation_autoplays();
+                self.advance(active);
             }
             Transport::Eject => eprintln!("xubamp: Eject (load file) not implemented yet"),
             Transport::Play | Transport::Pause | Transport::Stop => {
                 // Stop clears the visualizer (a reset); Play/Pause do not.
                 let was_stopped = self.stopped;
                 self.stopped = matches!(t, Transport::Stop);
-                if let Some(engine) = &self.engine {
-                    let h = engine.handle();
-                    let state = if h.is_finished() {
-                        TransportState::Finished
-                    } else if h.is_playing() {
-                        TransportState::Playing
-                    } else if was_stopped {
-                        TransportState::Stopped
-                    } else {
-                        TransportState::Paused
-                    };
-                    for op in transport_ops(t, state) {
-                        match op {
-                            EngineOp::SeekToStart => h.seek_to_start(),
-                            EngineOp::SetActive(active) => h.set_active(active),
-                        }
+                let Some(engine) = &self.engine else {
+                    // A previous decode failure may have left the selection intact but no engine.
+                    // Classic Play (and Pause-as-Play) retries from that selection with the same
+                    // bounded invalid-file scan used at startup.
+                    if matches!(t, Transport::Play | Transport::Pause) {
+                        self.start();
+                    }
+                    return;
+                };
+                let h = engine.handle();
+                let state = if h.is_finished() {
+                    TransportState::Finished
+                } else if h.is_playing() {
+                    TransportState::Playing
+                } else if was_stopped {
+                    TransportState::Stopped
+                } else {
+                    TransportState::Paused
+                };
+                for op in transport_ops(t, state) {
+                    match op {
+                        EngineOp::SeekToStart => h.seek_to_start(),
+                        EngineOp::SetActive(active) => h.set_active(active),
                     }
                 }
             }
         }
     }
 
-    /// Advance to the next track (Next button or auto-advance): redo a stepped-back track if any,
-    /// else a random one in shuffle mode or the next in order (wrapping when repeat is on). Loads and
-    /// plays whatever it lands on; a no-op at a hard end. Remembers the departing track for Back.
-    fn advance(&mut self) -> bool {
-        let moved = if self.shuffle && self.playlist.len() > 1 {
-            // Redo a stepped-back track if any, else a fresh random pick; both remember the trail.
-            let fresh = Some(self.next_random());
-            self.playlist.forward(fresh).is_some()
-        } else {
-            // In order, Next is simply the next track (wrapping with repeat).
-            self.playlist.next().is_some()
-        };
-        if moved {
-            self.load_current();
+    /// Advance to the next playable track. In shuffle, a browser-style Forward redo is tried before
+    /// consuming the next permutation member. Failed files are skipped transactionally, so they do
+    /// not enter actual play history, and the unique-attempt bound prevents repeat from looping.
+    fn advance(&mut self, active: bool) -> bool {
+        if self.playlist.is_empty() {
+            return false;
         }
-        moved
+        if !self.shuffle {
+            let Some(index) = self.playlist.current_index() else {
+                return false;
+            };
+            let candidates = self.linear_candidates(index, Direction::Forward, false);
+            return self.try_linear_candidates(candidates, active);
+        }
+
+        let mut attempted = HashSet::new();
+        let mut attempted_load = false;
+        // History is capped at 256 and one complete cycle is at most `len`; the extra cycle covers
+        // duplicate redo IDs plus crossing a repeat boundary while skipping broken files.
+        let max_steps = self.playlist.len().saturating_mul(2).saturating_add(257);
+        for _ in 0..max_steps {
+            if attempted.len() >= self.playlist.len() {
+                break;
+            }
+            let (id, redo) = if let Some(id) = self.playlist.forward_candidate(None) {
+                (id, true)
+            } else {
+                let Some(id) = self
+                    .shuffle_cycle
+                    .next(&self.playlist, self.playlist.repeat())
+                else {
+                    break;
+                };
+                (id, false)
+            };
+
+            if !attempted.insert(id) {
+                if redo {
+                    self.playlist.discard_forward_candidate(id);
+                }
+                continue;
+            }
+            attempted_load = true;
+            if self.try_load(id, active) {
+                if self.playlist.commit_forward(id).is_some() {
+                    return true;
+                }
+                self.engine = None;
+                break;
+            }
+            if redo {
+                self.playlist.discard_forward_candidate(id);
+            }
+        }
+        if attempted_load {
+            self.stopped = true;
+        }
+        false
+    }
+
+    /// Previous retraces successfully-played shuffle history. It never manufactures a random or
+    /// index-adjacent predecessor when that history is exhausted.
+    fn navigate_previous(&mut self, active: bool) -> bool {
+        if !self.shuffle {
+            let Some(index) = self.playlist.current_index() else {
+                return false;
+            };
+            let candidates = self.linear_candidates(index, Direction::Backward, false);
+            return self.try_linear_candidates(candidates, active);
+        }
+
+        let mut attempted = HashSet::new();
+        let mut attempted_load = false;
+        for _ in 0..257 {
+            if attempted.len() >= self.playlist.len() {
+                break;
+            }
+            let Some(id) = self.playlist.back_candidate(None) else {
+                break;
+            };
+            if !attempted.insert(id) {
+                self.playlist.discard_back_candidate(id);
+                continue;
+            }
+            attempted_load = true;
+            if self.try_load(id, active) {
+                if self.playlist.commit_back(id).is_some() {
+                    return true;
+                }
+                self.engine = None;
+                break;
+            }
+            self.playlist.discard_back_candidate(id);
+        }
+        if attempted_load {
+            self.stopped = true;
+        }
+        false
     }
 
     /// Play the playlist track at index `i` (a double-click in the playlist window). Remembers the
     /// current track for Back and clears the forward stack (a fresh navigation). No-op if the index
     /// is out of range.
     pub fn play_index(&mut self, i: usize) {
-        // In shuffle, remember the departing track for Back; in order, a plain select keeps Prev/Next
-        // sequential from the new position.
-        let moved = if self.shuffle {
-            self.playlist.jump_to(i).is_some()
-        } else {
-            self.playlist.select(i).is_some()
+        let Some(selected) = self.playlist.track_id(i) else {
+            return;
         };
-        if moved {
-            self.load_current();
+
+        if self.try_load(selected, true) {
+            if self.shuffle {
+                self.playlist.jump_to(i);
+                self.shuffle_cycle.anchor(&self.playlist);
+            } else {
+                self.playlist.select_track(selected);
+            }
+            return;
         }
+
+        // A double-clicked broken entry follows the same bounded skip policy as transport. Build a
+        // fresh cycle anchored at the requested row so a successful fallback still starts a manual
+        // shuffle traversal rather than leaking the old pending order.
+        let mut attempted = HashSet::from([selected]);
+        if self.shuffle {
+            let mut fresh_cycle = self.shuffle_cycle.clone();
+            fresh_cycle.anchor_at(&self.playlist, Some(selected));
+            for _ in 1..self.playlist.len() {
+                let Some(id) = fresh_cycle.next(&self.playlist, self.playlist.repeat()) else {
+                    break;
+                };
+                if !attempted.insert(id) {
+                    continue;
+                }
+                if self.try_load(id, true) {
+                    if let Some(index) = self.playlist.index_of_id(id) {
+                        self.playlist.jump_to(index);
+                        self.shuffle_cycle = fresh_cycle;
+                        return;
+                    }
+                    self.engine = None;
+                    break;
+                }
+            }
+        } else {
+            let candidates = self.linear_candidates(i, Direction::Forward, true);
+            for id in candidates.into_iter().skip(1) {
+                if !attempted.insert(id) {
+                    continue;
+                }
+                if self.try_load(id, true) {
+                    self.playlist.select_track(id);
+                    return;
+                }
+            }
+        }
+        self.stopped = true;
     }
 
     /// Toggle shuffle or repeat mode.
@@ -186,6 +371,11 @@ impl Player {
                 // The Back/Forward history only drives navigation in shuffle, so reset it on any
                 // mode change so a stale shuffle trail never leaks into sequential play (or back).
                 self.playlist.clear_history();
+                if self.shuffle {
+                    self.shuffle_cycle.anchor(&self.playlist);
+                } else {
+                    self.shuffle_cycle.clear();
+                }
             }
             ModeButton::Repeat => {
                 let on = !self.playlist.repeat();
@@ -219,26 +409,70 @@ impl Player {
         }
     }
 
-    /// A xorshift step.
-    fn rand(&mut self) -> u64 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        x
+    /// Track changes keep playing from Playing and Paused, but a user pressing Next/Previous after
+    /// Stop (or before the end poll observes a naturally-finished stream) merely loads the target.
+    fn navigation_autoplays(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| !self.stopped && !engine.is_finished())
     }
 
-    /// A random track index that is not the current one (so shuffle does not replay in place).
-    fn next_random(&mut self) -> usize {
-        let n = self.playlist.len();
-        let cur = self.playlist.current_index();
-        loop {
-            let i = (self.rand() % n as u64) as usize;
-            if n == 1 || Some(i) != cur {
-                return i;
+    /// Stable-ID candidates in classic display order. With repeat off this stops at the relevant
+    /// edge. With repeat on it visits exactly one full playlist, including the starting track last
+    /// for a transport skip (which restarts a single-track playlist).
+    fn linear_candidates(
+        &self,
+        start: usize,
+        direction: Direction,
+        include_start: bool,
+    ) -> Vec<TrackId> {
+        let len = self.playlist.len();
+        if start >= len || len == 0 {
+            return Vec::new();
+        }
+
+        let mut result = Vec::with_capacity(len);
+        let first_step = usize::from(!include_start);
+        for offset in 0..len {
+            let step = first_step + offset;
+            let index = match direction {
+                Direction::Forward => {
+                    let raw = start + step;
+                    if raw >= len && !self.playlist.repeat() {
+                        break;
+                    }
+                    raw % len
+                }
+                Direction::Backward => {
+                    if step > start && !self.playlist.repeat() {
+                        break;
+                    }
+                    (start + len - (step % len)) % len
+                }
+            };
+            if let Some(id) = self.playlist.track_id(index) {
+                result.push(id);
             }
         }
+        result
+    }
+
+    fn try_linear_candidates(&mut self, candidates: Vec<TrackId>, active: bool) -> bool {
+        let mut attempted = false;
+        for id in candidates {
+            attempted = true;
+            if self.try_load(id, active) {
+                if self.playlist.select_track(id).is_some() {
+                    return true;
+                }
+                self.engine = None;
+                break;
+            }
+        }
+        if attempted {
+            self.stopped = true;
+        }
+        false
     }
 
     /// The `x` hotkey: force the current track from the top regardless of play state.
@@ -276,7 +510,7 @@ impl Player {
         if self.stopped || !self.engine.as_ref().is_some_and(AudioEngine::is_finished) {
             return;
         }
-        if !self.advance() {
+        if !self.advance(true) {
             // Natural end at a hard playlist boundary: leave the decoder and clock at the end. The
             // stopped marker prevents this poll from retrying forever; Play/Pause can restart it.
             self.stopped = true;
@@ -329,6 +563,7 @@ impl Player {
             None => Playback {
                 shuffle: self.shuffle,
                 repeat: self.playlist.repeat(),
+                stopped: self.stopped,
                 ..Default::default()
             },
         }
@@ -401,6 +636,75 @@ mod tests {
 
         assert_eq!(player.equalizer_settings().preamp_db, 0.0);
         assert_eq!(player.equalizer_settings().bands_db[0], 12.0);
+    }
+
+    #[test]
+    fn linear_navigation_candidates_stop_or_wrap_exactly_once() {
+        fn paths(player: &Player, ids: Vec<TrackId>) -> Vec<PathBuf> {
+            ids.into_iter()
+                .map(|id| player.playlist.path_for_id(id).unwrap().to_path_buf())
+                .collect()
+        }
+
+        let mut player = Player::new(["a", "b", "c"].map(PathBuf::from).to_vec());
+        player.playlist.select(1);
+
+        assert_eq!(
+            paths(
+                &player,
+                player.linear_candidates(1, Direction::Forward, false),
+            ),
+            ["c"].map(PathBuf::from)
+        );
+        assert_eq!(
+            paths(
+                &player,
+                player.linear_candidates(1, Direction::Backward, false),
+            ),
+            ["a"].map(PathBuf::from)
+        );
+
+        player.playlist.set_repeat(true);
+        assert_eq!(
+            paths(
+                &player,
+                player.linear_candidates(1, Direction::Forward, false),
+            ),
+            ["c", "a", "b"].map(PathBuf::from),
+            "repeat visits one full cycle and restarts current last"
+        );
+        assert_eq!(
+            paths(
+                &player,
+                player.linear_candidates(1, Direction::Backward, false),
+            ),
+            ["a", "c", "b"].map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn all_invalid_shuffle_with_repeat_is_bounded_at_start_and_next() {
+        let paths = [
+            "/definitely-missing/xubamp-broken-a.mp3",
+            "/definitely-missing/xubamp-broken-b.mp3",
+            "/definitely-missing/xubamp-broken-c.mp3",
+        ]
+        .map(PathBuf::from)
+        .to_vec();
+        let mut player = Player::with_settings(paths, true, true, EqSettings::default());
+
+        player.start();
+        assert!(player.engine.is_none());
+        assert!(player.stopped);
+        assert!(player.playback().stopped);
+
+        player.transport(Transport::Next);
+        assert!(player.engine.is_none());
+        assert!(player.stopped);
+
+        player.transport(Transport::Play);
+        assert!(player.engine.is_none());
+        assert!(player.playback().stopped);
     }
 
     /// Write a dependency-free 16-bit PCM stereo WAV of a 440 Hz sine, `seconds` long.
@@ -513,5 +817,170 @@ mod tests {
 
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn next_from_stop_loads_the_destination_without_starting_it() {
+        let a = std::env::temp_dir().join("xubamp_player_stopped_next_a.wav");
+        let b = std::env::temp_dir().join("xubamp_player_stopped_next_b.wav");
+        write_wav(&a, 48_000, 2);
+        write_wav(&b, 48_000, 2);
+        let mut player = Player::new(vec![a.clone(), b.clone()]);
+        player.start();
+        player.transport(Transport::Stop);
+        player.transport(Transport::Next);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while player.playback().playing && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(player.playlist_view().1, Some(1));
+        assert!(player.playback().stopped);
+        assert!(!player.playback().playing);
+        assert_eq!(player.playback().elapsed, Some(0));
+        assert!(player.playback().position.unwrap_or(1.0) < 0.05);
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn next_from_pause_starts_the_destination() {
+        let a = std::env::temp_dir().join("xubamp_player_paused_next_a.wav");
+        let b = std::env::temp_dir().join("xubamp_player_paused_next_b.wav");
+        write_wav(&a, 48_000, 2);
+        write_wav(&b, 48_000, 2);
+        let mut player = Player::new(vec![a.clone(), b.clone()]);
+        player.start();
+        player.transport(Transport::Pause);
+        player.transport(Transport::Next);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !player.playback().playing && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(player.playlist_view().1, Some(1));
+        assert!(!player.playback().stopped);
+        assert!(player.playback().playing);
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn next_from_a_naturally_finished_track_loads_stopped_before_poll() {
+        let a = std::env::temp_dir().join("xubamp_player_finished_next_a.wav");
+        let b = std::env::temp_dir().join("xubamp_player_finished_next_b.wav");
+        write_wav(&a, 48_000, 1);
+        write_wav(&b, 48_000, 2);
+        let mut player = Player::new(vec![a.clone(), b.clone()]);
+        player.start();
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !player.engine.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline, "first track never finished");
+            thread::sleep(Duration::from_millis(20));
+        }
+        player.transport(Transport::Next);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while player.playback().playing && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(player.playlist_view().1, Some(1));
+        assert!(player.playback().stopped);
+        assert!(!player.playback().playing);
+        assert_eq!(player.playback().elapsed, Some(0));
+        assert!(player.playback().position.unwrap_or(1.0) < 0.05);
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn shuffle_without_repeat_plays_one_permutation_then_stops() {
+        let paths = ["a", "b", "c"]
+            .map(|suffix| {
+                std::env::temp_dir().join(format!("xubamp_player_shuffle_once_{suffix}.wav"))
+            })
+            .to_vec();
+        for path in &paths {
+            write_wav(path, 48_000, 1);
+        }
+        let mut player = Player::with_settings(paths.clone(), true, false, EqSettings::default());
+        player.shuffle_cycle = ShuffleCycle::with_seed(0x0BAD_5EED);
+        player.shuffle_cycle.anchor(&player.playlist);
+        player.start();
+
+        let mut visited = vec![player.playlist.current_id().unwrap()];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !player.playback().stopped {
+            player.poll();
+            let current = player.playlist.current_id().unwrap();
+            if visited.last().copied() != Some(current) {
+                visited.push(current);
+            }
+            assert!(Instant::now() < deadline, "shuffle cycle never stopped");
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(visited.len(), paths.len());
+        assert_eq!(
+            visited.iter().copied().collect::<HashSet<_>>().len(),
+            paths.len()
+        );
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a running PipeWire session"]
+    fn shuffle_repeat_begins_a_new_cycle_without_replaying_in_place() {
+        let paths = ["a", "b", "c"]
+            .map(|suffix| {
+                std::env::temp_dir().join(format!("xubamp_player_shuffle_repeat_{suffix}.wav"))
+            })
+            .to_vec();
+        for path in &paths {
+            write_wav(path, 48_000, 1);
+        }
+        let mut player = Player::with_settings(paths.clone(), true, true, EqSettings::default());
+        player.shuffle_cycle = ShuffleCycle::with_seed(0x000C_1C1E);
+        player.shuffle_cycle.anchor(&player.playlist);
+        player.start();
+
+        let mut visited = vec![player.playlist.current_id().unwrap()];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while visited.len() < paths.len() + 1 {
+            player.poll();
+            let current = player.playlist.current_id().unwrap();
+            if visited.last().copied() != Some(current) {
+                visited.push(current);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "second shuffle cycle never began"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        player.transport(Transport::Stop);
+
+        assert_eq!(
+            visited[..paths.len()]
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len(),
+            paths.len()
+        );
+        assert_ne!(visited[paths.len() - 1], visited[paths.len()]);
+        for path in paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }

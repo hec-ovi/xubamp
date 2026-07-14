@@ -2,6 +2,7 @@
 //! audio), so mutation and navigation are unit-tested without a device. The player layer turns a
 //! returned path into actual playback.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// The most recent tracks remembered for Back/Forward navigation. Bounds memory over a long session
@@ -16,6 +17,157 @@ pub struct TrackId(u64);
 impl TrackId {
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+/// A shuffled, stable-ID traversal of a playlist.
+///
+/// The current track is the first member of a newly anchored cycle, so it is excluded from the
+/// initial pending permutation. Every other live entry is returned at most once. When repeat is
+/// enabled, exhausting the permutation starts a new one containing every live entry; its first
+/// result avoids the track that just played whenever another choice exists. Removed IDs are
+/// discarded, moved IDs keep their place in the cycle, and newly-added IDs join the pending set.
+///
+/// Randomness is deliberately self-contained rather than pulled from a global RNG. Supplying a
+/// seed makes the navigation policy reproducible in tests while [`Self::from_entropy`] gives the
+/// application a different order each run.
+#[derive(Debug, Clone)]
+pub struct ShuffleCycle {
+    remaining: Vec<TrackId>,
+    members: HashSet<TrackId>,
+    rng: u64,
+    anchored: bool,
+}
+
+impl ShuffleCycle {
+    /// Construct a deterministic cycle. An all-zero seed is remapped because xorshift cannot
+    /// escape zero.
+    pub fn with_seed(seed: u64) -> Self {
+        Self {
+            remaining: Vec::new(),
+            members: HashSet::new(),
+            rng: nonzero_seed(seed),
+            anchored: false,
+        }
+    }
+
+    /// Construct a cycle seeded from the wall clock.
+    pub fn from_entropy() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
+        Self::with_seed(seed)
+    }
+
+    /// Start a fresh traversal with the playlist's current entry as its already-played anchor.
+    pub fn anchor(&mut self, playlist: &Playlist) {
+        self.anchor_at(playlist, playlist.current_id());
+    }
+
+    /// Forget pending traversal state. The next call to [`Self::next`] anchors at whatever is then
+    /// current.
+    pub fn clear(&mut self) {
+        self.remaining.clear();
+        self.members.clear();
+        self.anchored = false;
+    }
+
+    /// Return the next stable track ID. With repeat off, an exhausted cycle stays exhausted. With
+    /// repeat on, a new complete permutation begins.
+    pub fn next(&mut self, playlist: &Playlist, repeat: bool) -> Option<TrackId> {
+        if !self.anchored {
+            self.anchor(playlist);
+        }
+        self.sync_edits(playlist);
+        if let Some(id) = self.remaining.pop() {
+            return Some(id);
+        }
+        if !repeat || playlist.is_empty() {
+            return None;
+        }
+
+        self.members = playlist.ids().collect();
+        self.remaining = playlist.ids().collect();
+        self.shuffle_remaining();
+
+        // `pop` is the next result. Keep the just-played track away from that position when there
+        // is any alternative; a one-entry repeating playlist necessarily returns itself.
+        if self.remaining.len() > 1 && self.remaining.last().copied() == playlist.current_id() {
+            if let Some(other) = self
+                .remaining
+                .iter()
+                .position(|id| Some(*id) != playlist.current_id())
+            {
+                let last = self.remaining.len() - 1;
+                self.remaining.swap(other, last);
+            }
+        }
+        self.remaining.pop()
+    }
+
+    /// Anchor at an explicit entry. This is used by a manual playlist jump after that entry has
+    /// become current.
+    pub fn anchor_at(&mut self, playlist: &Playlist, current: Option<TrackId>) {
+        self.members = playlist.ids().collect();
+        self.remaining = playlist.ids().filter(|id| Some(*id) != current).collect();
+        self.shuffle_remaining();
+        self.anchored = true;
+    }
+
+    fn sync_edits(&mut self, playlist: &Playlist) {
+        let live: HashSet<_> = playlist.ids().collect();
+        self.remaining.retain(|id| live.contains(id));
+        self.members.retain(|id| live.contains(id));
+
+        // If removing the current row caused Playlist to select its neighbor, that neighbor is now
+        // the cycle anchor and must not be returned immediately as a pending choice.
+        if let Some(current) = playlist.current_id() {
+            self.remaining.retain(|id| *id != current);
+            self.members.insert(current);
+        }
+
+        let old_len = self.remaining.len();
+        for id in playlist.ids() {
+            if self.members.insert(id) && Some(id) != playlist.current_id() {
+                self.remaining.push(id);
+            }
+        }
+        if self.remaining.len() != old_len {
+            self.shuffle_remaining();
+        }
+    }
+
+    fn shuffle_remaining(&mut self) {
+        for i in (1..self.remaining.len()).rev() {
+            let j = (self.rand() % (i as u64 + 1)) as usize;
+            self.remaining.swap(i, j);
+        }
+    }
+
+    fn rand(&mut self) -> u64 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rng = x;
+        x
+    }
+}
+
+impl Default for ShuffleCycle {
+    fn default() -> Self {
+        Self::from_entropy()
+    }
+}
+
+const fn nonzero_seed(seed: u64) -> u64 {
+    if seed == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        seed
     }
 }
 
@@ -76,6 +228,21 @@ impl Playlist {
     /// Stable identity of the entry currently at `index`.
     pub fn track_id(&self, index: usize) -> Option<TrackId> {
         self.tracks.get(index).map(|track| track.id)
+    }
+
+    /// All stable IDs in display order.
+    pub fn ids(&self) -> impl ExactSizeIterator<Item = TrackId> + DoubleEndedIterator + '_ {
+        self.tracks.iter().map(|track| track.id)
+    }
+
+    /// The display index of a stable ID, or `None` if that entry has been removed.
+    pub fn index_of_id(&self, id: TrackId) -> Option<usize> {
+        self.index_of(id)
+    }
+
+    /// The path belonging to a stable ID, or `None` if that entry has been removed.
+    pub fn path_for_id(&self, id: TrackId) -> Option<&Path> {
+        self.track(id).map(|track| track.path.as_path())
     }
 
     /// The current track's path, or `None` when the list is empty.
@@ -199,6 +366,11 @@ impl Playlist {
         Some(track.path.clone())
     }
 
+    /// Select a stable track identity without recording navigation history.
+    pub fn select_track(&mut self, id: TrackId) -> Option<PathBuf> {
+        self.select_id(id)
+    }
+
     /// The next index in linear order (wraps to the first with repeat), without moving. `None` at a
     /// hard end. The player passes this (or a shuffle-chosen index) to [`Self::forward`].
     pub fn peek_next(&self) -> Option<usize> {
@@ -230,9 +402,33 @@ impl Playlist {
     /// [`Self::peek_next`]). Remembers the track left behind for Back. Returns the new current track,
     /// or `None` at a hard end.
     pub fn forward(&mut self, fresh: Option<usize>) -> Option<PathBuf> {
-        let target = self
-            .pop_valid_future()
-            .or_else(|| fresh.and_then(|i| self.track_id(i)))?;
+        let fresh = fresh.and_then(|i| self.track_id(i));
+        let target = self.forward_candidate(fresh)?;
+        self.commit_forward(target)
+    }
+
+    /// Return the stable-ID candidate for Forward without changing selection or history. A valid
+    /// browser-style redo takes priority over `fresh`.
+    pub fn forward_candidate(&mut self, fresh: Option<TrackId>) -> Option<TrackId> {
+        self.purge_invalid_future();
+        self.future
+            .last()
+            .copied()
+            .or_else(|| fresh.filter(|id| self.track(*id).is_some()))
+    }
+
+    /// Commit a candidate returned by [`Self::forward_candidate`]. The departing current track is
+    /// recorded for Previous. If a redo is pending, only that redo can be committed.
+    pub fn commit_forward(&mut self, target: TrackId) -> Option<PathBuf> {
+        self.purge_invalid_future();
+        if let Some(redo) = self.future.last().copied() {
+            if redo != target {
+                return None;
+            }
+            self.future.pop();
+        } else if self.track(target).is_none() {
+            return None;
+        }
         if let Some(cur) = self.current {
             self.history.push(cur);
             self.cap_history();
@@ -240,17 +436,59 @@ impl Playlist {
         self.select_id(target)
     }
 
+    /// Forget a redo candidate that could not be loaded. It was never played, so it must not enter
+    /// actual play history or be offered repeatedly during the same navigation.
+    pub fn discard_forward_candidate(&mut self, target: TrackId) {
+        self.purge_invalid_future();
+        if self.future.last().copied() == Some(target) {
+            self.future.pop();
+        }
+    }
+
     /// Go back (the Prev button): return to the last remembered track, or `fresh` (typically
     /// [`Self::peek_prev`]) when the back stack is empty. Remembers the current track on the forward
     /// stack so a following [`Self::forward`] redoes it. Returns the new current track, or `None`.
     pub fn back(&mut self, fresh: Option<usize>) -> Option<PathBuf> {
-        let target = self
-            .pop_valid_history()
-            .or_else(|| fresh.and_then(|i| self.track_id(i)))?;
+        let fresh = fresh.and_then(|i| self.track_id(i));
+        let target = self.back_candidate(fresh)?;
+        self.commit_back(target)
+    }
+
+    /// Return the stable-ID candidate for Back without changing selection or history. Actual play
+    /// history takes priority over `fresh`.
+    pub fn back_candidate(&mut self, fresh: Option<TrackId>) -> Option<TrackId> {
+        self.purge_invalid_history();
+        self.history
+            .last()
+            .copied()
+            .or_else(|| fresh.filter(|id| self.track(*id).is_some()))
+    }
+
+    /// Commit a candidate returned by [`Self::back_candidate`]. The track being left becomes a
+    /// Forward redo.
+    pub fn commit_back(&mut self, target: TrackId) -> Option<PathBuf> {
+        self.purge_invalid_history();
+        if let Some(previous) = self.history.last().copied() {
+            if previous != target {
+                return None;
+            }
+            self.history.pop();
+        } else if self.track(target).is_none() {
+            return None;
+        }
         if let Some(cur) = self.current {
             self.future.push(cur);
         }
         self.select_id(target)
+    }
+
+    /// Forget a Previous candidate that could not be loaded. Failed files are not actual playback
+    /// history and must not be retried forever.
+    pub fn discard_back_candidate(&mut self, target: TrackId) {
+        self.purge_invalid_history();
+        if self.history.last().copied() == Some(target) {
+            self.history.pop();
+        }
     }
 
     /// Jump straight to track `i` (double-click / jump-to-file): a fresh navigation that remembers
@@ -315,22 +553,24 @@ impl Playlist {
         Some(path)
     }
 
-    fn pop_valid_history(&mut self) -> Option<TrackId> {
-        while let Some(id) = self.history.pop() {
-            if self.track(id).is_some() {
-                return Some(id);
-            }
+    fn purge_invalid_history(&mut self) {
+        while self
+            .history
+            .last()
+            .is_some_and(|id| self.track(*id).is_none())
+        {
+            self.history.pop();
         }
-        None
     }
 
-    fn pop_valid_future(&mut self) -> Option<TrackId> {
-        while let Some(id) = self.future.pop() {
-            if self.track(id).is_some() {
-                return Some(id);
-            }
+    fn purge_invalid_future(&mut self) {
+        while self
+            .future
+            .last()
+            .is_some_and(|id| self.track(*id).is_none())
+        {
+            self.future.pop();
         }
-        None
     }
 }
 
@@ -606,5 +846,146 @@ mod tests {
             "clear does not recycle identities"
         );
         assert_eq!(p.current_id(), Some(after_clear));
+    }
+
+    #[test]
+    fn shuffle_cycle_visits_each_other_entry_once_then_exhausts() {
+        let p = pl(&["a", "b", "c", "d", "e"]);
+        let current = p.current_id().unwrap();
+        let mut cycle = ShuffleCycle::with_seed(7);
+        cycle.anchor(&p);
+
+        let mut visited = Vec::new();
+        while let Some(id) = cycle.next(&p, false) {
+            visited.push(id);
+        }
+
+        assert_eq!(visited.len(), p.len() - 1);
+        assert!(!visited.contains(&current));
+        assert_eq!(visited.iter().copied().collect::<HashSet<_>>().len(), 4);
+        assert_eq!(cycle.next(&p, false), None, "repeat-off stays exhausted");
+    }
+
+    #[test]
+    fn shuffle_repeat_starts_a_full_new_cycle_without_an_immediate_repeat() {
+        let mut p = pl(&["a", "b", "c", "d"]);
+        let mut cycle = ShuffleCycle::with_seed(91);
+        cycle.anchor(&p);
+
+        let first_cycle: Vec<_> = (0..p.len() - 1)
+            .map(|_| cycle.next(&p, false).unwrap())
+            .collect();
+        let last = *first_cycle.last().unwrap();
+        p.select_track(last);
+
+        let next = cycle.next(&p, true).unwrap();
+        assert_ne!(next, last, "a new cycle avoids the track just played");
+        let mut new_cycle = vec![next];
+        p.select_track(next);
+        for _ in 1..p.len() {
+            let id = cycle.next(&p, true).unwrap();
+            p.select_track(id);
+            new_cycle.push(id);
+        }
+        assert_eq!(
+            new_cycle.iter().copied().collect::<HashSet<_>>().len(),
+            p.len()
+        );
+    }
+
+    #[test]
+    fn single_track_shuffle_repeats_only_when_repeat_is_on() {
+        let p = pl(&["only"]);
+        let only = p.current_id().unwrap();
+        let mut cycle = ShuffleCycle::with_seed(1);
+        cycle.anchor(&p);
+
+        assert_eq!(cycle.next(&p, false), None);
+        assert_eq!(cycle.next(&p, true), Some(only));
+    }
+
+    #[test]
+    fn shuffle_cycle_survives_remove_move_and_add_by_stable_identity() {
+        let mut p = pl(&["a", "b", "c", "d"]);
+        let removed = p.track_id(1).unwrap();
+        let moved = p.track_id(3).unwrap();
+        let mut cycle = ShuffleCycle::with_seed(1234);
+        cycle.anchor(&p);
+
+        assert!(p.move_track(3, 1));
+        assert_eq!(p.remove(2).as_deref(), Some(Path::new("b")));
+        let added = p.add(PathBuf::from("new"));
+
+        let mut visited = Vec::new();
+        while let Some(id) = cycle.next(&p, false) {
+            visited.push(id);
+        }
+        assert!(!visited.contains(&removed));
+        assert!(visited.contains(&moved));
+        assert!(visited.contains(&added));
+        assert_eq!(
+            visited.iter().copied().collect::<HashSet<_>>().len(),
+            visited.len()
+        );
+        assert_eq!(visited.len(), p.len() - 1);
+    }
+
+    #[test]
+    fn equal_shuffle_seeds_produce_equal_permutations() {
+        let p = pl(&["a", "b", "c", "d", "e", "f"]);
+        let mut a = ShuffleCycle::with_seed(0xCAFE);
+        let mut b = ShuffleCycle::with_seed(0xCAFE);
+        a.anchor(&p);
+        b.anchor(&p);
+
+        let order_a: Vec<_> = (1..p.len()).map(|_| a.next(&p, false).unwrap()).collect();
+        let order_b: Vec<_> = (1..p.len()).map(|_| b.next(&p, false).unwrap()).collect();
+        assert_eq!(order_a, order_b);
+    }
+
+    #[test]
+    fn transactional_redo_and_back_do_not_record_discarded_failures() {
+        let mut p = pl(&["a", "b", "c"]);
+        p.forward(Some(1)); // a -> b
+        p.forward(Some(2)); // b -> c
+        p.back(None); // c -> b, future=[c]
+
+        let failed_redo = p.forward_candidate(None).unwrap();
+        assert_eq!(p.path_for_id(failed_redo), Some(Path::new("c")));
+        p.discard_forward_candidate(failed_redo);
+        assert_eq!(p.forward_candidate(None), None);
+        assert_eq!(p.current(), Some(Path::new("b")));
+
+        let previous = p.back_candidate(None).unwrap();
+        assert_eq!(p.path_for_id(previous), Some(Path::new("a")));
+        p.discard_back_candidate(previous);
+        assert_eq!(p.back_candidate(None), None);
+        assert_eq!(p.current(), Some(Path::new("b")));
+    }
+
+    #[test]
+    fn forward_after_back_redoes_history_without_consuming_shuffle_cycle() {
+        let mut p = pl(&["a", "b", "c", "d", "e"]);
+        let mut cycle = ShuffleCycle::with_seed(0x1234);
+        cycle.anchor(&p);
+
+        let first = cycle.next(&p, false).unwrap();
+        p.commit_forward(first);
+        let second = cycle.next(&p, false).unwrap();
+        p.commit_forward(second);
+
+        let mut expected_cycle = cycle.clone();
+        let expected_fresh = expected_cycle.next(&p, false).unwrap();
+        let previous = p.back_candidate(None).unwrap();
+        p.commit_back(previous);
+        let redo = p.forward_candidate(None).unwrap();
+        assert_eq!(redo, second);
+        p.commit_forward(redo);
+
+        assert_eq!(
+            cycle.next(&p, false),
+            Some(expected_fresh),
+            "redoing Forward must leave the pending permutation untouched"
+        );
     }
 }

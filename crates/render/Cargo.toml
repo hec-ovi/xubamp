@@ -10,3 +10,5 @@ authors.workspace = true
 
 [dependencies]
 xubamp-skin = { path = "../skin" }
+# Pure-Rust TrueType/OpenType rasterizer for the native GNOME (libadwaita) UI text.
+fontdue = "0.9.3"

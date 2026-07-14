@@ -1052,6 +1052,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "xubamp-config"
+version = "0.0.1"
+
+[[package]]
+name = "xubamp-dsp"
+version = "0.0.1"
+
+[[package]]
 name = "xubamp-render"
 version = "0.0.1"
 dependencies = [

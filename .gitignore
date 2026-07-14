@@ -7,3 +7,4 @@ Cargo.lock.bak
 .DS_Store
 # Docker dev-build caches (cargo registry + target); never committed.
 /.docker/
+.research/

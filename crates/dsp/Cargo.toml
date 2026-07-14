@@ -1,0 +1,9 @@
+[package]
+name = "xubamp-dsp"
+description = "Realtime-safe 10-band equalizer and Winamp EQF preset codec for xubamp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true

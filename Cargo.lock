@@ -1036,6 +1036,7 @@ name = "xubamp"
 version = "0.0.1"
 dependencies = [
  "xubamp-audio",
+ "xubamp-config",
  "xubamp-library",
  "xubamp-render",
  "xubamp-skin",

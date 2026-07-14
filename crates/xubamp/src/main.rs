@@ -3,12 +3,13 @@
 //! Composes a skin's main window and shows it in a native Wayland window, and (when built with
 //! the `audio` feature) plays a media-file argument through PipeWire alongside it. Arguments
 //! are classified by extension: a `.wsz`/`.zip` path is a skin, an audio file is a track.
-//! The skin is otherwise resolved in order: `$XUBAMP_SKIN`, a local `skins/` test skin if one
-//! is checked out, then the built-in default (original, clean-room; `xubamp_skin::default_skin`).
+//! The skin is otherwise resolved in order: `$XUBAMP_SKIN`, the saved skin, a local `skins/` test
+//! skin if one is checked out, then the built-in default (original, clean-room;
+//! `xubamp_skin::default_skin`).
 //! Transport controls, a time display, and the rest land in later phases; see
 //! `docs/ARCHITECTURE.md`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use xubamp_skin::bmp::Image;
 use xubamp_skin::container::SkinArchive;
@@ -58,13 +59,16 @@ fn classify<I: IntoIterator<Item = String>>(args: I) -> (Option<String>, Vec<Str
     (skin, media)
 }
 
-fn load_skin(path: &str) -> Skin {
+fn load_skin(path: &Path) -> Skin {
     let bytes = std::fs::read(path).unwrap_or_else(|e| {
-        eprintln!("xubamp: cannot read {path}: {e}");
+        eprintln!("xubamp: cannot read {}: {e}", path.display());
         std::process::exit(1);
     });
     let archive = SkinArchive::from_bytes(&bytes).unwrap_or_else(|e| {
-        eprintln!("xubamp: {path} is not a readable skin archive: {e:?}");
+        eprintln!(
+            "xubamp: {} is not a readable skin archive: {e:?}",
+            path.display()
+        );
         std::process::exit(1);
     });
     let skin = Skin::from_archive(&archive);
@@ -74,7 +78,8 @@ fn load_skin(path: &str) -> Skin {
             .unwrap_or_else(|| "missing".into())
     };
     eprintln!(
-        "xubamp: loaded {path}: {} members, main={} titlebar={} cbuttons={}",
+        "xubamp: loaded {}: {} members, main={} titlebar={} cbuttons={}",
+        path.display(),
         archive.len(),
         dim(&skin.main),
         dim(&skin.titlebar),
@@ -83,21 +88,97 @@ fn load_skin(path: &str) -> Skin {
     skin
 }
 
-/// Resolve which skin to show, in priority order: CLI path, `$XUBAMP_SKIN`, a local dev skin
-/// if checked out, else the built-in default.
-fn resolve_skin(cli: Option<&str>) -> Skin {
-    if let Some(path) = cli {
-        return load_skin(path);
+/// Select an archive in priority order. A missing saved archive is deliberately skipped: stale
+/// persisted state must not prevent the application from starting. Explicit CLI/environment paths
+/// remain authoritative and report their load error instead of silently changing skins.
+fn preferred_skin_path(
+    cli: Option<&str>,
+    environment: Option<std::ffi::OsString>,
+    saved: Option<&Path>,
+    saved_exists: bool,
+    dev_exists: bool,
+) -> Option<PathBuf> {
+    cli.map(PathBuf::from)
+        .or_else(|| environment.map(PathBuf::from))
+        .or_else(|| saved.filter(|_| saved_exists).map(Path::to_path_buf))
+        .or_else(|| dev_exists.then(|| PathBuf::from(DEV_SKIN)))
+}
+
+/// Resolve which skin to show, in priority order: CLI path, `$XUBAMP_SKIN`, saved skin, a local dev
+/// skin if checked out, else the built-in default.
+fn resolve_skin(cli: Option<&str>, saved: Option<&Path>) -> Skin {
+    let saved_exists = saved.is_some_and(Path::exists);
+    if let Some(path) = saved.filter(|_| !saved_exists) {
+        eprintln!(
+            "xubamp: saved skin {} no longer exists; falling back",
+            path.display()
+        );
     }
-    if let Ok(path) = std::env::var("XUBAMP_SKIN") {
+    let dev_exists = Path::new(DEV_SKIN).exists();
+    let selected = preferred_skin_path(
+        cli,
+        std::env::var_os("XUBAMP_SKIN"),
+        saved,
+        saved_exists,
+        dev_exists,
+    );
+    if let Some(path) = selected {
+        if path == Path::new(DEV_SKIN) {
+            eprintln!("xubamp: using local dev skin {DEV_SKIN}");
+        }
         return load_skin(&path);
-    }
-    if Path::new(DEV_SKIN).exists() {
-        eprintln!("xubamp: using local dev skin {DEV_SKIN}");
-        return load_skin(DEV_SKIN);
     }
     eprintln!("xubamp: no skin given, using the built-in default skin");
     default_skin()
+}
+
+/// Load the settings file selected by the XDG base-directory rules. A malformed field only emits a
+/// warning and falls back independently; an unreadable file falls back to all defaults.
+fn load_settings(path: Option<&Path>) -> xubamp_config::Settings {
+    let Some(path) = path else {
+        eprintln!("xubamp: HOME and XDG_CONFIG_HOME are unset; settings will not be persisted");
+        return xubamp_config::Settings::default();
+    };
+    match xubamp_config::load(path) {
+        Ok(report) => {
+            for warning in report.warnings {
+                let key = if warning.key.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", warning.key)
+                };
+                eprintln!(
+                    "xubamp: settings warning at line {}{key}: {}",
+                    warning.line, warning.message
+                );
+            }
+            report.settings
+        }
+        Err(error) => {
+            eprintln!(
+                "xubamp: cannot load settings from {}: {error}; using defaults",
+                path.display()
+            );
+            xubamp_config::Settings::default()
+        }
+    }
+}
+
+/// Synchronize the two mutable playback modes and atomically save them after a user toggle. Other
+/// settings stay untouched. `None` is valid on systems without a resolvable config directory.
+#[cfg(any(feature = "audio", test))]
+fn persist_playback_modes(
+    path: Option<&Path>,
+    settings: &mut xubamp_config::Settings,
+    shuffle: bool,
+    repeat: bool,
+) -> std::io::Result<()> {
+    settings.playback.shuffle = shuffle;
+    settings.playback.repeat = repeat;
+    match path {
+        Some(path) => xubamp_config::save(path, settings),
+        None => Ok(()),
+    }
 }
 
 /// A primitive engine operation. Transport commands (Play/Pause/Stop) map to a short sequence of
@@ -146,7 +227,9 @@ fn transport_ops(t: xubamp_render::hit::Transport, state: TransportState) -> Vec
 
 fn main() {
     let (skin_arg, media_args) = classify(std::env::args().skip(1));
-    let skin = resolve_skin(skin_arg.as_deref());
+    let settings_path = xubamp_config::default_path();
+    let settings = load_settings(settings_path.as_deref());
+    let skin = resolve_skin(skin_arg.as_deref(), settings.skin_path.as_deref());
 
     // The marquee shows the first track's file name (tag-based titles arrive later); it updates per
     // track as the playlist advances.
@@ -200,11 +283,24 @@ fn main() {
 
         let tracks: Vec<std::path::PathBuf> =
             media_args.iter().map(std::path::PathBuf::from).collect();
-        let player = Rc::new(RefCell::new(player::Player::new(tracks)));
+        let equalizer = xubamp_audio::EqSettings {
+            enabled: settings.equalizer.enabled,
+            preamp_db: settings.equalizer.preamp_db,
+            bands_db: settings.equalizer.bands_db,
+        };
+        let player = Rc::new(RefCell::new(player::Player::with_settings(
+            tracks,
+            settings.playback.shuffle,
+            settings.playback.repeat,
+            equalizer,
+        )));
+        let settings = Rc::new(RefCell::new(settings));
         player.borrow_mut().start(); // begin the first track
 
         let on_command = {
             let player = Rc::clone(&player);
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
             move |command: xubamp_render::hit::Command| {
                 use xubamp_render::hit::Command;
                 let mut player = player.borrow_mut();
@@ -214,7 +310,18 @@ fn main() {
                     Command::Balance(b) => player.set_balance(b),
                     Command::Seek(fraction) => player.seek_fraction(fraction),
                     Command::Restart => player.restart(),
-                    Command::ToggleMode(mode) => player.toggle_mode(mode),
+                    Command::ToggleMode(mode) => {
+                        player.toggle_mode(mode);
+                        let result = persist_playback_modes(
+                            settings_path.as_deref(),
+                            &mut settings.borrow_mut(),
+                            player.shuffle(),
+                            player.repeat(),
+                        );
+                        if let Err(error) = result {
+                            eprintln!("xubamp: cannot save playback settings: {error}");
+                        }
+                    }
                     Command::PlayIndex(i) => player.play_index(i),
                 }
             }
@@ -276,11 +383,76 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, track_title, transport_ops, EngineOp, TransportState};
+    use super::{
+        classify, persist_playback_modes, preferred_skin_path, track_title, transport_ops,
+        EngineOp, TransportState, DEV_SKIN,
+    };
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use xubamp_render::hit::Transport;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn temp_settings_path() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("xubamp-main-test-{}-{nonce}", std::process::id()))
+            .join("settings.conf")
+    }
+
+    #[test]
+    fn skin_priority_is_cli_then_environment_then_saved_then_development() {
+        let saved = Path::new("/saved/theme.wsz");
+        let env = Some(OsString::from("/environment/theme.wsz"));
+        assert_eq!(
+            preferred_skin_path(Some("/cli/theme.wsz"), env.clone(), Some(saved), true, true),
+            Some(PathBuf::from("/cli/theme.wsz"))
+        );
+        assert_eq!(
+            preferred_skin_path(None, env, Some(saved), true, true),
+            Some(PathBuf::from("/environment/theme.wsz"))
+        );
+        assert_eq!(
+            preferred_skin_path(None, None, Some(saved), true, true),
+            Some(saved.to_path_buf())
+        );
+        assert_eq!(
+            preferred_skin_path(None, None, Some(saved), false, true),
+            Some(PathBuf::from(DEV_SKIN)),
+            "a deleted saved skin falls through to the development/base choices"
+        );
+        assert_eq!(preferred_skin_path(None, None, None, false, false), None);
+    }
+
+    #[test]
+    fn mode_persistence_changes_only_modes_and_round_trips_atomically() {
+        let path = temp_settings_path();
+        let mut settings = xubamp_config::Settings::default();
+        settings.equalizer.preamp_db = 3.5;
+        settings.skin_path = Some(PathBuf::from("/skins/kept.wsz"));
+
+        persist_playback_modes(Some(&path), &mut settings, true, true).unwrap();
+
+        let loaded = xubamp_config::load(&path).unwrap().settings;
+        assert!(loaded.playback.shuffle);
+        assert!(loaded.playback.repeat);
+        assert_eq!(loaded.equalizer.preamp_db, 3.5);
+        assert_eq!(loaded.skin_path, Some(PathBuf::from("/skins/kept.wsz")));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mode_persistence_without_a_config_directory_still_updates_memory() {
+        let mut settings = xubamp_config::Settings::default();
+        persist_playback_modes(None, &mut settings, true, false).unwrap();
+        assert!(settings.playback.shuffle);
+        assert!(!settings.playback.repeat);
     }
 
     #[test]

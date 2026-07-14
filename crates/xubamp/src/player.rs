@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use xubamp_audio::engine::AudioEngine;
 use xubamp_audio::playlist::Playlist;
+use xubamp_audio::EqSettings;
 use xubamp_render::hit::{ModeButton, Playback, Transport};
 use xubamp_render::pledit;
 
@@ -26,11 +27,16 @@ pub struct Player {
     stopped: bool,
     /// Shuffle mode: when on, advancing plays a random track. (Repeat mode lives on the playlist.)
     shuffle: bool,
+    /// Equalizer controls persist across tracks. Every newly loaded engine starts with this exact
+    /// snapshot, while an in-flight engine receives changes through its lock-free control handle.
+    equalizer: EqSettings,
     /// xorshift PRNG state for shuffle, seeded once at startup.
     rng: u64,
 }
 
 impl Player {
+    /// Construct a player with the classic defaults. Kept for callers and tests that do not restore
+    /// persisted settings.
     pub fn new(tracks: Vec<PathBuf>) -> Self {
         Self {
             playlist: Playlist::new(tracks),
@@ -39,6 +45,7 @@ impl Player {
             balance: 0,
             stopped: false,
             shuffle: false,
+            equalizer: EqSettings::default(),
             // Seed the PRNG from the wall clock; `| 1` avoids the all-zero state xorshift can't leave.
             rng: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -46,6 +53,21 @@ impl Player {
                 .unwrap_or(0x9E37_79B9_7F4A_7C15)
                 | 1,
         }
+    }
+
+    /// Construct a player from persisted playback and equalizer settings without starting audio.
+    /// Delaying playback until [`Self::start`] lets startup finish restoring all state first.
+    pub fn with_settings(
+        tracks: Vec<PathBuf>,
+        shuffle: bool,
+        repeat: bool,
+        equalizer: EqSettings,
+    ) -> Self {
+        let mut player = Self::new(tracks);
+        player.shuffle = shuffle;
+        player.playlist.set_repeat(repeat);
+        player.set_equalizer_settings(equalizer);
+        player
     }
 
     /// Start playing the current track (called once at startup). No-op on an empty playlist.
@@ -61,7 +83,7 @@ impl Player {
         let Some(path) = self.playlist.current().map(Path::to_path_buf) else {
             return;
         };
-        match AudioEngine::play(&path) {
+        match AudioEngine::play_with_equalizer(&path, self.equalizer_settings()) {
             Ok(engine) => {
                 let h = engine.handle();
                 h.set_volume(self.volume);
@@ -169,6 +191,31 @@ impl Player {
                 let on = !self.playlist.repeat();
                 self.playlist.set_repeat(on);
             }
+        }
+    }
+
+    /// Current shuffle mode, used to persist a user toggle without coupling the player to the
+    /// settings file format.
+    pub fn shuffle(&self) -> bool {
+        self.shuffle
+    }
+
+    /// Current repeat-all mode, used to persist a user toggle.
+    pub fn repeat(&self) -> bool {
+        self.playlist.repeat()
+    }
+
+    /// Return the coherent equalizer snapshot that will carry into the next track.
+    pub fn equalizer_settings(&self) -> EqSettings {
+        self.equalizer
+    }
+
+    /// Update both the current engine and the state inherited by future tracks. Persistence is left
+    /// to a future equalizer UI commit so slider motion never writes the settings file per redraw.
+    pub fn set_equalizer_settings(&mut self, settings: EqSettings) {
+        self.equalizer = settings.sanitized();
+        if let Some(engine) = &self.engine {
+            engine.handle().set_equalizer_settings(self.equalizer);
         }
     }
 
@@ -307,6 +354,54 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn constructor_restores_modes_and_equalizer_without_starting_audio() {
+        let mut equalizer = EqSettings {
+            enabled: false,
+            preamp_db: 4.5,
+            ..EqSettings::default()
+        };
+        equalizer.bands_db[3] = -7.25;
+
+        let player = Player::with_settings(Vec::new(), true, true, equalizer);
+
+        assert!(player.shuffle());
+        assert!(player.repeat());
+        assert_eq!(player.equalizer_settings(), equalizer);
+        assert!(
+            player.engine.is_none(),
+            "construction must not start PipeWire"
+        );
+    }
+
+    #[test]
+    fn default_constructor_and_mode_toggles_remain_compatible() {
+        let mut player = Player::new(Vec::new());
+        assert!(!player.shuffle());
+        assert!(!player.repeat());
+        assert_eq!(player.equalizer_settings(), EqSettings::default());
+
+        player.toggle_mode(ModeButton::Shuffle);
+        player.toggle_mode(ModeButton::Repeat);
+        assert!(player.shuffle());
+        assert!(player.repeat());
+    }
+
+    #[test]
+    fn equalizer_setter_sanitizes_and_persists_without_an_engine() {
+        let mut player = Player::new(Vec::new());
+        let mut settings = EqSettings {
+            preamp_db: f32::NAN,
+            ..EqSettings::default()
+        };
+        settings.bands_db[0] = 50.0;
+
+        player.set_equalizer_settings(settings);
+
+        assert_eq!(player.equalizer_settings().preamp_db, 0.0);
+        assert_eq!(player.equalizer_settings().bands_db[0], 12.0);
+    }
 
     /// Write a dependency-free 16-bit PCM stereo WAV of a 440 Hz sine, `seconds` long.
     fn write_wav(path: &Path, rate: u32, seconds: u32) {

@@ -35,6 +35,12 @@ common=(
 # library read-only at its host path so a song argument like ~/Music/x.mp3 resolves unchanged.
 session=(
     -v "$runtime:$runtime" --ipc=host
+    # Modern Ubuntu mediates D-Bus with AppArmor, and the container's default docker profile has no
+    # label the session bus recognizes, so it rejects the very first Hello and every portal call
+    # (file/skin/playlist choosers) fails with AccessDenied. Run the dev container unconfined so it
+    # can reach the host's xdg-desktop-portal. Dev-harness only; the installed app is never confined
+    # this way.
+    --security-opt apparmor=unconfined
     -e "XDG_RUNTIME_DIR=$runtime"
     -e "WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}"
     # Reach the host's xdg-desktop-portal (file/skin/playlist choosers) over the D-Bus session bus.

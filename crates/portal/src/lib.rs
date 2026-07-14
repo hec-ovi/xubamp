@@ -27,6 +27,33 @@ pub enum DialogResult<T> {
     Cancelled,
 }
 
+/// The desktop's preferred color scheme, from the `org.freedesktop.appearance` setting. Drives
+/// whether the app's native (non-skin) surfaces use the Adwaita light or dark palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    /// No explicit preference; callers pick their own default (light).
+    Default,
+    /// The user prefers a dark theme.
+    Dark,
+    /// The user prefers a light theme.
+    Light,
+}
+
+/// Read the desktop's preferred color scheme via the Settings portal. Blocking, meant for a one-shot
+/// read at startup. Returns [`ColorScheme::Default`] when the portal is unreachable or errors, so a
+/// missing portal never blocks startup.
+pub fn read_color_scheme_blocking() -> ColorScheme {
+    let scheme = async_io::block_on(async {
+        let settings = ashpd::desktop::settings::Settings::new().await.ok()?;
+        settings.color_scheme().await.ok()
+    });
+    match scheme {
+        Some(ashpd::desktop::settings::ColorScheme::PreferDark) => ColorScheme::Dark,
+        Some(ashpd::desktop::settings::ColorScheme::PreferLight) => ColorScheme::Light,
+        _ => ColorScheme::Default,
+    }
+}
+
 /// A parent window identifier accepted by XDG desktop portals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentWindow(ParentWindowKind);

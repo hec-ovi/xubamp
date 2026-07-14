@@ -267,6 +267,10 @@ pub fn default_skin() -> crate::Skin {
             height: MAIN_H as u32,
             rgba: c.px,
         }),
+        // Ship the classic visualization palette so the built-in skin's spectrum/oscilloscope
+        // animates from live audio like a real skin (the render layer draws its dynamic feedback,
+        // clock, and slider thumbs procedurally when the other overlay sheets are absent).
+        viscolor: Some(crate::viscolor::VisColor::default()),
         ..Default::default()
     }
 }

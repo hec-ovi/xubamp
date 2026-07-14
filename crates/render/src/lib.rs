@@ -7,7 +7,7 @@
 
 use xubamp_skin::bmp::Image;
 use xubamp_skin::sprites::{self, Placement, Rect};
-use xubamp_skin::{textfont, Skin};
+use xubamp_skin::{font, textfont, Skin};
 
 pub mod adwaita;
 pub mod equalizer;
@@ -253,11 +253,107 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         blit_placement(&mut fb, monoster, stereo);
     }
     // The visualizer: spectrum bars, oscilloscope, or off, over the recessed panel, coloured from
-    // viscolor.txt. Skins without that palette (the built-in default) show no visualizer.
+    // viscolor.txt. The built-in default skin now ships the classic palette so its visualizer
+    // animates too; skins with no palette at all still show nothing here.
     if let Some(viscolor) = &skin.viscolor {
         vis::draw(&mut fb, viscolor, &state.vis);
     }
+    // Procedural feedback for skins that bake a static window and ship no overlay sheets (the
+    // built-in default). Each branch fires only when its sheet is absent, so real skins are
+    // untouched: their sheets are Some and this is skipped entirely.
+    draw_base_fallbacks(&mut fb, skin, state);
     fb
+}
+
+/// The built-in default skin bakes the whole window into one `main` image and ships no overlay
+/// sheets, so `compose_main_window` would otherwise draw no pressed buttons, no moving slider
+/// thumbs, and no clock: it reads as "the controls stopped working". This draws that dynamic state
+/// procedurally in the base skin's cyan palette. Every element is guarded on its sheet being None,
+/// so a real skin (sheets present) never reaches here.
+fn draw_base_fallbacks(fb: &mut Framebuffer, skin: &Skin, state: &hit::UiState) {
+    const CYAN: [u8; 3] = [0, 216, 240];
+    // A held transport button: darken its footprint so the press is visible.
+    if skin.cbuttons.is_none() {
+        if let Some(id) = state.pressed {
+            if let Some((placement, _)) = sprites::CBUTTONS
+                .iter()
+                .zip(hit::TRANSPORT_ORDER)
+                .find(|(_, t)| *t == id)
+            {
+                darken_rect(
+                    fb,
+                    placement.dst_x,
+                    placement.dst_y,
+                    placement.src.w,
+                    placement.src.h,
+                );
+            }
+        }
+    }
+    // The clock, in the built-in 5x7 font at the classic digit slots.
+    if skin.numbers.is_none() {
+        if let Some(secs) = state.displayed_time() {
+            for (&(dx, dy), &digit) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
+                font::draw_text(
+                    &mut fb.rgba,
+                    fb.width,
+                    fb.height,
+                    dx,
+                    dy,
+                    &digit.to_string(),
+                    CYAN,
+                );
+            }
+        }
+    }
+    // Slider thumbs, drawn as a bright bar at the value so a drag is visible.
+    if skin.volume.is_none() {
+        let frac = state.volume as f32 / 100.0;
+        fallback_thumb(fb, sprites::VOLUME_X, sprites::VOLUME_Y, sprites::VOLUME_W, frac);
+    }
+    if skin.balance.is_none() && skin.volume.is_none() {
+        let frac = (state.balance as f32 + 100.0) / 200.0;
+        fallback_thumb(fb, sprites::BALANCE_X, sprites::BALANCE_Y, sprites::BALANCE_W, frac);
+    }
+    if skin.posbar.is_none() {
+        let frac = state.position.unwrap_or(0.0).clamp(0.0, 1.0);
+        fallback_thumb(fb, sprites::POSBAR_X, sprites::POSBAR_Y, sprites::POSBAR_W, frac);
+    }
+}
+
+/// Draw a 4px bright thumb bar at `frac` (0..=1) across a slider track, for the base skin.
+fn fallback_thumb(fb: &mut Framebuffer, track_x: i32, track_y: i32, track_w: i32, frac: f32) {
+    const THUMB_W: i32 = 4;
+    const THUMB_H: i32 = 11;
+    const LIGHT: [u8; 3] = [210, 236, 244];
+    let x = track_x + ((frac.clamp(0.0, 1.0)) * (track_w - THUMB_W) as f32).round() as i32;
+    for yy in track_y + 1..track_y + 1 + THUMB_H {
+        for xx in x..x + THUMB_W {
+            put_rgb(fb, xx, yy, LIGHT);
+        }
+    }
+}
+
+/// Multiply an axis-aligned rectangle toward black to show a pressed control on the base skin.
+fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
+    for yy in y.max(0)..(y + h).min(fb.height as i32) {
+        for xx in x.max(0)..(x + w).min(fb.width as i32) {
+            let o = ((yy as u32 * fb.width + xx as u32) * 4) as usize;
+            for c in 0..3 {
+                fb.rgba[o + c] = (fb.rgba[o + c] as u32 * 9 / 16) as u8;
+            }
+        }
+    }
+}
+
+/// Set one opaque RGB pixel, clipped to the framebuffer.
+fn put_rgb(fb: &mut Framebuffer, x: i32, y: i32, color: [u8; 3]) {
+    if x < 0 || y < 0 || x >= fb.width as i32 || y >= fb.height as i32 {
+        return;
+    }
+    let o = ((y as u32 * fb.width + x as u32) * 4) as usize;
+    fb.rgba[o..o + 3].copy_from_slice(&color);
+    fb.rgba[o + 3] = 255;
 }
 
 /// Draw the remaining-time sign from either classic number-sheet layout. `NUMBERS.BMP` stores the
@@ -976,6 +1072,47 @@ mod tests {
             RED,
             "no posbar sheet"
         );
+    }
+
+    #[test]
+    fn base_skin_draws_procedural_feedback_for_its_missing_sheets() {
+        use xubamp_skin::sprites;
+        let skin = xubamp_skin::default_skin();
+        let idle = compose_main_window(&skin, &hit::UiState::default());
+
+        // A held transport button darkens its footprint, so the press is visible on the base skin.
+        let pressed = hit::UiState {
+            pressed: Some(hit::TRANSPORT_ORDER[0]),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &pressed);
+        let (bx, by) = (
+            sprites::CBUTTONS[0].dst_x as u32 + 2,
+            sprites::CBUTTONS[0].dst_y as u32 + 2,
+        );
+        assert_ne!(
+            px(&fb, bx, by),
+            px(&idle, bx, by),
+            "a held button darkens on the base skin"
+        );
+
+        // The volume thumb moves with the value, so quiet and loud compose to different frames.
+        let quiet = compose_main_window(&skin, &hit::UiState { volume: 0, ..Default::default() });
+        let loud = compose_main_window(&skin, &hit::UiState { volume: 100, ..Default::default() });
+        assert_ne!(quiet.rgba, loud.rgba, "the volume thumb tracks the value");
+
+        // The clock draws digits once a time is known.
+        let playing = hit::UiState {
+            elapsed: Some(65),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &playing);
+        let (cx, cy) = (
+            sprites::TIME_DIGITS[0].0 as u32,
+            sprites::TIME_DIGITS[0].1 as u32,
+        );
+        let differs = (0..7).any(|dy| (0..6).any(|dx| px(&fb, cx + dx, cy + dy) != px(&idle, cx + dx, cy + dy)));
+        assert!(differs, "the clock draws digits on the base skin");
     }
 
     #[test]

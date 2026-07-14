@@ -99,8 +99,39 @@ pub enum Region {
     Resize,
     /// One of the five bottom-bar cluster buttons, each of which opens its flyout menu.
     BottomMenu(BottomButton),
+    /// The scrollbar track down the right edge: a press or drag here sets the scroll position.
+    Scrollbar,
     Body,
     None,
+}
+
+/// The scrollbar sits `SCROLLBAR_RIGHT` px in from the right edge and is `SCROLLBAR_W` px wide,
+/// running down the list area between the title and bottom bars.
+const SCROLLBAR_RIGHT: i32 = 15;
+const SCROLLBAR_W: i32 = 8;
+const SCROLLBAR_MIN_THUMB: i32 = 8;
+
+/// The scrollbar track rectangle (x, y, w, h) for the current window size.
+fn scrollbar_track(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    let x = width - SCROLLBAR_RIGHT;
+    let y = sprites::PLEDIT_TITLE_H;
+    let h = (height - sprites::PLEDIT_TITLE_H - sprites::PLEDIT_BOTTOM_H).max(0);
+    (x, y, SCROLLBAR_W, h)
+}
+
+/// The scrollbar thumb rectangle, or `None` when the list fits and there is nothing to scroll.
+pub fn scrollbar_thumb_rect(state: &PlState, width: i32, height: i32) -> Option<(i32, i32, i32, i32)> {
+    let total = state.rows.len();
+    let visible = PlState::visible_rows(height);
+    if visible == 0 || total <= visible {
+        return None;
+    }
+    let (x, y, w, h) = scrollbar_track(width, height);
+    let thumb_h = (((visible as f32 / total as f32) * h as f32).round() as i32)
+        .clamp(SCROLLBAR_MIN_THUMB, h.max(SCROLLBAR_MIN_THUMB));
+    let travel = (h - thumb_h).max(0);
+    let offset = ((state.scroll.clamp(0.0, 100.0) / 100.0) * travel as f32).round() as i32;
+    Some((x, y + offset, w, thumb_h))
 }
 
 pub const ADD_BUTTON_X: i32 = 14;
@@ -198,6 +229,11 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
         Region::Resize
     } else if let Some(button) = bottom_button_at(width, height, x, y) {
         Region::BottomMenu(button)
+    } else if {
+        let (sx, sy, sw, sh) = scrollbar_track(width, height);
+        x >= sx && x < sx + sw && y >= sy && y < sy + sh
+    } {
+        Region::Scrollbar
     } else if y < sprites::PLEDIT_TITLE_H {
         Region::TitleBar
     } else {
@@ -318,6 +354,20 @@ impl PlState {
             return;
         }
         self.scroll = (self.scroll + tracks / overflow as f32 * 100.0).clamp(0.0, 100.0);
+    }
+
+    /// Set the scroll position from a scrollbar press or drag at window-local `y`, mapping the track
+    /// span linearly to 0..=100. A no-op when the list fits (nothing to scroll).
+    pub fn set_scroll_from_y(&mut self, y: i32, width: i32, height: i32) {
+        if self.rows.len() <= Self::visible_rows(height) {
+            return;
+        }
+        let (_, track_y, _, track_h) = scrollbar_track(width, height);
+        if track_h <= 0 {
+            return;
+        }
+        let frac = ((y - track_y) as f32 / track_h as f32).clamp(0.0, 1.0);
+        self.scroll = frac * 100.0;
     }
 
     /// Adjust the scroll so row `i` is visible in a window `window_h` px tall (scrolls the minimum
@@ -447,6 +497,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
 
     draw_running_time(&mut fb, state, &colors, w, h);
     draw_rows(&mut fb, state, &colors, h, list_w);
+    draw_scrollbar(&mut fb, state, &colors, w, h);
     fb
 }
 
@@ -574,6 +625,28 @@ fn draw_fallback_expanded(
     draw_fallback_bottom_buttons(fb, state, w, h, colors);
     draw_running_time(fb, state, colors, w, h);
     draw_rows(fb, state, colors, h, list_w);
+    draw_scrollbar(fb, state, colors, w, h);
+}
+
+/// Draw the scrollbar thumb over the right edge when the list overflows, as a bevelled cap so the
+/// grab target is obvious. Nothing is drawn when everything fits.
+fn draw_scrollbar(
+    fb: &mut Framebuffer,
+    state: &PlState,
+    colors: &xubamp_skin::pledit::PlEdit,
+    width: i32,
+    height: i32,
+) {
+    let Some((x, y, w, h)) = scrollbar_thumb_rect(state, width, height) else {
+        return;
+    };
+    fill_rect(fb, x, y, w, h, colors.selected_bg);
+    // A one-pixel light top/left and the darker list background on the bottom/right reads as a
+    // raised cap against the recessed track.
+    fill_rect(fb, x, y, w, 1, colors.current);
+    fill_rect(fb, x, y, 1, h, colors.current);
+    fill_rect(fb, x, y + h - 1, w, 1, colors.normal_bg);
+    fill_rect(fb, x + w - 1, y, 1, h, colors.normal_bg);
 }
 
 /// Draw all five bottom cluster buttons for the no-skin fallback frame, each a small bevelled face
@@ -922,6 +995,49 @@ mod tests {
             region_at(&shaded, w, sprites::PLEDIT_SHADE_H, -1, 7),
             Region::None
         );
+    }
+
+    #[test]
+    fn scrollbar_appears_only_on_overflow_and_maps_the_drag() {
+        fn rows(n: usize) -> Vec<Row> {
+            (0..n)
+                .map(|i| Row {
+                    title: format!("{i}"),
+                    duration: String::new(),
+                    duration_secs: None,
+                })
+                .collect()
+        }
+        let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
+
+        // A list that fits shows no thumb.
+        let small = PlState {
+            rows: rows(2),
+            ..Default::default()
+        };
+        assert!(scrollbar_thumb_rect(&small, w, h).is_none());
+
+        // A long list gets a thumb shorter than the track, at the top for scroll 0.
+        let mut big = PlState {
+            rows: rows(200),
+            ..Default::default()
+        };
+        let (tx, ty, _tw, th) = scrollbar_track(w, h);
+        let (thumb_x, thumb_y, _, thumb_h) = scrollbar_thumb_rect(&big, w, h).unwrap();
+        assert_eq!(thumb_x, tx);
+        assert_eq!(thumb_y, ty, "scroll 0 puts the thumb at the top");
+        assert!(thumb_h < th, "the thumb is shorter than the track");
+        assert_eq!(region_at(&big, w, h, tx + 1, ty + 5), Region::Scrollbar);
+
+        // Dragging to the track bottom scrolls to the end and moves the thumb down.
+        big.set_scroll_from_y(ty + th, w, h);
+        assert!(big.scroll > 99.0);
+        let (_, moved_y, _, _) = scrollbar_thumb_rect(&big, w, h).unwrap();
+        assert!(moved_y > thumb_y, "the thumb tracks the scroll");
+
+        // A press back at the top returns to scroll 0.
+        big.set_scroll_from_y(ty, w, h);
+        assert_eq!(big.scroll, 0.0);
     }
 
     #[test]

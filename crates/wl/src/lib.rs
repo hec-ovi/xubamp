@@ -320,6 +320,9 @@ struct PlaylistWin {
     /// Whether the pointer is currently over the bottom-right resize grip, so the resize cursor is
     /// set only on the hover transition rather than on every motion event.
     grip_hover: bool,
+    /// Whether a scrollbar-thumb drag is in progress, so motion maps the pointer to the scroll
+    /// position until the button is released.
+    scrollbar_drag: bool,
 }
 
 /// Equalizer child-surface resources. The renderer owns all control state; this wrapper only owns
@@ -1635,6 +1638,7 @@ impl App {
             resize: None,
             title_last_click: None,
             grip_hover: false,
+            scrollbar_drag: false,
         });
         self.state.pl_open = true;
         self.redraw(); // relight the PL button on the main window
@@ -1925,6 +1929,16 @@ impl App {
                         }
                         self.redraw_playlist();
                     }
+                    pledit::Region::Scrollbar => {
+                        if let Some(pl) = &mut self.playlist {
+                            pl.scrollbar_drag = true;
+                            pl.drag = None;
+                            pl.resize = None;
+                            pl.title_last_click = None;
+                        }
+                        self.playlist_state.set_scroll_from_y(y, width, height);
+                        self.redraw_playlist();
+                    }
                     pledit::Region::Body => self.playlist_press_row(x, y),
                     pledit::Region::None => {}
                 }
@@ -1950,6 +1964,17 @@ impl App {
                 }
             }
             PointerEventKind::Motion { .. } => {
+                // A scrollbar-thumb drag maps the pointer y to the scroll position and consumes the
+                // motion, so it never also drags the window or hovers a row.
+                if let Some((true, width, height)) = self
+                    .playlist
+                    .as_ref()
+                    .map(|pl| (pl.scrollbar_drag, pl.width, pl.height))
+                {
+                    self.playlist_state.set_scroll_from_y(y, width, height);
+                    self.redraw_playlist();
+                    return;
+                }
                 let drag_snapshot = self
                     .playlist
                     .as_ref()
@@ -2060,6 +2085,7 @@ impl App {
                 if let Some(pl) = &mut self.playlist {
                     pl.drag = None;
                     pl.resize = None;
+                    pl.scrollbar_drag = false;
                 }
                 if let Some(pressed) = self.playlist_state.pressed_menu {
                     self.playlist_state.pressed_menu = None;
@@ -2121,8 +2147,8 @@ impl App {
         let Some((pw, ph)) = self.playlist.as_ref().map(|pl| (pl.width, pl.height)) else {
             return;
         };
-        // The right edge is the scrollbar column (thumb-drag is a later addition); ignore presses
-        // there so they neither select nor clear.
+        // The right edge is the scrollbar column (its thumb is handled as Region::Scrollbar before
+        // we get here); ignore any remaining right-edge presses so they neither select nor clear.
         if x >= pw - xubamp_skin::sprites::PLEDIT_RIGHT_TILE.w {
             return;
         }

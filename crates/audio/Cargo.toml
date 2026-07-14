@@ -17,6 +17,10 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm
 # allocation at construction, none on push/pop. Pure Rust, no system libraries.
 rtrb = "0.3"
 
+# Stateful Winamp-style equalizer. Processing stays on the decode producer thread, before the
+# lock-free output ring, so the PipeWire realtime callback remains copy/gain/tap only.
+xubamp-dsp = { path = "../dsp" }
+
 # --- `output` feature only: PipeWire realtime playback ---
 # FFI to system libpipewire-0.3 (re-exports libspa as pipewire::spa). Building it needs
 # libpipewire-0.3-dev + libspa-0.2-dev + pkg-config + libclang, so it is OFF by default and

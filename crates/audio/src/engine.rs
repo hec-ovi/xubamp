@@ -18,8 +18,10 @@ use rtrb::Producer;
 use crate::channels::to_stereo;
 use crate::command::Control;
 use crate::decode::Source;
+use crate::equalizer::{EqControl, ProducerEqualizer};
 use crate::output::{control_channel, run_loop, ControlSender, RtData};
 use crate::ring::{new_ring, push_block, SharedState, CHANNELS};
+use crate::EqSettings;
 
 /// How a producer-thread push ended: the block was queued, the consumer was dropped (the output
 /// loop exited, so the producer should stop), a seek request arrived and supersedes finishing this
@@ -30,6 +32,32 @@ enum PushOutcome {
     Abandoned,
     SeekPending,
     Full,
+}
+
+/// Producer-owned block storage plus stateful EQ. Keeping these together makes every path that
+/// feeds the ring (initial decode, steady state, and seek priming) use the same preparation step.
+struct ProducerPcm {
+    stereo: Vec<f32>,
+    equalizer: ProducerEqualizer,
+}
+
+impl ProducerPcm {
+    fn new(sample_rate: u32, eq_control: Arc<EqControl>) -> Self {
+        Self {
+            stereo: Vec::new(),
+            equalizer: ProducerEqualizer::new(sample_rate, eq_control),
+        }
+    }
+
+    fn prepare(&mut self, block: &[f32], channels: usize) {
+        self.stereo.clear();
+        to_stereo(block, channels, &mut self.stereo);
+        self.equalizer.process(&mut self.stereo);
+    }
+
+    fn reset(&mut self) {
+        self.equalizer.reset();
+    }
 }
 
 /// Producer side: push `block` into the ring while keeping the total buffered at or below
@@ -99,7 +127,7 @@ fn prime_after_seek(
     channels: usize,
     p: &mut Producer<f32>,
     shared: &SharedState,
-    stereo: &mut Vec<f32>,
+    pcm: &mut ProducerPcm,
     target_frames: u64,
     capacity_samples: usize,
 ) -> (PushOutcome, u64) {
@@ -110,14 +138,20 @@ fn prime_after_seek(
         }
         match src.next_interleaved() {
             Ok(Some(block)) => {
-                stereo.clear();
-                to_stereo(block, channels, stereo);
+                pcm.prepare(block, channels);
                 // Fill toward the full capacity (using the spare room past the steady-state cap), so
                 // staging does not wait on the realtime side. `bail_when_paused` stops us spinning if
                 // a paused scrub has filled the ring. `push_capped` accumulates the frames it pushed
                 // straight into `staged`.
-                match push_capped(p, stereo, shared, capacity_samples, capacity_samples, true, &mut staged)
-                {
+                match push_capped(
+                    p,
+                    &pcm.stereo,
+                    shared,
+                    capacity_samples,
+                    capacity_samples,
+                    true,
+                    &mut staged,
+                ) {
                     PushOutcome::Done => {}
                     other => return (other, staged),
                 }
@@ -192,6 +226,7 @@ impl std::error::Error for EngineError {}
 pub struct AudioEngine {
     control: ControlSender<Control>,
     shared: Arc<SharedState>,
+    eq_control: Arc<EqControl>,
     /// The stream's frame rate, for turning the position clock into seconds. This is the file's
     /// native rate, which is the single format the output offers, so it is also the graph rate.
     rate: u32,
@@ -214,6 +249,7 @@ pub struct AudioEngine {
 pub struct EngineHandle {
     control: ControlSender<Control>,
     shared: Arc<SharedState>,
+    eq_control: Arc<EqControl>,
     rate: u32,
     duration_frames: Option<u64>,
     bitrate_kbps: Option<u32>,
@@ -233,15 +269,32 @@ impl EngineHandle {
     /// Set the output volume, 0..=100. Recomputes the realtime gains from this and the current
     /// balance; the RT callback picks them up on its next quantum (no stream round-trip needed).
     pub fn set_volume(&self, volume: u8) {
-        self.shared.volume.store(volume.min(100) as u32, Ordering::Relaxed);
+        self.shared
+            .volume
+            .store(volume.min(100) as u32, Ordering::Relaxed);
         self.shared.refresh_mix();
     }
 
     /// Set the stereo balance, -100..=100 (negative pans left). Recomputes the realtime gains
     /// from this and the current volume.
     pub fn set_balance(&self, balance: i8) {
-        self.shared.balance.store(balance.clamp(-100, 100) as i32, Ordering::Relaxed);
+        self.shared
+            .balance
+            .store(balance.clamp(-100, 100) as i32, Ordering::Relaxed);
         self.shared.refresh_mix();
+    }
+
+    /// Atomically replace the equalizer controls. The decode producer observes the whole preset
+    /// between blocks, so concurrent UI updates cannot expose a mix of old and new band values.
+    /// Already-buffered audio keeps its prior settings; the PipeWire realtime thread never locks or
+    /// rebuilds filters.
+    pub fn set_equalizer_settings(&self, settings: EqSettings) {
+        self.eq_control.publish(settings);
+    }
+
+    /// Return one coherent snapshot of the controls most recently published by the UI.
+    pub fn equalizer_settings(&self) -> EqSettings {
+        self.eq_control.snapshot().1
     }
 
     /// Request a seek to `fraction` (0..=1) of the track. A no-op when the length is unknown (an
@@ -336,6 +389,13 @@ impl AudioEngine {
     /// converts to the device), and start decoding it into the ring on a background thread.
     /// Returns once playback has started; the two threads keep running until the engine drops.
     pub fn play(path: &Path) -> Result<Self, EngineError> {
+        Self::play_with_equalizer(path, EqSettings::default())
+    }
+
+    /// Start playback with an initial equalizer state. This avoids briefly buffering the default
+    /// state when restoring saved settings at startup; later changes use
+    /// [`EngineHandle::set_equalizer_settings`].
+    pub fn play_with_equalizer(path: &Path, eq_settings: EqSettings) -> Result<Self, EngineError> {
         let mut src = Source::open(path).map_err(EngineError::Decode)?;
 
         // Decode the first packet so rate/channels come from real data (MP3 may report them
@@ -374,6 +434,7 @@ impl AudioEngine {
         let prime_target = (headroom_frames / 2) as u64;
         let (mut producer, consumer) = new_ring(cap_frames);
         let shared = Arc::new(SharedState::new());
+        let eq_control = Arc::new(EqControl::new(eq_settings));
         let (control, rx) = control_channel();
 
         let rt = RtData {
@@ -388,6 +449,7 @@ impl AudioEngine {
 
         // Clones for the producer thread so it can flag end-of-track, seek, and stop the stream.
         let shared_producer = Arc::clone(&shared);
+        let eq_producer = Arc::clone(&eq_control);
         let control_producer = control.clone();
         // Producer: prime with the first block, then loop decoding into the ring (capped at the
         // steady-state high-water mark). Between blocks it services seek requests: reposition the
@@ -397,14 +459,14 @@ impl AudioEngine {
         // back in and restart it. Every wait bails out if the consumer is dropped (engine drop ->
         // loop thread gone), so no path hangs on shutdown.
         let producer_thread = thread::spawn(move || {
-            let mut stereo = Vec::new();
+            let mut pcm = ProducerPcm::new(rate, eq_producer);
             let mut pushed: u64 = 0;
             // Prime with the first block (already decoded to learn the rate). A seek racing in here
             // is fine: the next seek's boundary covers whatever was pushed.
-            to_stereo(&first, channels, &mut stereo);
+            pcm.prepare(&first, channels);
             if let PushOutcome::Abandoned = push_capped(
                 &mut producer,
-                &stereo,
+                &pcm.stereo,
                 &shared_producer,
                 high_water,
                 ring_slots,
@@ -420,6 +482,9 @@ impl AudioEngine {
                     let secs = target as f64 / rate as f64;
                     match src.seek(secs) {
                         Ok(landed) => {
+                            // Filter delay samples belong to the old timeline. Clear them before
+                            // decoding any fresh-position audio behind the stale ring tail.
+                            pcm.reset();
                             // Everything queued now is pre-seek (stale); its boundary is the frames
                             // pushed so far.
                             let boundary = pushed;
@@ -428,7 +493,7 @@ impl AudioEngine {
                                 channels,
                                 &mut producer,
                                 &shared_producer,
-                                &mut stereo,
+                                &mut pcm,
                                 prime_target,
                                 ring_slots,
                             );
@@ -461,11 +526,10 @@ impl AudioEngine {
                 }
                 match src.next_interleaved() {
                     Ok(Some(block)) => {
-                        stereo.clear();
-                        to_stereo(block, channels, &mut stereo);
+                        pcm.prepare(block, channels);
                         match push_capped(
                             &mut producer,
-                            &stereo,
+                            &pcm.stereo,
                             &shared_producer,
                             high_water,
                             ring_slots,
@@ -481,15 +545,23 @@ impl AudioEngine {
                     }
                     Ok(None) => {
                         // Clean end: drain, flag finished, and park until a seek revives us.
-                        if !drain_and_park(&producer, &shared_producer, ring_slots, &control_producer)
-                        {
+                        if !drain_and_park(
+                            &producer,
+                            &shared_producer,
+                            ring_slots,
+                            &control_producer,
+                        ) {
                             return;
                         }
                     }
                     Err(e) => {
                         eprintln!("xubamp-audio: decode error: {e}");
-                        if !drain_and_park(&producer, &shared_producer, ring_slots, &control_producer)
-                        {
+                        if !drain_and_park(
+                            &producer,
+                            &shared_producer,
+                            ring_slots,
+                            &control_producer,
+                        ) {
                             return;
                         }
                     }
@@ -500,6 +572,7 @@ impl AudioEngine {
         Ok(Self {
             control,
             shared,
+            eq_control,
             rate,
             duration_frames,
             bitrate_kbps,
@@ -533,6 +606,7 @@ impl AudioEngine {
         EngineHandle {
             control: self.control.clone(),
             shared: Arc::clone(&self.shared),
+            eq_control: Arc::clone(&self.eq_control),
             rate: self.rate,
             duration_frames: self.duration_frames,
             bitrate_kbps: self.bitrate_kbps,

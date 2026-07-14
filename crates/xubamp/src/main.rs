@@ -589,6 +589,7 @@ fn main() {
                         }
                     }
                     Command::PlayIndex(i) => player.play_index(i),
+                    Command::SkipTracks(delta) => player.skip_tracks(delta),
                 }
             }
         };

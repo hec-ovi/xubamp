@@ -1461,6 +1461,12 @@ impl App {
                 let outcome = hit::on_key(&mut self.state, hit::KeyPress::Right, false);
                 self.apply(outcome);
             }
+            menu::ClassicMenuAction::BackTenTracks => {
+                (self.on_command)(hit::Command::SkipTracks(-10));
+            }
+            menu::ClassicMenuAction::ForwardTenTracks => {
+                (self.on_command)(hit::Command::SkipTracks(10));
+            }
             menu::ClassicMenuAction::ShowElapsedTime => {
                 self.set_time_display(hit::TimeDisplay::Elapsed);
             }

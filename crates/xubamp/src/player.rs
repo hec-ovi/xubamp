@@ -431,6 +431,16 @@ impl Player {
     /// Play the playlist track at index `i` (a double-click in the playlist window). Remembers the
     /// current track for Back and clears the forward stack (a fresh navigation). No-op if the index
     /// is out of range.
+    /// Jump `delta` entries from the current track (clamped to the ends) and play the landing
+    /// track, matching Winamp's "10 tracks back/forward". A no-op on an empty playlist.
+    pub fn skip_tracks(&mut self, delta: i32) {
+        if let Some(target) =
+            skip_target(self.playlist.current_index().unwrap_or(0), self.playlist.len(), delta)
+        {
+            self.play_index(target);
+        }
+    }
+
     pub fn play_index(&mut self, i: usize) {
         let Some(selected) = self.playlist.track_id(i) else {
             return;
@@ -715,6 +725,15 @@ impl Player {
     }
 }
 
+/// The clamped landing index for a `skip_tracks(delta)` from `current`, or `None` on an empty list.
+/// Pure so the boundary arithmetic is unit-tested without a real engine.
+fn skip_target(current: usize, len: usize, delta: i32) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some((current as i32 + delta).clamp(0, len as i32 - 1) as usize)
+}
+
 /// End-to-end tests of the player against the real PipeWire-backed engine: they play short WAVs to
 /// their end and assert the playlist behaviour at the boundary. Ignored by default (they need a
 /// running PipeWire session); in the dev container route them to a silent sink to stay quiet:
@@ -723,6 +742,15 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_target_clamps_to_the_playlist_ends() {
+        assert_eq!(skip_target(2, 10, 10), Some(9), "forward clamps to the last");
+        assert_eq!(skip_target(5, 10, -10), Some(0), "back clamps to the first");
+        assert_eq!(skip_target(3, 10, 4), Some(7), "in range moves exactly");
+        assert_eq!(skip_target(0, 10, -1), Some(0), "already at the start");
+        assert_eq!(skip_target(0, 0, 10), None, "empty playlist is a no-op");
+    }
     use std::thread;
     use std::time::{Duration, Instant};
 

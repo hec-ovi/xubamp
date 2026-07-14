@@ -104,6 +104,9 @@ pub enum Command {
     /// Play the playlist track at this index (a double-click on a playlist row, or the J
     /// jump-to-file confirming a match).
     PlayIndex(usize),
+    /// Jump the playlist by this many entries from the current track and play it, clamped to the
+    /// ends (Winamp's "10 tracks back/forward" menu items and numpad 1/3). Negative moves back.
+    SkipTracks(i32),
 }
 
 /// A decoded key the main window responds to, produced by the platform layer from its keysym so

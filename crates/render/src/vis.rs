@@ -55,6 +55,8 @@ impl VisMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisState {
     pub mode: VisMode,
+    /// Whether the falling peak dots are visible in spectrum mode.
+    pub show_peaks: bool,
     bars: [f32; VIS_COLS],
     peaks: [f32; VIS_COLS],
     peak_vel: [f32; VIS_COLS],
@@ -65,6 +67,7 @@ impl Default for VisState {
     fn default() -> Self {
         VisState {
             mode: VisMode::default(),
+            show_peaks: true,
             bars: [0.0; VIS_COLS],
             peaks: [0.0; VIS_COLS],
             peak_vel: [0.0; VIS_COLS],
@@ -144,9 +147,11 @@ pub fn draw(fb: &mut Framebuffer, vc: &VisColor, state: &VisState) {
                 for row in (h - bh)..h {
                     put(fb, x0 + x as i32, y0 + row, grad[row as usize]);
                 }
-                let pk = round_clamp(state.peaks[x], h);
-                if pk > 0 {
-                    put(fb, x0 + x as i32, y0 + (h - pk), peak);
+                if state.show_peaks {
+                    let pk = round_clamp(state.peaks[x], h);
+                    if pk > 0 {
+                        put(fb, x0 + x as i32, y0 + (h - pk), peak);
+                    }
                 }
             }
         }
@@ -337,6 +342,7 @@ mod tests {
         assert_eq!(VisMode::Off.next(), VisMode::Bars);
         let mut s = VisState::default();
         assert_eq!(s.mode, VisMode::Bars);
+        assert!(s.show_peaks, "classic peak dots are visible by default");
         s.cycle();
         assert_eq!(s.mode, VisMode::Oscilloscope);
         s.cycle();
@@ -497,6 +503,48 @@ mod tests {
             px(&fb, sprites::VIS_X, sprites::VIS_Y + sprites::VIS_H - 1),
             [17, 117, 200, 255],
             "bar base is role 17",
+        );
+    }
+
+    #[test]
+    fn draw_bars_hide_only_the_falling_peak_dot() {
+        let vc = test_palette();
+        let mut s = VisState {
+            show_peaks: false,
+            ..Default::default()
+        };
+        s.bars[0] = 3.0;
+        s.peaks[0] = 12.0;
+        let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
+        draw(&mut fb, &vc, &s);
+
+        let peak_row = sprites::VIS_H - 12;
+        assert_eq!(
+            px(&fb, sprites::VIS_X, sprites::VIS_Y + peak_row),
+            [0, 100, 200, 255],
+            "hidden peak location remains background",
+        );
+        assert_eq!(
+            px(&fb, sprites::VIS_X, sprites::VIS_Y + sprites::VIS_H - 1),
+            [17, 117, 200, 255],
+            "the spectrum bar remains visible",
+        );
+    }
+
+    #[test]
+    fn hidden_peaks_do_not_disable_bar_animation() {
+        let mut s = VisState {
+            show_peaks: false,
+            ..Default::default()
+        };
+        let k = 60usize;
+        let loud: Vec<f32> =
+            (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
+
+        assert!(s.advance(&loud), "a tone still advances the spectrum");
+        assert!(
+            s.bars.iter().any(|&bar| bar > 5.0),
+            "hidden peaks do not suppress bar motion"
         );
     }
 

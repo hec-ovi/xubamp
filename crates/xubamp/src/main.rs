@@ -187,6 +187,76 @@ fn config_time_display(display: xubamp_render::hit::TimeDisplay) -> xubamp_confi
     }
 }
 
+/// Seed the Preferences window's model from the persisted settings so it opens showing the user's
+/// real values rather than defaults.
+fn preferences_model_from(
+    settings: &xubamp_config::Settings,
+) -> xubamp_render::preferences::PreferencesModel {
+    use xubamp_render::preferences as pref;
+    pref::PreferencesModel {
+        shuffle_morph_rate: settings.playback.shuffle_morph_rate,
+        visualization_mode: match settings.visualization.mode {
+            xubamp_config::VisualizationMode::Spectrum => pref::VisualizationMode::Spectrum,
+            xubamp_config::VisualizationMode::Oscilloscope => pref::VisualizationMode::Oscilloscope,
+            xubamp_config::VisualizationMode::Off => pref::VisualizationMode::Off,
+        },
+        visualization_show_peaks: settings.visualization.show_peaks,
+        display_time: match settings.display.time {
+            xubamp_config::TimeDisplay::Elapsed => pref::TimeDisplay::Elapsed,
+            xubamp_config::TimeDisplay::Remaining => pref::TimeDisplay::Remaining,
+        },
+        display_double_size: settings.display.double_size,
+        display_scroll_title: settings.display.scroll_title,
+        library_roots: settings.library.roots.clone(),
+        library_recurse: settings.library.recurse,
+        skin_path: settings.skin_path.clone(),
+    }
+}
+
+/// Fold one committed Preferences command into the settings. Returns whether it changed a persisted
+/// value (so the caller knows to write the file). `ChooseLibraryDirectory` opens a picker elsewhere
+/// and is not itself a settings mutation.
+fn apply_preference_to_settings(
+    command: &xubamp_render::preferences::Command,
+    settings: &mut xubamp_config::Settings,
+) -> bool {
+    use xubamp_render::preferences::Command;
+    match command {
+        Command::SetShuffleMorphRate(rate) => settings.playback.shuffle_morph_rate = *rate,
+        Command::SetVisualizationMode(mode) => {
+            settings.visualization.mode = match mode {
+                xubamp_render::preferences::VisualizationMode::Spectrum => {
+                    xubamp_config::VisualizationMode::Spectrum
+                }
+                xubamp_render::preferences::VisualizationMode::Oscilloscope => {
+                    xubamp_config::VisualizationMode::Oscilloscope
+                }
+                xubamp_render::preferences::VisualizationMode::Off => {
+                    xubamp_config::VisualizationMode::Off
+                }
+            }
+        }
+        Command::SetVisualizationShowPeaks(show) => settings.visualization.show_peaks = *show,
+        Command::SetDisplayTime(time) => {
+            settings.display.time = match time {
+                xubamp_render::preferences::TimeDisplay::Elapsed => {
+                    xubamp_config::TimeDisplay::Elapsed
+                }
+                xubamp_render::preferences::TimeDisplay::Remaining => {
+                    xubamp_config::TimeDisplay::Remaining
+                }
+            }
+        }
+        Command::SetDisplayDoubleSize(on) => settings.display.double_size = *on,
+        Command::SetDisplayScrollTitle(on) => settings.display.scroll_title = *on,
+        Command::SetLibraryRoots(roots) => settings.library.roots = roots.clone(),
+        Command::SetLibraryRecurse(recurse) => settings.library.recurse = *recurse,
+        Command::SetSkinPath(path) => settings.skin_path = path.clone(),
+        Command::ChooseLibraryDirectory | Command::ChooseSkinFile => return false,
+    }
+    true
+}
+
 /// Copy the final, user-visible window and equalizer state out of the Wayland event loop before the
 /// settings file is saved. Runtime-only hover/drag state never crosses this boundary.
 fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::SessionState) {
@@ -697,6 +767,27 @@ fn main() {
                 xubamp_wl::ExternalPoll { events, pending }
             }
         };
+        // Committed Preferences values reach the live player and the settings file here. The window
+        // opens seeded from the persisted settings so it shows the user's real values.
+        let preferences_model = preferences_model_from(&settings.borrow());
+        let on_preferences = {
+            let player = Rc::clone(&player);
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
+            move |command: xubamp_render::preferences::Command| {
+                if let xubamp_render::preferences::Command::SetShuffleMorphRate(rate) = command {
+                    player.borrow_mut().set_shuffle_morph_rate(rate);
+                }
+                let mut settings = settings.borrow_mut();
+                if apply_preference_to_settings(&command, &mut settings) {
+                    if let Some(path) = settings_path.as_deref() {
+                        if let Err(error) = xubamp_config::save(path, &settings) {
+                            eprintln!("xubamp: cannot save preference: {error}");
+                        }
+                    }
+                }
+            }
+        };
 
         let result = xubamp_wl::run(
             skin,
@@ -713,6 +804,7 @@ fn main() {
                 playlist_source,
             )
             .with_ui_options(ui_options)
+            .with_preferences(preferences_model, on_preferences)
             .with_external_source(external_source),
         );
         if let Ok(session) = result.as_ref() {
@@ -834,6 +926,22 @@ fn main() {
                 xubamp_wl::ExternalPoll { events, pending }
             }
         };
+        // No player in this build, so committed preferences only persist to the settings file.
+        let preferences_model = preferences_model_from(&settings.borrow());
+        let on_preferences = {
+            let settings = Rc::clone(&settings);
+            let settings_path = settings_path.clone();
+            move |command: xubamp_render::preferences::Command| {
+                let mut settings = settings.borrow_mut();
+                if apply_preference_to_settings(&command, &mut settings) {
+                    if let Some(path) = settings_path.as_deref() {
+                        if let Err(error) = xubamp_config::save(path, &settings) {
+                            eprintln!("xubamp: cannot save preference: {error}");
+                        }
+                    }
+                }
+            }
+        };
         match xubamp_wl::run(
             skin,
             title,
@@ -849,6 +957,7 @@ fn main() {
                 playlist_source,
             )
             .with_ui_options(ui_options)
+            .with_preferences(preferences_model, on_preferences)
             .with_external_source(external_source),
         ) {
             Ok(session) => {
@@ -870,9 +979,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ui_session, classic_equalizer_presets, classify, config_time_display,
-        persist_playback_modes, persist_skin_path, preferred_skin_path, track_title,
-        transport_opens_media, transport_ops, ui_time_display, EngineOp, TransportState, DEV_SKIN,
+        apply_preference_to_settings, apply_ui_session, classic_equalizer_presets, classify,
+        config_time_display, persist_playback_modes, persist_skin_path, preferences_model_from,
+        preferred_skin_path, track_title, transport_opens_media, transport_ops, ui_time_display,
+        EngineOp, TransportState, DEV_SKIN,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -965,6 +1075,49 @@ mod tests {
         persist_playback_modes(None, &mut settings, true, false).unwrap();
         assert!(settings.playback.shuffle);
         assert!(!settings.playback.repeat);
+    }
+
+    #[test]
+    fn preferences_seed_from_and_fold_back_into_settings() {
+        use xubamp_render::preferences::{Command, TimeDisplay, VisualizationMode};
+
+        // The model opens seeded from the persisted settings, not defaults.
+        let mut settings = xubamp_config::Settings::default();
+        settings.playback.shuffle_morph_rate = 20;
+        settings.display.scroll_title = false;
+        settings.display.double_size = true;
+        settings.visualization.mode = xubamp_config::VisualizationMode::Oscilloscope;
+        settings.library.roots = vec![PathBuf::from("/music")];
+        let model = preferences_model_from(&settings);
+        assert_eq!(model.shuffle_morph_rate, 20);
+        assert!(!model.display_scroll_title);
+        assert!(model.display_double_size);
+        assert_eq!(model.visualization_mode, VisualizationMode::Oscilloscope);
+        assert_eq!(model.library_roots, vec![PathBuf::from("/music")]);
+
+        // Committed commands fold back into the settings, and report whether a value changed.
+        let mut s = xubamp_config::Settings::default();
+        s.library.recurse = true;
+        assert!(apply_preference_to_settings(
+            &Command::SetShuffleMorphRate(33),
+            &mut s
+        ));
+        assert_eq!(s.playback.shuffle_morph_rate, 33);
+        assert!(apply_preference_to_settings(
+            &Command::SetDisplayTime(TimeDisplay::Remaining),
+            &mut s
+        ));
+        assert_eq!(s.display.time, xubamp_config::TimeDisplay::Remaining);
+        assert!(apply_preference_to_settings(
+            &Command::SetLibraryRecurse(false),
+            &mut s
+        ));
+        assert!(!s.library.recurse);
+        // The picker-opening commands are not themselves settings mutations.
+        assert!(!apply_preference_to_settings(
+            &Command::ChooseLibraryDirectory,
+            &mut s
+        ));
     }
 
     #[test]

@@ -518,7 +518,10 @@ impl Player {
     }
 
     /// Current repeat-boundary mutation rate. Updating it leaves the active shuffle permutation
-    /// untouched and takes effect only when a repeated cycle is created.
+    /// untouched and takes effect only when a repeated cycle is created. A symmetric accessor to
+    /// [`Self::set_shuffle_morph_rate`], used by tests; the running app persists the rate from the
+    /// Preferences sink and seeds the model from settings, so it does not read this back.
+    #[allow(dead_code)]
     pub fn shuffle_morph_rate(&self) -> u8 {
         self.shuffle_cycle.morph_rate()
     }

@@ -46,7 +46,7 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 use xubamp_render::vis::{VisMode, FFT_N};
-use xubamp_render::{compose_main_window, hit, jump, marquee, pledit, Framebuffer};
+use xubamp_render::{compose_main_window, equalizer, hit, jump, marquee, pledit, Framebuffer};
 use xubamp_skin::Skin;
 
 // Keyboard shortcuts are gated behind the `keyboard` feature so the host build stays free of the
@@ -88,6 +88,67 @@ type SampleSource = Box<dyn FnMut(&mut [f32])>;
 /// playlist window follows track changes. The window layer keeps selection/scroll itself.
 type PlaylistSource = Box<dyn FnMut() -> (Vec<pledit::Row>, Option<usize>)>;
 
+/// Applies equalizer-specific controls to the player/configuration owner.
+type EqualizerSink = Box<dyn FnMut(equalizer::Command)>;
+
+/// Event sinks and live data sources used by the Wayland event loop. Grouping these keeps the
+/// window constructor stable as secondary panes gain controls.
+pub struct Runtime {
+    on_command: Box<dyn FnMut(hit::Command)>,
+    on_equalizer: EqualizerSink,
+    playback_source: Box<dyn FnMut() -> hit::Playback>,
+    sample_source: SampleSource,
+    playlist_source: PlaylistSource,
+}
+
+impl Runtime {
+    pub fn new(
+        on_command: impl FnMut(hit::Command) + 'static,
+        on_equalizer: impl FnMut(equalizer::Command) + 'static,
+        playback_source: impl FnMut() -> hit::Playback + 'static,
+        sample_source: impl FnMut(&mut [f32]) + 'static,
+        playlist_source: impl FnMut() -> (Vec<pledit::Row>, Option<usize>) + 'static,
+    ) -> Self {
+        Self {
+            on_command: Box::new(on_command),
+            on_equalizer: Box::new(on_equalizer),
+            playback_source: Box::new(playback_source),
+            sample_source: Box::new(sample_source),
+            playlist_source: Box::new(playlist_source),
+        }
+    }
+}
+
+/// Persistable pane layout restored before the first mapped frame. Positions are relative to the
+/// main surface; playlist size is its remembered expanded size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneLayout {
+    pub main_shaded: bool,
+    pub equalizer_open: bool,
+    pub equalizer_position: (i32, i32),
+    pub playlist_open: bool,
+    pub playlist_shaded: bool,
+    pub playlist_position: (i32, i32),
+    pub playlist_size: (u32, u32),
+}
+
+impl Default for PaneLayout {
+    fn default() -> Self {
+        Self {
+            main_shaded: false,
+            equalizer_open: false,
+            equalizer_position: (0, xubamp_skin::sprites::MAIN_H),
+            playlist_open: false,
+            playlist_shaded: false,
+            playlist_position: (xubamp_skin::sprites::MAIN_W, 0),
+            playlist_size: (
+                xubamp_skin::sprites::PLEDIT_W as u32,
+                xubamp_skin::sprites::PLEDIT_H as u32,
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PaneDrag {
     /// Pointer position in parent-surface coordinates when the press began.
@@ -128,6 +189,18 @@ struct PlaylistWin {
     /// Whether the pointer is currently over the bottom-right resize grip, so the resize cursor is
     /// set only on the hover transition rather than on every motion event.
     grip_hover: bool,
+}
+
+/// Equalizer child-surface resources. The renderer owns all control state; this wrapper only owns
+/// Wayland presentation and title-bar dragging.
+struct EqualizerWin {
+    subsurface: wl_subsurface::WlSubsurface,
+    surface: wl_surface::WlSurface,
+    pool: SlotPool,
+    fb: Framebuffer,
+    position: panes::Point,
+    drag: Option<PaneDrag>,
+    title_last_click: Option<Instant>,
 }
 
 /// The "Jump to file" dialog window (classic `J`): a standalone toplevel that filters the track
@@ -205,10 +278,9 @@ fn playlist_configured_size(
 pub fn run(
     skin: Skin,
     title: String,
-    on_command: impl FnMut(hit::Command) + 'static,
-    playback_source: impl FnMut() -> hit::Playback + 'static,
-    sample_source: impl FnMut(&mut [f32]) + 'static,
-    playlist_source: impl FnMut() -> (Vec<pledit::Row>, Option<usize>) + 'static,
+    equalizer_state: equalizer::EqState,
+    pane_layout: PaneLayout,
+    runtime: Runtime,
 ) -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
@@ -222,6 +294,7 @@ pub fn run(
 
     let state = hit::UiState {
         title,
+        shade: pane_layout.main_shaded,
         ..Default::default()
     };
     let fb = compose_main_window(&skin, &state);
@@ -270,22 +343,26 @@ pub fn run(
         skin,
         state,
         fb,
-        on_command: Box::new(on_command),
-        playback_source: Box::new(playback_source),
-        sample_source: Box::new(sample_source),
+        on_command: runtime.on_command,
+        on_equalizer: runtime.on_equalizer,
+        playback_source: runtime.playback_source,
+        sample_source: runtime.sample_source,
         playlist: None,
-        playlist_state: pledit::PlState::default(),
+        playlist_state: pledit::PlState {
+            shade: pane_layout.playlist_shaded,
+            ..Default::default()
+        },
         pl_size: (
-            xubamp_skin::sprites::PLEDIT_W,
-            xubamp_skin::sprites::PLEDIT_H,
+            i32::try_from(pane_layout.playlist_size.0).unwrap_or(i32::MAX),
+            i32::try_from(pane_layout.playlist_size.1).unwrap_or(i32::MAX),
         ),
         pl_position: panes::Point {
-            x: 0,
-            y: xubamp_skin::sprites::MAIN_H,
+            x: pane_layout.playlist_position.0,
+            y: pane_layout.playlist_position.1,
         },
         jump_win: None,
         jump_state: jump::JumpState::default(),
-        playlist_source: Box::new(playlist_source),
+        playlist_source: runtime.playlist_source,
         mod_ctrl: false,
         mod_shift: false,
         last_click: None,
@@ -296,6 +373,14 @@ pub fn run(
         frame_pending: false,
         playing: false,
         stopped: false,
+        equalizer: None,
+        equalizer_state,
+        equalizer_position: panes::Point {
+            x: pane_layout.equalizer_position.0,
+            y: pane_layout.equalizer_position.1,
+        },
+        pending_equalizer_open: pane_layout.equalizer_open,
+        pending_playlist_open: pane_layout.playlist_open,
         pointer: None,
         seat: None,
         armed_move: None,
@@ -344,6 +429,8 @@ struct App {
     /// Sink for UI commands (transport clicks, slider drags, seek), called on the event-loop
     /// thread.
     on_command: Box<dyn FnMut(hit::Command)>,
+    /// Sink for DSP-specific equalizer changes.
+    on_equalizer: EqualizerSink,
     /// Polled each redraw tick for the clock snapshot (elapsed, seek-bar position, duration,
     /// playing).
     playback_source: Box<dyn FnMut() -> hit::Playback>,
@@ -400,6 +487,13 @@ struct App {
     /// Whether playback is stopped (vs paused), from the last poll. Stop settles the visualizer to
     /// baseline; a pause freezes it on its last frame.
     stopped: bool,
+    /// Equalizer pane and its state, which survive close/reopen.
+    equalizer: Option<EqualizerWin>,
+    equalizer_state: equalizer::EqState,
+    equalizer_position: panes::Point,
+    /// Restored only after the root's initial xdg configure, when child surfaces may be mapped.
+    pending_equalizer_open: bool,
+    pending_playlist_open: bool,
     /// The secondary playlist pane (PLEDIT), or `None` when closed.
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
@@ -445,6 +539,17 @@ impl App {
             self.redraw();
         }
         if let Some(command) = outcome.command {
+            match command {
+                hit::Command::Volume(volume) => {
+                    self.equalizer_state.volume = volume;
+                    self.redraw_equalizer();
+                }
+                hit::Command::Balance(balance) => {
+                    self.equalizer_state.balance = balance;
+                    self.redraw_equalizer();
+                }
+                _ => {}
+            }
             (self.on_command)(command);
         }
         if let Some(action) = outcome.window {
@@ -460,9 +565,7 @@ impl App {
         if let Some(t) = outcome.toggle {
             match t {
                 hit::WindowToggle::Playlist => self.toggle_playlist(),
-                hit::WindowToggle::Equalizer => {
-                    eprintln!("xubamp: equalizer window not implemented yet")
-                }
+                hit::WindowToggle::Equalizer => self.toggle_equalizer(),
             }
         }
     }
@@ -484,8 +587,9 @@ impl App {
             xubamp_skin::sprites::MAIN_H
         };
 
-        // Preserve a playlist attached to the main pane's bottom edge or aligned bottom edge. The
-        // position is updated even while closed so reopening after a shade toggle stays docked.
+        // Preserve the direct pane graph through the main height change, including a playlist
+        // attached below an equalizer which itself is attached below the main pane. Positions are
+        // updated even while a pane is closed so reopening stays docked.
         let visible_playlist_h = if self.playlist_state.shade {
             xubamp_skin::sprites::PLEDIT_SHADE_H
         } else {
@@ -501,8 +605,34 @@ impl App {
             height: h,
             ..old_main
         };
+        let equalizer_h = if self.equalizer_state.shade {
+            xubamp_skin::sprites::EQ_SHADE_H
+        } else {
+            xubamp_skin::sprites::EQ_H
+        };
+        let old_equalizer = panes::Rect::at(
+            self.equalizer_position,
+            xubamp_skin::sprites::EQ_W,
+            equalizer_h,
+        );
+        self.equalizer_position =
+            panes::preserve_resize_attachment(old_equalizer, old_main, new_main);
+        let new_equalizer = panes::Rect::at(
+            self.equalizer_position,
+            xubamp_skin::sprites::EQ_W,
+            equalizer_h,
+        );
         let playlist_rect = panes::Rect::at(self.pl_position, self.pl_size.0, visible_playlist_h);
-        self.pl_position = panes::preserve_resize_attachment(playlist_rect, old_main, new_main);
+        let after_main = panes::preserve_resize_attachment(playlist_rect, old_main, new_main);
+        let playlist_rect = panes::Rect::at(after_main, self.pl_size.0, visible_playlist_h);
+        self.pl_position =
+            panes::preserve_resize_attachment(playlist_rect, old_equalizer, new_equalizer);
+        if let Some(equalizer) = &mut self.equalizer {
+            equalizer.position = self.equalizer_position;
+            equalizer
+                .subsurface
+                .set_position(self.equalizer_position.x, self.equalizer_position.y);
+        }
         if let Some(playlist) = &mut self.playlist {
             playlist.position = self.pl_position;
             playlist
@@ -676,6 +806,10 @@ impl App {
     fn is_our_surface(&self, surface: &wl_surface::WlSurface) -> bool {
         surface == self.window.wl_surface()
             || self
+                .equalizer
+                .as_ref()
+                .is_some_and(|eq| surface == &eq.surface)
+            || self
                 .playlist
                 .as_ref()
                 .is_some_and(|pl| surface == &pl.surface)
@@ -683,6 +817,135 @@ impl App {
                 .jump_win
                 .as_ref()
                 .is_some_and(|j| surface == j.window.wl_surface())
+    }
+
+    fn open_equalizer(&mut self) {
+        if self.equalizer.is_some() {
+            return;
+        }
+        self.equalizer_state.sanitize();
+        let fb = equalizer::compose(&self.skin, &self.equalizer_state);
+        let (subsurface, surface) = self
+            .subcompositor
+            .create_subsurface(self.window.wl_surface().clone(), &self.qh);
+        subsurface.set_position(self.equalizer_position.x, self.equalizer_position.y);
+        subsurface.set_desync();
+        self.window.wl_surface().commit();
+        let pool = SlotPool::new(fb.width as usize * fb.height as usize * 4, &self.shm)
+            .expect("equalizer pool");
+        self.equalizer = Some(EqualizerWin {
+            subsurface,
+            surface,
+            pool,
+            fb,
+            position: self.equalizer_position,
+            drag: None,
+            title_last_click: None,
+        });
+        self.state.eq_open = true;
+        self.redraw();
+        self.redraw_equalizer();
+    }
+
+    fn close_equalizer(&mut self) {
+        if let Some(equalizer) = self.equalizer.take() {
+            equalizer.subsurface.destroy();
+            equalizer.surface.destroy();
+        }
+        self.equalizer_state.pressed_button = None;
+        self.equalizer_state.dragging = None;
+        self.state.eq_open = false;
+        self.redraw();
+    }
+
+    fn toggle_equalizer(&mut self) {
+        if self.equalizer.is_some() {
+            self.close_equalizer();
+        } else {
+            self.open_equalizer();
+        }
+    }
+
+    fn redraw_equalizer(&mut self) {
+        if self.equalizer.is_none() {
+            return;
+        }
+        let fb = equalizer::compose(&self.skin, &self.equalizer_state);
+        let equalizer = self.equalizer.as_mut().unwrap();
+        equalizer.fb = fb;
+        equalizer.present();
+    }
+
+    fn set_equalizer_shade(&mut self, shaded: bool) {
+        // Renderer actions are emitted after `EqState` flips, so derive the previous height from the
+        // requested destination rather than reading the already-updated flag.
+        let old_h = if shaded {
+            xubamp_skin::sprites::EQ_H
+        } else {
+            xubamp_skin::sprites::EQ_SHADE_H
+        };
+        self.equalizer_state.shade = shaded;
+        let new_h = if shaded {
+            xubamp_skin::sprites::EQ_SHADE_H
+        } else {
+            xubamp_skin::sprites::EQ_H
+        };
+
+        // Keep a playlist directly attached below the equalizer attached when the EQ changes
+        // height. Side-by-side panes remain fixed because the equalizer width never changes.
+        let old_eq = panes::Rect::at(self.equalizer_position, xubamp_skin::sprites::EQ_W, old_h);
+        let new_eq = panes::Rect {
+            height: new_h,
+            ..old_eq
+        };
+        let playlist_h = if self.playlist_state.shade {
+            xubamp_skin::sprites::PLEDIT_SHADE_H
+        } else {
+            self.pl_size.1
+        };
+        let playlist = panes::Rect::at(self.pl_position, self.pl_size.0, playlist_h);
+        self.pl_position = panes::preserve_resize_attachment(playlist, old_eq, new_eq);
+        if let Some(playlist) = &mut self.playlist {
+            playlist.position = self.pl_position;
+            playlist
+                .subsurface
+                .set_position(self.pl_position.x, self.pl_position.y);
+        }
+        if let Some(equalizer) = &mut self.equalizer {
+            equalizer.drag = None;
+            equalizer.title_last_click = None;
+        }
+        self.window.wl_surface().commit();
+        self.redraw_equalizer();
+    }
+
+    fn apply_equalizer(&mut self, outcome: equalizer::Outcome) {
+        if let Some(command) = outcome.command {
+            match command {
+                equalizer::Command::Volume(volume) => {
+                    self.state.volume = volume;
+                    self.redraw();
+                }
+                equalizer::Command::Balance(balance) => {
+                    self.state.balance = balance;
+                    self.redraw();
+                }
+                _ => {}
+            }
+            (self.on_equalizer)(command);
+        }
+        if let Some(action) = outcome.action {
+            match action {
+                equalizer::Action::SetShade(shaded) => self.set_equalizer_shade(shaded),
+                equalizer::Action::Close => self.close_equalizer(),
+                equalizer::Action::Presets => {
+                    eprintln!("xubamp: equalizer preset menu not implemented yet")
+                }
+            }
+        }
+        if outcome.redraw && self.equalizer.is_some() {
+            self.redraw_equalizer();
+        }
     }
 
     /// Open the playlist child pane if it is not already open, and light the PL button on the main
@@ -748,11 +1011,36 @@ impl App {
         if self.playlist.is_none() {
             return;
         }
+        let old_h = self
+            .playlist
+            .as_ref()
+            .map_or(self.pl_size.1, |playlist| playlist.height);
         self.playlist_state.shade = !self.playlist_state.shade;
         self.playlist_state.pressed_title = None;
         let ((w, h), expanded) =
             playlist_configured_size(self.playlist_state.shade, self.pl_size, (None, None));
         self.pl_size = expanded;
+
+        let old_playlist = panes::Rect::at(self.pl_position, w, old_h);
+        let new_playlist = panes::Rect::at(self.pl_position, w, h);
+        let equalizer_h = if self.equalizer_state.shade {
+            xubamp_skin::sprites::EQ_SHADE_H
+        } else {
+            xubamp_skin::sprites::EQ_H
+        };
+        let equalizer = panes::Rect::at(
+            self.equalizer_position,
+            xubamp_skin::sprites::EQ_W,
+            equalizer_h,
+        );
+        self.equalizer_position =
+            panes::preserve_resize_attachment(equalizer, old_playlist, new_playlist);
+        if let Some(equalizer) = &mut self.equalizer {
+            equalizer.position = self.equalizer_position;
+            equalizer
+                .subsurface
+                .set_position(self.equalizer_position.x, self.equalizer_position.y);
+        }
 
         if let Some(pl) = &mut self.playlist {
             pl.width = w;
@@ -778,6 +1066,124 @@ impl App {
         let pl = self.playlist.as_mut().unwrap();
         pl.fb = fb;
         pl.present();
+    }
+
+    fn equalizer_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        match kind {
+            PointerEventKind::Enter { .. } => {
+                if let Some(pointer) = &self.pointer {
+                    let _ = pointer.set_cursor(conn, CursorIcon::Default);
+                }
+            }
+            PointerEventKind::Press { button, .. } if *button == BTN_LEFT => {
+                let outcome = equalizer::on_press(&mut self.equalizer_state, x, y);
+                if outcome.start_move {
+                    let now = Instant::now();
+                    let double = self
+                        .equalizer
+                        .as_ref()
+                        .and_then(|eq| eq.title_last_click)
+                        .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                    if double {
+                        if let Some(eq) = &mut self.equalizer {
+                            eq.title_last_click = None;
+                            eq.drag = None;
+                        }
+                        self.set_equalizer_shade(!self.equalizer_state.shade);
+                    } else if let Some(eq) = &mut self.equalizer {
+                        eq.title_last_click = Some(now);
+                        eq.drag = Some(PaneDrag {
+                            press: panes::Point {
+                                x: eq.position.x + x,
+                                y: eq.position.y + y,
+                            },
+                            origin: eq.position,
+                            moved: false,
+                        });
+                    }
+                }
+                self.apply_equalizer(outcome);
+            }
+            PointerEventKind::Motion { .. } => {
+                let drag_snapshot = self
+                    .equalizer
+                    .as_ref()
+                    .and_then(|eq| eq.drag.map(|drag| (drag, eq.position)));
+                if let Some((mut drag, current)) = drag_snapshot {
+                    let pointer = panes::Point {
+                        x: current.x + x,
+                        y: current.y + y,
+                    };
+                    let dx = pointer.x - drag.press.x;
+                    let dy = pointer.y - drag.press.y;
+                    if drag.moved || hit::exceeds_move_threshold(dx, dy) {
+                        drag.moved = true;
+                        let proposed = panes::Rect {
+                            x: drag.origin.x + dx,
+                            y: drag.origin.y + dy,
+                            width: xubamp_skin::sprites::EQ_W,
+                            height: if self.equalizer_state.shade {
+                                xubamp_skin::sprites::EQ_SHADE_H
+                            } else {
+                                xubamp_skin::sprites::EQ_H
+                            },
+                        };
+                        let main = panes::Rect {
+                            x: 0,
+                            y: 0,
+                            width: xubamp_skin::sprites::MAIN_W,
+                            height: if self.state.shade {
+                                xubamp_skin::sprites::MAIN_SHADE_H
+                            } else {
+                                xubamp_skin::sprites::MAIN_H
+                            },
+                        };
+                        let mut stationary = vec![main];
+                        if let Some(playlist) = &self.playlist {
+                            stationary.push(panes::Rect::at(
+                                playlist.position,
+                                playlist.width,
+                                playlist.height,
+                            ));
+                        }
+                        let position = panes::snap_to_many(proposed, &stationary);
+                        self.equalizer_position = position;
+                        if let Some(eq) = &mut self.equalizer {
+                            eq.position = position;
+                            eq.drag = Some(drag);
+                            eq.title_last_click = None;
+                            eq.subsurface.set_position(position.x, position.y);
+                        }
+                        self.window.wl_surface().commit();
+                    }
+                    return;
+                }
+                let outcome = equalizer::on_motion(&mut self.equalizer_state, x, y);
+                self.apply_equalizer(outcome);
+            }
+            PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
+                if let Some(eq) = &mut self.equalizer {
+                    eq.drag = None;
+                }
+                let outcome = equalizer::on_release(&mut self.equalizer_state, x, y);
+                self.apply_equalizer(outcome);
+            }
+            PointerEventKind::Leave { .. } => {
+                let active_drag = self
+                    .equalizer
+                    .as_ref()
+                    .is_some_and(|equalizer| equalizer.drag.is_some());
+                if !active_drag {
+                    if let Some(eq) = &mut self.equalizer {
+                        eq.title_last_click = None;
+                    }
+                }
+                if equalizer::on_leave(&mut self.equalizer_state) {
+                    self.redraw_equalizer();
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Pointer handling for the playlist window: title buttons, title-bar drag/double-click shade,
@@ -902,7 +1308,19 @@ impl App {
                                 xubamp_skin::sprites::MAIN_H
                             },
                         };
-                        let position = panes::snap_to_many(proposed, &[main]);
+                        let mut stationary = vec![main];
+                        if let Some(equalizer) = &self.equalizer {
+                            stationary.push(panes::Rect::at(
+                                equalizer.position,
+                                xubamp_skin::sprites::EQ_W,
+                                if self.equalizer_state.shade {
+                                    xubamp_skin::sprites::EQ_SHADE_H
+                                } else {
+                                    xubamp_skin::sprites::EQ_H
+                                },
+                            ));
+                        }
+                        let position = panes::snap_to_many(proposed, &stationary);
                         self.pl_position = position;
                         if let Some(pl) = &mut self.playlist {
                             pl.position = position;
@@ -1224,6 +1642,28 @@ impl PlaylistWin {
     }
 }
 
+impl EqualizerWin {
+    fn present(&mut self) {
+        let (w, h) = (self.fb.width, self.fb.height);
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .expect("create equalizer wl_shm buffer");
+        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        self.surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer
+            .attach_to(&self.surface)
+            .expect("attach equalizer buffer");
+        self.surface.commit();
+    }
+}
+
 impl CompositorHandler for App {
     fn scale_factor_changed(
         &mut self,
@@ -1290,10 +1730,21 @@ impl WindowHandler for App {
         _: u32,
     ) {
         if *window == self.window {
+            let first_configure = !self.configured;
             self.configured = true;
             // Initial configure maps the surface. Later configures reassert the framebuffer that
             // matches current shade state; toggles already attach it immediately.
             self.redraw();
+            if first_configure {
+                let open_equalizer = std::mem::take(&mut self.pending_equalizer_open);
+                let open_playlist = std::mem::take(&mut self.pending_playlist_open);
+                if open_equalizer {
+                    self.open_equalizer();
+                }
+                if open_playlist {
+                    self.open_playlist();
+                }
+            }
         } else if self.jump_win.as_ref().is_some_and(|j| *window == j.window) {
             if let Some(j) = &mut self.jump_win {
                 j.configured = true;
@@ -1396,6 +1847,15 @@ impl PointerHandler for App {
         for event in events {
             let (x, y) = (event.position.0 as i32, event.position.1 as i32);
             let on_main = event.surface == *self.window.wl_surface();
+            let on_equalizer = !on_main
+                && self
+                    .equalizer
+                    .as_ref()
+                    .is_some_and(|equalizer| event.surface == equalizer.surface);
+            if on_equalizer {
+                self.equalizer_pointer(conn, &event.kind, x, y);
+                continue;
+            }
             let on_playlist = !on_main
                 && self
                     .playlist

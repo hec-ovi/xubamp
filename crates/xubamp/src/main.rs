@@ -237,6 +237,25 @@ fn main() {
         .first()
         .map(|p| track_title(p))
         .unwrap_or_default();
+    let equalizer_state = xubamp_render::equalizer::EqState {
+        enabled: settings.equalizer.enabled,
+        preamp_db: settings.equalizer.preamp_db,
+        bands_db: settings.equalizer.bands_db,
+        shade: settings.windows.equalizer.shaded,
+        ..Default::default()
+    };
+    let pane_layout = xubamp_wl::PaneLayout {
+        main_shaded: settings.windows.main.shaded,
+        equalizer_open: settings.windows.equalizer.open,
+        equalizer_position: (settings.windows.equalizer.x, settings.windows.equalizer.y),
+        playlist_open: settings.windows.playlist.open,
+        playlist_shaded: settings.windows.playlist.shaded,
+        playlist_position: (settings.windows.playlist.x, settings.windows.playlist.y),
+        playlist_size: (
+            settings.windows.playlist.width,
+            settings.windows.playlist.height,
+        ),
+    };
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
     // window would display, then exit without opening a window. `XUBAMP_TITLE` overrides the
@@ -326,6 +345,38 @@ fn main() {
                 }
             }
         };
+        let on_equalizer = {
+            let player = Rc::clone(&player);
+            let settings = Rc::clone(&settings);
+            move |command: xubamp_render::equalizer::Command| {
+                use xubamp_render::equalizer::Command;
+                let mut player = player.borrow_mut();
+                match command {
+                    Command::Volume(volume) => player.set_volume(volume),
+                    Command::Balance(balance) => player.set_balance(balance),
+                    Command::Enabled(enabled) => {
+                        let mut equalizer = player.equalizer_settings();
+                        equalizer.enabled = enabled;
+                        player.set_equalizer_settings(equalizer);
+                        settings.borrow_mut().equalizer.enabled = enabled;
+                    }
+                    Command::Preamp(preamp_db) => {
+                        let mut equalizer = player.equalizer_settings();
+                        equalizer.preamp_db = preamp_db;
+                        player.set_equalizer_settings(equalizer);
+                        settings.borrow_mut().equalizer.preamp_db = preamp_db;
+                    }
+                    Command::Band { index, db } => {
+                        let mut equalizer = player.equalizer_settings();
+                        if let Some(band) = equalizer.bands_db.get_mut(index) {
+                            *band = db;
+                            player.set_equalizer_settings(equalizer);
+                            settings.borrow_mut().equalizer.bands_db[index] = db;
+                        }
+                    }
+                }
+            }
+        };
         let playback_source = {
             let player = Rc::clone(&player);
             move || {
@@ -343,14 +394,27 @@ fn main() {
             move || player.borrow().playlist_view()
         };
 
-        if let Err(e) = xubamp_wl::run(
+        let result = xubamp_wl::run(
             skin,
             title,
-            on_command,
-            playback_source,
-            sample_source,
-            playlist_source,
-        ) {
+            equalizer_state,
+            pane_layout,
+            xubamp_wl::Runtime::new(
+                on_command,
+                on_equalizer,
+                playback_source,
+                sample_source,
+                playlist_source,
+            ),
+        );
+        // Equalizer sliders update live audio continuously, but the final state reaches disk once
+        // when the event loop exits rather than once per pointer-motion event.
+        if let Some(path) = settings_path.as_deref() {
+            if let Err(error) = xubamp_config::save(path, &settings.borrow()) {
+                eprintln!("xubamp: cannot save settings on exit: {error}");
+            }
+        }
+        if let Err(e) = result {
             eprintln!("xubamp: {e}");
             std::process::exit(1);
         }
@@ -364,16 +428,24 @@ fn main() {
         }
         let on_command =
             |command: xubamp_render::hit::Command| eprintln!("xubamp: command {command:?}");
+        let on_equalizer = |command: xubamp_render::equalizer::Command| {
+            eprintln!("xubamp: equalizer command {command:?}")
+        };
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
         if let Err(e) = xubamp_wl::run(
             skin,
             title,
-            on_command,
-            playback_source,
-            sample_source,
-            playlist_source,
+            equalizer_state,
+            pane_layout,
+            xubamp_wl::Runtime::new(
+                on_command,
+                on_equalizer,
+                playback_source,
+                sample_source,
+                playlist_source,
+            ),
         ) {
             eprintln!("xubamp: {e}");
             std::process::exit(1);

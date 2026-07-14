@@ -1036,6 +1036,7 @@ name = "xubamp"
 version = "0.0.1"
 dependencies = [
  "xubamp-audio",
+ "xubamp-library",
  "xubamp-render",
  "xubamp-skin",
  "xubamp-wl",
@@ -1058,6 +1059,10 @@ version = "0.0.1"
 
 [[package]]
 name = "xubamp-dsp"
+version = "0.0.1"
+
+[[package]]
+name = "xubamp-library"
 version = "0.0.1"
 
 [[package]]

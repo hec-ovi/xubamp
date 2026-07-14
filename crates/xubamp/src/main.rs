@@ -23,9 +23,6 @@ mod player;
 /// falls through to the built-in default. This is the "use the XMMS skin for now" hook.
 const DEV_SKIN: &str = "skins/XMMS_standard_skin.wsz";
 
-/// Extensions we treat as playable media on the command line.
-const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "ogg", "oga", "aac"];
-
 fn has_ext(name: &str, ext: &str) -> bool {
     Path::new(name)
         .extension()
@@ -54,7 +51,7 @@ fn classify<I: IntoIterator<Item = String>>(args: I) -> (Option<String>, Vec<Str
     for arg in args {
         if has_ext(&arg, "wsz") || has_ext(&arg, "zip") {
             skin.get_or_insert(arg);
-        } else if AUDIO_EXTS.iter().any(|e| has_ext(&arg, e)) {
+        } else if xubamp_library::is_audio_path(Path::new(&arg)) {
             media.push(arg);
         }
     }
@@ -389,7 +386,12 @@ mod tests {
 
     #[test]
     fn no_recognized_args_yields_none() {
-        let (skin, media) = classify(s(&["readme.md"]));
+        let (skin, media) = classify(s(&[
+            "readme.md",
+            "not-enabled.flac",
+            "movie.mp4",
+            "playlist.m3u",
+        ]));
         assert!(skin.is_none());
         assert!(media.is_empty());
     }

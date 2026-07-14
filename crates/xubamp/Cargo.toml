@@ -16,6 +16,7 @@ path = "src/main.rs"
 xubamp-skin = { path = "../skin" }
 xubamp-render = { path = "../render" }
 xubamp-wl = { path = "../wl" }
+xubamp-library = { path = "../library" }
 # Audio is optional so the UI still builds and runs on a clean host with no PipeWire deps.
 # The dev container builds `--features audio`, which pulls the audio crate's `output` backend.
 xubamp-audio = { path = "../audio", optional = true }

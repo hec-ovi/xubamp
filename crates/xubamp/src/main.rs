@@ -18,6 +18,7 @@ use xubamp_skin::{default_skin, Skin};
 /// The playlist-to-engine player. Only with the audio feature (it owns the PipeWire-backed engine).
 #[cfg(feature = "audio")]
 mod player;
+mod portal_actions;
 
 /// A local skin used only during development. It lives under `skins/`, which is gitignored
 /// (third-party art, never committed or shipped), so a released binary never finds it and
@@ -336,6 +337,8 @@ fn main() {
         use std::cell::RefCell;
         use std::rc::Rc;
 
+        let (portal_launcher, mut portal_receiver) =
+            portal_actions::bridge(settings.library.recurse);
         let tracks: Vec<std::path::PathBuf> =
             media_args.iter().map(std::path::PathBuf::from).collect();
         let equalizer = xubamp_audio::EqSettings {
@@ -427,8 +430,17 @@ fn main() {
                 }
             }
         };
-        let on_menu = |action: xubamp_render::menu::ClassicMenuAction| {
-            eprintln!("xubamp: menu action pending integration: {action:?}")
+        let on_menu = {
+            let portal_launcher = portal_launcher.clone();
+            move |request: xubamp_wl::MenuRequest| match portal_launcher.launch(request.clone()) {
+                portal_actions::LaunchResult::Started => {}
+                portal_actions::LaunchResult::Busy => {
+                    eprintln!("xubamp: a file chooser is already open")
+                }
+                portal_actions::LaunchResult::Unsupported => {
+                    eprintln!("xubamp: menu action pending integration: {request:?}")
+                }
+            }
         };
         let playback_source = {
             let player = Rc::clone(&player);
@@ -446,6 +458,34 @@ fn main() {
             let player = Rc::clone(&player);
             move || player.borrow().playlist_view()
         };
+        let external_source = {
+            let player = Rc::clone(&player);
+            move || {
+                let (completions, pending) = portal_receiver.poll();
+                let mut events = Vec::new();
+                for completion in completions {
+                    match completion {
+                        portal_actions::Completion::AddPaths { paths, warnings } => {
+                            for warning in warnings {
+                                eprintln!("xubamp: directory scan warning: {warning}");
+                            }
+                            let count = player.borrow_mut().append_paths(paths).len();
+                            eprintln!("xubamp: added {count} audio file(s) to the playlist");
+                        }
+                        portal_actions::Completion::EqualizerPreset(preset) => {
+                            events.push(xubamp_wl::ExternalEvent::EqualizerPreset(preset))
+                        }
+                        portal_actions::Completion::Saved(path) => {
+                            eprintln!("xubamp: saved equalizer preset to {}", path.display());
+                        }
+                        portal_actions::Completion::Error(error) => {
+                            eprintln!("xubamp: {error}");
+                        }
+                    }
+                }
+                xubamp_wl::ExternalPoll { events, pending }
+            }
+        };
 
         let result = xubamp_wl::run(
             skin,
@@ -460,7 +500,8 @@ fn main() {
                 playback_source,
                 sample_source,
                 playlist_source,
-            ),
+            )
+            .with_external_source(external_source),
         );
         if let Ok(session) = result.as_ref() {
             apply_ui_session(&mut settings.borrow_mut(), *session);
@@ -484,17 +525,51 @@ fn main() {
         if !media_args.is_empty() {
             eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
         }
+        let (portal_launcher, mut portal_receiver) =
+            portal_actions::bridge(settings.library.recurse);
         let on_command =
             |command: xubamp_render::hit::Command| eprintln!("xubamp: command {command:?}");
         let on_equalizer = |command: xubamp_render::equalizer::Command| {
             eprintln!("xubamp: equalizer command {command:?}")
         };
-        let on_menu = |action: xubamp_render::menu::ClassicMenuAction| {
-            eprintln!("xubamp: menu action pending integration: {action:?}")
-        };
+        let on_menu =
+            move |request: xubamp_wl::MenuRequest| match portal_launcher.launch(request.clone()) {
+                portal_actions::LaunchResult::Started => {}
+                portal_actions::LaunchResult::Busy => {
+                    eprintln!("xubamp: a file chooser is already open")
+                }
+                portal_actions::LaunchResult::Unsupported => {
+                    eprintln!("xubamp: menu action pending integration: {request:?}")
+                }
+            };
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
         let playlist_source = || (Vec::new(), None);
+        let external_source = move || {
+            let (completions, pending) = portal_receiver.poll();
+            let mut events = Vec::new();
+            for completion in completions {
+                match completion {
+                    portal_actions::Completion::EqualizerPreset(preset) => {
+                        events.push(xubamp_wl::ExternalEvent::EqualizerPreset(preset));
+                    }
+                    portal_actions::Completion::AddPaths { paths, warnings } => {
+                        for warning in warnings {
+                            eprintln!("xubamp: directory scan warning: {warning}");
+                        }
+                        eprintln!(
+                            "xubamp: built without audio; {} selected file(s) were not added",
+                            paths.len()
+                        );
+                    }
+                    portal_actions::Completion::Saved(path) => {
+                        eprintln!("xubamp: saved equalizer preset to {}", path.display());
+                    }
+                    portal_actions::Completion::Error(error) => eprintln!("xubamp: {error}"),
+                }
+            }
+            xubamp_wl::ExternalPoll { events, pending }
+        };
         match xubamp_wl::run(
             skin,
             title,
@@ -508,7 +583,8 @@ fn main() {
                 playback_source,
                 sample_source,
                 playlist_source,
-            ),
+            )
+            .with_external_source(external_source),
         ) {
             Ok(session) => {
                 let mut settings = settings;

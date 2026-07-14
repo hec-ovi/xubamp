@@ -92,7 +92,32 @@ type PlaylistSource = Box<dyn FnMut() -> (Vec<pledit::Row>, Option<usize>)>;
 
 /// Applies equalizer-specific controls to the player/configuration owner.
 type EqualizerSink = Box<dyn FnMut(equalizer::Command)>;
-type MenuSink = Box<dyn FnMut(menu::ClassicMenuAction)>;
+
+/// A popup-menu request whose side effect belongs to the application layer. Saving an equalizer
+/// preset carries the current live curve because the window layer owns slider interaction state.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuRequest {
+    Action(menu::ClassicMenuAction),
+    SaveEqualizer(equalizer::Preset),
+}
+
+type MenuSink = Box<dyn FnMut(MenuRequest)>;
+
+/// An event produced outside the Wayland thread and applied on the next event-loop tick.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExternalEvent {
+    EqualizerPreset(equalizer::Preset),
+}
+
+/// Result of polling application work such as a desktop-portal dialog. `pending` keeps the poll
+/// cadence responsive without waking the idle player continuously.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExternalPoll {
+    pub events: Vec<ExternalEvent>,
+    pub pending: bool,
+}
+
+type ExternalSource = Box<dyn FnMut() -> ExternalPoll>;
 
 /// Event sinks and live data sources used by the Wayland event loop. Grouping these keeps the
 /// window constructor stable as secondary panes gain controls.
@@ -104,13 +129,14 @@ pub struct Runtime {
     playback_source: Box<dyn FnMut() -> hit::Playback>,
     sample_source: SampleSource,
     playlist_source: PlaylistSource,
+    external_source: ExternalSource,
 }
 
 impl Runtime {
     pub fn new(
         on_command: impl FnMut(hit::Command) + 'static,
         on_equalizer: impl FnMut(equalizer::Command) + 'static,
-        on_menu: impl FnMut(menu::ClassicMenuAction) + 'static,
+        on_menu: impl FnMut(MenuRequest) + 'static,
         equalizer_presets: Vec<equalizer::Preset>,
         playback_source: impl FnMut() -> hit::Playback + 'static,
         sample_source: impl FnMut(&mut [f32]) + 'static,
@@ -124,7 +150,14 @@ impl Runtime {
             playback_source: Box::new(playback_source),
             sample_source: Box::new(sample_source),
             playlist_source: Box::new(playlist_source),
+            external_source: Box::new(ExternalPoll::default),
         }
+    }
+
+    /// Poll application-owned worker results on the Wayland thread. The source must never block.
+    pub fn with_external_source(mut self, source: impl FnMut() -> ExternalPoll + 'static) -> Self {
+        self.external_source = Box::new(source);
+        self
     }
 }
 
@@ -401,6 +434,7 @@ pub fn run(
         jump_win: None,
         jump_state: jump::JumpState::default(),
         playlist_source: runtime.playlist_source,
+        external_source: runtime.external_source,
         mod_ctrl: false,
         mod_shift: false,
         last_click: None,
@@ -563,6 +597,8 @@ struct App {
     title_last_click: Option<Instant>,
     /// Polled each tick for the current track rows + playing index, to keep the playlist in sync.
     playlist_source: PlaylistSource,
+    /// Non-blocking application-owned worker poller. Results are applied only on this UI thread.
+    external_source: ExternalSource,
     /// Set once the main window has had its first `configure`, so the timer never attaches a buffer
     /// before the surface is mapped.
     configured: bool,
@@ -795,10 +831,15 @@ impl App {
     /// visualizer directly (when not animating, since there are no frame callbacks then) or just
     /// re-arms the frame-callback loop (when animating). Returns the next timer delay.
     fn tick(&mut self) -> Duration {
+        let external = (self.external_source)();
+        let external_pending = external.pending;
+        for event in external.events {
+            self.apply_external_event(event);
+        }
         if !self.configured {
             // Nothing to draw into yet; retry soon so scrolling begins right after the first
             // configure instead of waiting out a full second.
-            return MARQUEE_TICK;
+            return external_tick_delay(MARQUEE_TICK, external_pending);
         }
         let changed = self.step_clock_and_marquee();
         // Keep the playlist window (if open) in sync with the track list and playing track.
@@ -810,7 +851,7 @@ impl App {
                 self.redraw_playlist();
             }
         }
-        if self.animating() {
+        let delay = if self.animating() {
             // The frame-callback loop renders the visualizer. Kick it off (or restart it if it
             // stalled) with a redraw, which re-arms the callback; otherwise just poll again soon.
             if changed || !self.frame_pending {
@@ -834,6 +875,22 @@ impl App {
                 MARQUEE_TICK
             } else {
                 Duration::from_secs(1)
+            }
+        };
+        external_tick_delay(delay, external_pending)
+    }
+
+    fn apply_external_event(&mut self, event: ExternalEvent) {
+        match event {
+            ExternalEvent::EqualizerPreset(preset) => {
+                let preset = preset.sanitized();
+                self.equalizer_state.preamp_db = preset.preamp_db;
+                self.equalizer_state.bands_db = preset.bands_db;
+                (self.on_equalizer)(equalizer::Command::Preset {
+                    preamp_db: preset.preamp_db,
+                    bands_db: preset.bands_db,
+                });
+                self.redraw_equalizer();
             }
         }
     }
@@ -1146,21 +1203,22 @@ impl App {
     }
 
     fn activate_popup_action(&mut self, action: menu::ClassicMenuAction) {
-        if let menu::ClassicMenuAction::EqualizerLoadPreset(index) = action {
-            let Some(preset) = self.equalizer_presets.get(index).cloned() else {
-                return;
-            };
-            let preset = preset.sanitized();
-            self.equalizer_state.preamp_db = preset.preamp_db;
-            self.equalizer_state.bands_db = preset.bands_db;
-            (self.on_equalizer)(equalizer::Command::Preset {
-                preamp_db: preset.preamp_db,
-                bands_db: preset.bands_db,
-            });
-            self.redraw_equalizer();
-            return;
+        match action {
+            menu::ClassicMenuAction::EqualizerLoadPreset(index) => {
+                let Some(preset) = self.equalizer_presets.get(index).cloned() else {
+                    return;
+                };
+                self.apply_external_event(ExternalEvent::EqualizerPreset(preset));
+            }
+            menu::ClassicMenuAction::EqualizerSaveAs => {
+                (self.on_menu)(MenuRequest::SaveEqualizer(equalizer::Preset {
+                    name: "Custom".to_owned(),
+                    preamp_db: self.equalizer_state.preamp_db,
+                    bands_db: self.equalizer_state.bands_db,
+                }));
+            }
+            action => (self.on_menu)(MenuRequest::Action(action)),
         }
-        (self.on_menu)(action);
     }
 
     fn popup_menu_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
@@ -1679,8 +1737,8 @@ impl App {
                     .popup_menu
                     .as_ref()
                     .is_some_and(|popup| popup.owner == PopupOwner::PlaylistAdd);
-                let add_cleared = !menu_keeps_add_pressed
-                    && std::mem::take(&mut self.playlist_state.pressed_add);
+                let add_cleared =
+                    !menu_keeps_add_pressed && std::mem::take(&mut self.playlist_state.pressed_add);
                 let redraw = self.playlist_state.pressed_title.take().is_some() || add_cleared;
                 if let Some(pl) = &mut self.playlist {
                     pl.grip_hover = false;
@@ -1891,6 +1949,14 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+fn external_tick_delay(base: Duration, pending: bool) -> Duration {
+    if pending {
+        base.min(MARQUEE_TICK)
+    } else {
+        base
     }
 }
 
@@ -2484,6 +2550,19 @@ delegate_registry!(App);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_external_work_caps_the_idle_poll_delay() {
+        assert_eq!(
+            external_tick_delay(Duration::from_secs(1), true),
+            MARQUEE_TICK
+        );
+        assert_eq!(external_tick_delay(VIS_SETTLE_TICK, true), VIS_SETTLE_TICK);
+        assert_eq!(
+            external_tick_delay(Duration::from_secs(1), false),
+            Duration::from_secs(1)
+        );
+    }
 
     #[test]
     fn playlist_shade_preserves_expanded_height_and_accepts_only_width() {

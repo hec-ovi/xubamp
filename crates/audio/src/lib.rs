@@ -10,6 +10,7 @@ pub mod decode;
 #[cfg(any(feature = "output", test))]
 mod equalizer;
 pub mod playlist;
+pub mod playlist_file;
 pub mod ring;
 
 pub use xubamp_dsp::EqSettings;

@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// Formats the current Symphonia feature set can decode.
-pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav"];
+pub const AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "flac", "ogg", "oga"];
 
 /// Whether `path` has a supported audio extension. The path itself may contain non-UTF-8 bytes;
 /// only an extension that cannot be represented as text is rejected.
@@ -171,7 +171,14 @@ mod tests {
 
     #[test]
     fn extension_policy_is_case_insensitive_and_audio_only() {
-        for path in ["track.mp3", "TRACK.MP3", "sample.WaV"] {
+        for path in [
+            "track.mp3",
+            "TRACK.MP3",
+            "sample.WaV",
+            "tune.flac",
+            "song.OGG",
+            "audiobook.oga",
+        ] {
             assert!(is_audio_path(Path::new(path)), "{path}");
         }
         for path in [
@@ -179,7 +186,7 @@ mod tests {
             "clip.avi",
             "list.m3u",
             "radio.pls",
-            "future.flac",
+            "cover.jpg",
             "no-extension",
         ] {
             assert!(!is_audio_path(Path::new(path)), "{path}");

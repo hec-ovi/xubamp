@@ -389,9 +389,16 @@ fn audio_filter() -> FileFilter {
     FileFilter::new("Audio files")
         .glob("*.[mM][pP]3")
         .glob("*.[wW][aA][vV]")
+        .glob("*.[fF][lL][aA][cC]")
+        .glob("*.[oO][gG][gG]")
+        .glob("*.[oO][gG][aA]")
         .mimetype("audio/mpeg")
         .mimetype("audio/wav")
         .mimetype("audio/x-wav")
+        .mimetype("audio/flac")
+        .mimetype("audio/x-flac")
+        .mimetype("audio/ogg")
+        .mimetype("audio/vorbis")
 }
 
 fn eqf_filter() -> FileFilter {

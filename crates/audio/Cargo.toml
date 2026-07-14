@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 # Pure-Rust decoders. default-features off trims formats we do not use; keep wav+pcm+mp3.
 # MP3 patents expired in 2017, so shipping the decoder is fine.
-symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3"] }
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3", "flac", "ogg", "vorbis"] }
 
 # Wait-free SPSC ring between the producer thread and the realtime output callback. One
 # allocation at construction, none on push/pop. Pure Rust, no system libraries.

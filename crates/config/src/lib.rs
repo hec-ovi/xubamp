@@ -42,6 +42,41 @@ pub enum VisualizationMode {
     Off,
 }
 
+/// Spectrum-analyzer coloring style (classic Winamp): plain gradient, flame, or top-edge line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AnalyzerStyle {
+    #[default]
+    Normal,
+    Fire,
+    Line,
+}
+
+/// Analyzer band width: thick wide bars or thin narrow bars.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BandWidth {
+    #[default]
+    Thick,
+    Thin,
+}
+
+/// Oscilloscope drawing style: isolated dots, a connected line, or a filled area.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OscilloscopeStyle {
+    Dots,
+    #[default]
+    Lines,
+    Solid,
+}
+
+/// Visualization falloff/refresh sliders run 1 (slowest) to 10 (fastest).
+pub const VIS_SPEED_MAX: u8 = 10;
+/// Default bar-drop speed.
+pub const DEFAULT_BAR_FALLOFF: u8 = 7;
+/// Default peak-dot-drop speed.
+pub const DEFAULT_PEAK_FALLOFF: u8 = 6;
+/// Default visualization refresh rate (snappy out of the box).
+pub const DEFAULT_VIS_REFRESH: u8 = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackSettings {
     pub shuffle: bool,
@@ -82,6 +117,15 @@ impl Default for DisplaySettings {
 pub struct VisualizationSettings {
     pub mode: VisualizationMode,
     pub show_peaks: bool,
+    pub analyzer_style: AnalyzerStyle,
+    pub band_width: BandWidth,
+    pub oscilloscope_style: OscilloscopeStyle,
+    /// Bar-drop speed, 1..=VIS_SPEED_MAX.
+    pub bar_falloff: u8,
+    /// Peak-dot-drop speed, 1..=VIS_SPEED_MAX.
+    pub peak_falloff: u8,
+    /// Refresh rate, 1..=VIS_SPEED_MAX (higher redraws more often).
+    pub refresh_rate: u8,
 }
 
 impl Default for VisualizationSettings {
@@ -89,6 +133,12 @@ impl Default for VisualizationSettings {
         Self {
             mode: VisualizationMode::Spectrum,
             show_peaks: true,
+            analyzer_style: AnalyzerStyle::Normal,
+            band_width: BandWidth::Thick,
+            oscilloscope_style: OscilloscopeStyle::Lines,
+            bar_falloff: DEFAULT_BAR_FALLOFF,
+            peak_falloff: DEFAULT_PEAK_FALLOFF,
+            refresh_rate: DEFAULT_VIS_REFRESH,
         }
     }
 }
@@ -288,6 +338,44 @@ impl Settings {
                     key,
                     &mut warnings,
                 ),
+                "visualization.analyzer_style" => match value {
+                    "normal" => settings.visualization.analyzer_style = AnalyzerStyle::Normal,
+                    "fire" => settings.visualization.analyzer_style = AnalyzerStyle::Fire,
+                    "line" => settings.visualization.analyzer_style = AnalyzerStyle::Line,
+                    _ => bad("expected normal, fire, or line", &mut warnings),
+                },
+                "visualization.band_width" => match value {
+                    "thick" => settings.visualization.band_width = BandWidth::Thick,
+                    "thin" => settings.visualization.band_width = BandWidth::Thin,
+                    _ => bad("expected thick or thin", &mut warnings),
+                },
+                "visualization.oscilloscope_style" => match value {
+                    "dots" => settings.visualization.oscilloscope_style = OscilloscopeStyle::Dots,
+                    "lines" => settings.visualization.oscilloscope_style = OscilloscopeStyle::Lines,
+                    "solid" => settings.visualization.oscilloscope_style = OscilloscopeStyle::Solid,
+                    _ => bad("expected dots, lines, or solid", &mut warnings),
+                },
+                "visualization.bar_falloff" => set_speed(
+                    value,
+                    &mut settings.visualization.bar_falloff,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "visualization.peak_falloff" => set_speed(
+                    value,
+                    &mut settings.visualization.peak_falloff,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "visualization.refresh_rate" => set_speed(
+                    value,
+                    &mut settings.visualization.refresh_rate,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
                 "library.recurse" => set_bool(
                     value,
                     &mut settings.library.recurse,
@@ -404,6 +492,47 @@ impl Settings {
             "visualization.show_peaks",
             self.visualization.show_peaks,
         );
+        line(
+            &mut out,
+            "visualization.analyzer_style",
+            match self.visualization.analyzer_style {
+                AnalyzerStyle::Normal => "normal",
+                AnalyzerStyle::Fire => "fire",
+                AnalyzerStyle::Line => "line",
+            },
+        );
+        line(
+            &mut out,
+            "visualization.band_width",
+            match self.visualization.band_width {
+                BandWidth::Thick => "thick",
+                BandWidth::Thin => "thin",
+            },
+        );
+        line(
+            &mut out,
+            "visualization.oscilloscope_style",
+            match self.visualization.oscilloscope_style {
+                OscilloscopeStyle::Dots => "dots",
+                OscilloscopeStyle::Lines => "lines",
+                OscilloscopeStyle::Solid => "solid",
+            },
+        );
+        line(
+            &mut out,
+            "visualization.bar_falloff",
+            self.visualization.bar_falloff,
+        );
+        line(
+            &mut out,
+            "visualization.peak_falloff",
+            self.visualization.peak_falloff,
+        );
+        line(
+            &mut out,
+            "visualization.refresh_rate",
+            self.visualization.refresh_rate,
+        );
         line(&mut out, "library.recurse", self.library.recurse);
         for root in &self.library.roots {
             line(&mut out, "library.root", encode_path(root));
@@ -444,6 +573,28 @@ fn set_bool(value: &str, dst: &mut bool, line: usize, key: &str, warnings: &mut 
             line,
             key: key.into(),
             message: "expected true or false".into(),
+        }),
+    }
+}
+
+/// Parse a 1..=VIS_SPEED_MAX visualization speed slider, clamping and warning out of range.
+fn set_speed(value: &str, dst: &mut u8, line: usize, key: &str, warnings: &mut Vec<Warning>) {
+    match value.parse::<i32>() {
+        Ok(value) => {
+            let clamped = value.clamp(1, i32::from(VIS_SPEED_MAX)) as u8;
+            *dst = clamped;
+            if i32::from(clamped) != value {
+                warnings.push(Warning {
+                    line,
+                    key: key.into(),
+                    message: format!("clamped to the 1 to {VIS_SPEED_MAX} range"),
+                });
+            }
+        }
+        Err(_) => warnings.push(Warning {
+            line,
+            key: key.into(),
+            message: format!("expected a number from 1 to {VIS_SPEED_MAX}"),
         }),
     }
 }
@@ -707,6 +858,12 @@ mod tests {
         s.display.scroll_title = false;
         s.visualization.mode = VisualizationMode::Oscilloscope;
         s.visualization.show_peaks = false;
+        s.visualization.analyzer_style = AnalyzerStyle::Fire;
+        s.visualization.band_width = BandWidth::Thin;
+        s.visualization.oscilloscope_style = OscilloscopeStyle::Solid;
+        s.visualization.bar_falloff = 3;
+        s.visualization.peak_falloff = 9;
+        s.visualization.refresh_rate = 4;
         s.library.roots = vec![PathBuf::from("/music/A B"), odd_path.clone()];
         s.library.recurse = false;
         s.skin_path = Some(odd_path);

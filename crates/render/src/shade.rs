@@ -94,9 +94,15 @@ pub fn compose(skin: &Skin, state: &UiState) -> Framebuffer {
             0,
         );
     }
-    // Mini clock: elapsed MM:SS in the small text.bmp font, blank when nothing is loaded (as on the
-    // classic shade clock). The four digit cells sit at fixed x offsets, minutes then seconds.
-    if let (Some(text), Some(secs)) = (&skin.text, state.elapsed) {
+    // Mini clock: the selected MM:SS representation in the small text.bmp font, blank when that
+    // value is unavailable. Remaining mode uses the compact font's leading minus glyph. The four
+    // digit cells sit at fixed x offsets, minutes then seconds.
+    if let (Some(text), Some(secs)) = (&skin.text, state.displayed_time()) {
+        if state.time_display == hit::TimeDisplay::Remaining {
+            if let Some(cell) = textfont::cell('-') {
+                blit(&mut fb, text, cell, 128, sprites::SHADE_TIME_Y);
+            }
+        }
         for (&x, &d) in sprites::SHADE_TIME_DIGITS_X
             .iter()
             .zip(mmss_digits(secs).iter())
@@ -253,6 +259,13 @@ mod tests {
                 }
             }
         }
+        let minus = textfont::cell('-').expect("TEXT.BMP has a minus cell");
+        for y in minus.y as u32..(minus.y + minus.h) as u32 {
+            for x in minus.x as u32..(minus.x + minus.w) as u32 {
+                let o = ((y * text.width + x) * 4) as usize;
+                text.rgba[o..o + 4].copy_from_slice(&GREEN);
+            }
+        }
         let skin = Skin {
             text: Some(text),
             ..Default::default()
@@ -284,6 +297,43 @@ mod tests {
             px(&blank, xs[0] + 2, y),
             [14, 26, 34, 255],
             "blank clock leaves the opaque fallback strip visible"
+        );
+
+        // Remaining mode uses the same derived countdown and puts the font's minus glyph at x=128.
+        let remaining = compose(
+            &skin,
+            &UiState {
+                shade: true,
+                time_display: hit::TimeDisplay::Remaining,
+                elapsed: Some(135),
+                duration: Some(200), // 01:05 remaining
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            px(&remaining, 128 + 2, sprites::SHADE_TIME_Y + 2),
+            GREEN,
+            "compact remaining clock has a leading minus"
+        );
+        assert_eq!(px(&remaining, xs[0] + 2, y), color(0));
+        assert_eq!(px(&remaining, xs[1] + 2, y), color(1));
+        assert_eq!(px(&remaining, xs[2] + 2, y), color(0));
+        assert_eq!(px(&remaining, xs[3] + 2, y), color(5));
+
+        let unknown = compose(
+            &skin,
+            &UiState {
+                shade: true,
+                time_display: hit::TimeDisplay::Remaining,
+                elapsed: Some(135),
+                duration: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            px(&unknown, 128 + 2, sprites::SHADE_TIME_Y + 2),
+            [14, 26, 34, 255],
+            "unknown countdown has neither sign nor digits"
         );
     }
 

@@ -46,6 +46,25 @@ pub enum ModeButton {
     Repeat,
 }
 
+/// Which value the main clock shows. Remaining time is derived from the latest playback duration
+/// and elapsed time; it is not stored separately, so seeking and clock ticks cannot make the two
+/// representations drift apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TimeDisplay {
+    #[default]
+    Elapsed,
+    Remaining,
+}
+
+impl TimeDisplay {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Elapsed => Self::Remaining,
+            Self::Remaining => Self::Elapsed,
+        }
+    }
+}
+
 /// Title-button identity for each entry of [`sprites::TITLE_BUTTONS_PRESSED`], in the same order.
 pub const TITLE_BUTTON_ORDER: [TitleButton; 4] = [
     TitleButton::Options,
@@ -129,6 +148,8 @@ pub enum Region {
     Balance,
     /// The position (seek) bar.
     Position,
+    /// The MM:SS clock. Clicking it switches between elapsed and remaining time.
+    Time,
     /// The visualizer panel. Clicking it cycles the visualization mode.
     Vis,
     /// The EQ or PL toggle button (opens/closes the equalizer or playlist window).
@@ -142,6 +163,20 @@ pub enum Region {
 /// Height of the draggable title-bar band, taken from the title-bar sprite so there is one
 /// source of truth for the geometry.
 pub const TITLEBAR_H: i32 = sprites::TITLEBAR_ACTIVE.src.h;
+
+/// Expanded clock click target. This includes the leading sign cell as well as all four digits,
+/// matching the classic 59x13 time element without stealing pixels from adjacent controls.
+pub const TIME_X: i32 = 39;
+pub const TIME_Y: i32 = 26;
+pub const TIME_W: i32 = 59;
+pub const TIME_H: i32 = 13;
+
+/// Compact clock click target. The visible glyphs run from the sign at x=128 through the final
+/// digit at x=156; the parent target starts one pixel earlier, as in the classic shade layout.
+pub const SHADE_TIME_X: i32 = 127;
+pub const SHADE_TIME_Y: i32 = sprites::SHADE_TIME_Y;
+pub const SHADE_TIME_W: i32 = 30;
+pub const SHADE_TIME_H: i32 = 6;
 
 /// How far the pointer must move from a title-bar press before it becomes a window drag, in window
 /// pixels. Below this, a press-and-release is a click, not a move, so a near-miss on one of the
@@ -217,6 +252,9 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     ) {
         return Region::Position;
     }
+    if in_rect(x, y, TIME_X, TIME_Y, TIME_W, TIME_H) {
+        return Region::Time;
+    }
     if in_rect(
         x,
         y,
@@ -267,6 +305,9 @@ pub fn hit_test_shade(x: i32, y: i32) -> Region {
         if in_rect(x, y, rx, ry, rw, rh) {
             return Region::Transport(id);
         }
+    }
+    if in_rect(x, y, SHADE_TIME_X, SHADE_TIME_Y, SHADE_TIME_W, SHADE_TIME_H) {
+        return Region::Time;
     }
     if in_rect(
         x,
@@ -330,9 +371,11 @@ pub struct UiState {
     pub repeat_on: bool,
     /// The shuffle/repeat mode button currently held (drawn pressed), or `None`.
     pub pressed_mode: Option<ModeButton>,
-    /// Elapsed play time shown in the MM:SS display, in whole seconds, or `None` to blank it
-    /// (nothing loaded or stopped). The platform timer refreshes it once a second via
-    /// [`on_tick`], so composition can read it without touching the audio engine.
+    /// Whether the MM:SS clock shows elapsed time or a remaining-time countdown.
+    pub time_display: TimeDisplay,
+    /// Elapsed play time, in whole seconds, or `None` when nothing is loaded or stopped. The
+    /// platform timer refreshes it once a second via [`on_tick`]. Composition combines this with
+    /// [`Self::duration`] according to [`Self::time_display`].
     pub elapsed: Option<u32>,
     /// The song title shown in the marquee. Empty draws nothing. When it overruns the marquee
     /// width it scrolls, paced by the platform timer through [`crate::marquee::advance`].
@@ -383,6 +426,7 @@ impl Default for UiState {
             shuffle_on: false,
             repeat_on: false,
             pressed_mode: None,
+            time_display: TimeDisplay::Elapsed,
             elapsed: None,
             title: String::new(),
             marquee_offset: 0,
@@ -397,6 +441,18 @@ impl Default for UiState {
             khz: None,
             channels: 0,
             shade: false,
+        }
+    }
+}
+
+impl UiState {
+    /// Whole seconds to draw in the clock, or `None` when the selected representation is not
+    /// available. Remaining time needs both values and saturates at zero when an imprecise or stale
+    /// playback clock briefly reports elapsed time beyond the track duration.
+    pub fn displayed_time(&self) -> Option<u32> {
+        match self.time_display {
+            TimeDisplay::Elapsed => self.elapsed,
+            TimeDisplay::Remaining => Some(self.duration?.saturating_sub(self.elapsed?)),
         }
     }
 }
@@ -508,6 +564,13 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
             }
             state.dragging = Some(Slider::Position);
             preview_seek(state, seek_fraction(state.shade, x));
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Time => {
+            state.time_display = state.time_display.toggled();
             Outcome {
                 redraw: true,
                 ..Default::default()
@@ -974,7 +1037,105 @@ mod tests {
         assert_eq!(s.volume, 100, "fresh window is at unity gain, not silent");
         assert_eq!(s.balance, 0, "centered");
         assert_eq!(s.dragging, None);
+        assert_eq!(s.time_display, TimeDisplay::Elapsed);
         assert!(!s.shade, "the window starts expanded, not collapsed");
+    }
+
+    #[test]
+    fn displayed_time_derives_a_saturating_countdown_without_hiding_elapsed_time() {
+        let elapsed_only = UiState {
+            elapsed: Some(70),
+            ..Default::default()
+        };
+        assert_eq!(
+            elapsed_only.displayed_time(),
+            Some(70),
+            "elapsed mode does not require a known duration"
+        );
+
+        let remaining = UiState {
+            time_display: TimeDisplay::Remaining,
+            elapsed: Some(70),
+            duration: Some(200),
+            ..Default::default()
+        };
+        assert_eq!(remaining.displayed_time(), Some(130));
+        assert_eq!(
+            UiState {
+                elapsed: Some(201),
+                ..remaining.clone()
+            }
+            .displayed_time(),
+            Some(0),
+            "a clock that briefly passes the duration clamps to zero"
+        );
+        assert_eq!(
+            UiState {
+                duration: None,
+                ..remaining.clone()
+            }
+            .displayed_time(),
+            None,
+            "remaining time is unknown without a duration"
+        );
+        assert_eq!(
+            UiState {
+                elapsed: None,
+                ..remaining
+            }
+            .displayed_time(),
+            None,
+            "stopped or unloaded playback stays blank"
+        );
+    }
+
+    #[test]
+    fn expanded_clock_has_an_exact_hit_region_and_toggles_on_press() {
+        assert_eq!(hit_test(TIME_X, TIME_Y), Region::Time, "top-left");
+        assert_eq!(
+            hit_test(TIME_X + TIME_W - 1, TIME_Y + TIME_H - 1),
+            Region::Time,
+            "bottom-right"
+        );
+        assert_eq!(
+            hit_test(TIME_X - 1, TIME_Y),
+            Region::None,
+            "left edge is out"
+        );
+        assert_eq!(
+            hit_test(TIME_X + TIME_W, TIME_Y),
+            Region::None,
+            "right edge is out"
+        );
+        assert_eq!(
+            hit_test(TIME_X, TIME_Y - 1),
+            Region::None,
+            "top edge is out"
+        );
+        assert_eq!(
+            hit_test(TIME_X, TIME_Y + TIME_H),
+            Region::None,
+            "bottom edge is out"
+        );
+
+        let mut state = UiState::default();
+        let out = on_press(&mut state, TIME_X + TIME_W / 2, TIME_Y + TIME_H / 2);
+        assert_eq!(state.time_display, TimeDisplay::Remaining);
+        assert_eq!(
+            out,
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            },
+            "clock changes only render-owned state"
+        );
+        let out = on_press(&mut state, TIME_X + 1, TIME_Y + 1);
+        assert_eq!(
+            state.time_display,
+            TimeDisplay::Elapsed,
+            "second click toggles back"
+        );
+        assert!(out.redraw);
     }
 
     #[test]
@@ -1017,12 +1178,45 @@ mod tests {
             Region::Position,
             "mini seek bar",
         );
+        assert_eq!(
+            hit_test_shade(SHADE_TIME_X, SHADE_TIME_Y),
+            Region::Time,
+            "mini clock top-left",
+        );
+        assert_eq!(
+            hit_test_shade(
+                SHADE_TIME_X + SHADE_TIME_W - 1,
+                SHADE_TIME_Y + SHADE_TIME_H - 1,
+            ),
+            Region::Time,
+            "mini clock bottom-right",
+        );
+        assert_eq!(
+            hit_test_shade(SHADE_TIME_X + SHADE_TIME_W, SHADE_TIME_Y),
+            Region::TitleBar,
+            "first pixel to the right remains draggable",
+        );
         // Bare strip between the controls is the drag band.
         assert_eq!(
             hit_test_shade(90, 7),
             Region::TitleBar,
             "empty strip is draggable"
         );
+    }
+
+    #[test]
+    fn shade_clock_toggles_the_same_typed_mode() {
+        let mut state = UiState {
+            shade: true,
+            ..Default::default()
+        };
+        let out = on_press(
+            &mut state,
+            SHADE_TIME_X + SHADE_TIME_W / 2,
+            SHADE_TIME_Y + SHADE_TIME_H / 2,
+        );
+        assert_eq!(state.time_display, TimeDisplay::Remaining);
+        assert!(out.redraw && !out.start_move && out.command.is_none());
     }
 
     #[test]

@@ -124,9 +124,13 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
             blit_placement(&mut fb, cbuttons, placement);
         }
     }
-    // Time display: four digits from the number sheet, but only while a time is set. With no
-    // elapsed time (nothing loaded / stopped) the slots stay blank, as on the classic display.
-    if let (Some(numbers), Some(secs)) = (&skin.numbers, state.elapsed) {
+    // Time display: four digits from the number sheet, but only while the selected value is
+    // available. Remaining mode derives duration - elapsed and adds the skin's classic minus
+    // indicator. With nothing loaded (or no duration for a countdown), the display stays blank.
+    if let (Some(numbers), Some(secs)) = (&skin.numbers, state.displayed_time()) {
+        if state.time_display == hit::TimeDisplay::Remaining {
+            draw_time_minus(&mut fb, numbers);
+        }
         for (&(dx, dy), &d) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
             blit(&mut fb, numbers, sprites::DIGITS[d as usize], dx, dy);
         }
@@ -244,6 +248,23 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         vis::draw(&mut fb, viscolor, &state.vis);
     }
     fb
+}
+
+/// Draw the remaining-time sign from either classic number-sheet layout. `NUMBERS.BMP` stores the
+/// visible 5x1 line inside its digit atlas; `NUMS_EX.BMP` appends a complete 9x13 sign cell. The
+/// decoded [`Skin`] deliberately exposes one number image for both, so the sheet width identifies
+/// the extended form.
+fn draw_time_minus(fb: &mut Framebuffer, numbers: &Image) {
+    const STANDARD_MINUS: Rect = Rect::new(20, 6, 5, 1);
+    const EXTENDED_MINUS: Rect = Rect::new(99, 0, 9, 13);
+    const MINUS_X: i32 = 38;
+    const TIME_Y: i32 = 26;
+
+    if numbers.width >= 108 && numbers.height >= 13 {
+        blit(fb, numbers, EXTENDED_MINUS, MINUS_X, TIME_Y);
+    } else {
+        blit(fb, numbers, STANDARD_MINUS, MINUS_X, TIME_Y + 6);
+    }
 }
 
 /// Draw `value` as small `text.bmp` digits, left-aligned at (`x`, `y`) and clipped to `max_digits`
@@ -470,6 +491,100 @@ mod tests {
             RED,
             "blank display draws no digit"
         );
+    }
+
+    #[test]
+    fn remaining_time_draws_duration_minus_elapsed_and_the_standard_minus_sign() {
+        // Standard NUMBERS.BMP stores the visible minus as a 5x1 crop at (20,6). Give every digit
+        // a readable colour, then make that source line green so its exact destination is visible.
+        let mut numbers = solid(99, 13, [0, 0, 0, 255]);
+        for d in 0..10u32 {
+            let color = [(10 + d * 20) as u8, 0, 0, 255];
+            for y in 0..13u32 {
+                for x in d * 9..d * 9 + 9 {
+                    let o = ((y * numbers.width + x) * 4) as usize;
+                    numbers.rgba[o..o + 4].copy_from_slice(&color);
+                }
+            }
+        }
+        for x in 20..25u32 {
+            let o = ((6 * numbers.width + x) * 4) as usize;
+            numbers.rgba[o..o + 4].copy_from_slice(&GREEN);
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            numbers: Some(numbers),
+            ..Default::default()
+        };
+        let state = hit::UiState {
+            time_display: hit::TimeDisplay::Remaining,
+            elapsed: Some(135),
+            duration: Some(200), // 200 - 135 = 65 -> 01:05
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &state);
+        for (&(dx, dy), &d) in sprites::TIME_DIGITS.iter().zip([0u32, 1, 0, 5].iter()) {
+            let want = [(10 + d * 20) as u8, 0, 0, 255];
+            assert_eq!(
+                px(&fb, dx as u32 + 4, dy as u32 + 5),
+                want,
+                "remaining digit {d}"
+            );
+        }
+        assert_eq!(px(&fb, 38, 32), GREEN, "minus starts at x=38, y=32");
+        assert_eq!(px(&fb, 42, 32), GREEN, "standard minus is five pixels wide");
+        assert_eq!(
+            px(&fb, 43, 32),
+            RED,
+            "pixel after the standard minus is untouched"
+        );
+        assert_eq!(px(&fb, 38, 31), RED, "standard minus is one pixel tall");
+
+        let unknown = compose_main_window(
+            &skin,
+            &hit::UiState {
+                duration: None,
+                ..state
+            },
+        );
+        assert_eq!(px(&unknown, 38, 32), RED, "unknown countdown has no sign");
+        assert_eq!(
+            px(&unknown, 48 + 4, 26 + 6),
+            RED,
+            "unknown countdown has no digits"
+        );
+    }
+
+    #[test]
+    fn remaining_time_uses_the_extended_minus_cell_and_saturates_at_zero() {
+        // NUMS_EX.BMP appends a complete 9x13 minus cell at x=99.
+        let mut numbers = solid(108, 13, [0, 0, 0, 255]);
+        for y in 0..13u32 {
+            for x in 99..108u32 {
+                let o = ((y * numbers.width + x) * 4) as usize;
+                numbers.rgba[o..o + 4].copy_from_slice(&GREEN);
+            }
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            numbers: Some(numbers),
+            ..Default::default()
+        };
+        let state = hit::UiState {
+            time_display: hit::TimeDisplay::Remaining,
+            elapsed: Some(101),
+            duration: Some(100),
+            ..Default::default()
+        };
+        let fb = compose_main_window(&skin, &state);
+        assert_eq!(px(&fb, 38 + 4, 26 + 6), GREEN, "full extended sign cell");
+        for &(dx, dy) in &sprites::TIME_DIGITS {
+            assert_eq!(
+                px(&fb, dx as u32 + 4, dy as u32 + 6),
+                [0, 0, 0, 255],
+                "elapsed beyond duration renders saturated 00:00"
+            );
+        }
     }
 
     #[test]

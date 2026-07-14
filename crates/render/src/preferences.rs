@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use xubamp_skin::font;
 
+use crate::adwaita::{self, Palette, UiFont};
+
 use crate::Framebuffer;
 
 /// Minimum preferences window size. Larger sizes give the library list more room.
@@ -964,7 +966,315 @@ impl PreferencesState {
 }
 
 /// Compose an opaque preferences window. Requests below the supported minimum are clamped.
-pub fn compose(state: &PreferencesState, width: i32, height: i32) -> Framebuffer {
+/// Rendering theme for the preferences window. `classic()` reproduces the original OS-neutral
+/// bitmap chrome (used when no system UI font is available, e.g. headless tests); `adwaita(...)`
+/// paints a native GNOME (libadwaita) look in the given palette with the system UI font. The control
+/// GEOMETRY is identical either way, so hit-testing, which reads the same layout, is unaffected.
+pub struct PrefsTheme<'a> {
+    palette: Palette,
+    font: Option<&'a UiFont>,
+}
+
+impl Default for PrefsTheme<'_> {
+    fn default() -> Self {
+        Self::classic()
+    }
+}
+
+impl<'a> PrefsTheme<'a> {
+    pub fn classic() -> Self {
+        Self {
+            palette: Palette::light(),
+            font: None,
+        }
+    }
+
+    pub fn adwaita(palette: Palette, font: &'a UiFont) -> Self {
+        Self {
+            palette,
+            font: Some(font),
+        }
+    }
+}
+
+/// Compose the preferences window. With a system font it renders the native Adwaita look; otherwise
+/// it falls back to the classic bitmap chrome.
+pub fn compose(
+    state: &PreferencesState,
+    width: i32,
+    height: i32,
+    theme: &PrefsTheme,
+) -> Framebuffer {
+    match theme.font {
+        Some(font) => compose_adwaita(state, width, height, &theme.palette, font),
+        None => compose_classic(state, width, height),
+    }
+}
+
+const BODY_PX: f32 = 13.0;
+const TITLE_PX: f32 = 14.0;
+
+/// Draw system-font text placing `top_y` as the top of the glyph box (matching the classic bitmap
+/// coordinates) by advancing to an approximate baseline.
+fn atext(fb: &mut Framebuffer, font: &UiFont, x: i32, top_y: i32, s: &str, px: f32, color: [u8; 4]) {
+    let baseline = top_y + (px * 0.78).round() as i32;
+    font.draw_text(fb, x, baseline, s, px, color);
+}
+
+/// Draw system-font text truncated with an ellipsis to fit `max_w`.
+#[allow(clippy::too_many_arguments)]
+fn atext_clipped(
+    fb: &mut Framebuffer,
+    font: &UiFont,
+    x: i32,
+    top_y: i32,
+    s: &str,
+    max_w: i32,
+    px: f32,
+    color: [u8; 4],
+) {
+    if font.text_width(s, px) as i32 <= max_w {
+        atext(fb, font, x, top_y, s, px, color);
+        return;
+    }
+    let mut chars: Vec<char> = s.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate: String = chars.iter().collect::<String>() + "\u{2026}";
+        if font.text_width(&candidate, px) as i32 <= max_w {
+            atext(fb, font, x, top_y, &candidate, px, color);
+            return;
+        }
+    }
+}
+
+/// A rounded native card (list or field container): view background plus a hairline border.
+fn acard(fb: &mut Framebuffer, rect: Rect, p: &Palette) {
+    adwaita::fill_rounded_rect(fb, rect.x, rect.y, rect.width, rect.height, 10, p.view_bg);
+    adwaita::stroke_rounded_rect(fb, rect.x, rect.y, rect.width, rect.height, 10, 1, p.border);
+}
+
+fn compose_adwaita(
+    state: &PreferencesState,
+    width: i32,
+    height: i32,
+    p: &Palette,
+    font: &UiFont,
+) -> Framebuffer {
+    let (width, height) = clamped_size(width, height);
+    let mut fb = Framebuffer::new(width as u32, height as u32);
+    adwaita::fill_rect(&mut fb, 0, 0, width, height, p.window_bg);
+
+    // Headerbar: title with a hairline separator underneath.
+    atext(&mut fb, font, PAD, 5, "Preferences", TITLE_PX, p.fg);
+    adwaita::draw_separator(&mut fb, 0, PREFERENCES_TITLE_H - 1, width, p);
+
+    let content = content_rect(width, height);
+    atext(&mut fb, font, content.x + 2, content.y + 4, state.section.label(), TITLE_PX, p.fg);
+
+    let controls = state.controls(width, height);
+    for control in controls
+        .iter()
+        .filter(|control| matches!(control.id, ControlId::Section(_)))
+    {
+        draw_sidebar_adwaita(&mut fb, control, p, font, state.pressed == Some(control.id));
+    }
+    draw_page_static_adwaita(&mut fb, state, content, p, font);
+    for control in controls
+        .iter()
+        .filter(|control| !matches!(control.id, ControlId::Section(_)))
+    {
+        draw_control_adwaita(&mut fb, control, p, font, state.pressed == Some(control.id));
+    }
+    fb
+}
+
+fn draw_sidebar_adwaita(
+    fb: &mut Framebuffer,
+    control: &ControlInfo,
+    p: &Palette,
+    font: &UiFont,
+    pressed: bool,
+) {
+    let r = control.rect;
+    if control.selected {
+        adwaita::fill_rounded_rect(fb, r.x, r.y, r.width, r.height, 8, p.accent_bg);
+    } else if pressed {
+        adwaita::fill_rounded_rect(fb, r.x, r.y, r.width, r.height, 8, p.active);
+    }
+    let color = if control.selected { p.accent_fg } else { p.fg };
+    atext(
+        fb,
+        font,
+        r.x + 10,
+        r.y + (r.height - BODY_PX as i32) / 2,
+        &control.label,
+        BODY_PX,
+        color,
+    );
+    if control.focused && !control.selected {
+        adwaita::draw_focus_ring(fb, r.x, r.y, r.width, r.height, 8, p);
+    }
+}
+
+fn draw_page_static_adwaita(
+    fb: &mut Framebuffer,
+    state: &PreferencesState,
+    content: Rect,
+    p: &Palette,
+    font: &UiFont,
+) {
+    let dim = p.dim_fg;
+    match state.section {
+        Section::Shuffle => {
+            atext(fb, font, content.x + 18, content.y + 34, "Shuffle morph rate", BODY_PX, dim);
+        }
+        Section::Visualization => {
+            atext(fb, font, content.x + 18, content.y + 32, "Visualization mode", BODY_PX, dim);
+        }
+        Section::Display => {
+            atext(fb, font, content.x + 18, content.y + 32, "Time display", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 104, "Window display", BODY_PX, dim);
+        }
+        Section::AudioLibrary => {
+            atext(fb, font, content.x + 18, content.y + 32, "Folders scanned for audio files", BODY_PX, dim);
+            let list = library_list_rect(content);
+            acard(fb, list, p);
+            if state.model.library_roots.is_empty() {
+                atext(fb, font, list.x + 10, list.y + 8, "No folders added", BODY_PX, dim);
+            }
+        }
+        Section::Skins => {
+            atext(fb, font, content.x + 18, content.y + 34, "Current skin", BODY_PX, dim);
+            let field = Rect {
+                x: content.x + 18,
+                y: content.y + 50,
+                width: content.width - 36,
+                height: 28,
+            };
+            acard(fb, field, p);
+            let current = state.model.skin_path.as_ref().map_or_else(
+                || "Base Skin".into(),
+                |path| path.to_string_lossy().into_owned(),
+            );
+            atext_clipped(fb, font, field.x + 10, field.y + 9, &current, field.width - 20, BODY_PX, p.fg);
+        }
+    }
+}
+
+fn draw_control_adwaita(
+    fb: &mut Framebuffer,
+    control: &ControlInfo,
+    p: &Palette,
+    font: &UiFont,
+    pressed: bool,
+) {
+    match control.role {
+        ControlRole::CheckBox => draw_check_adwaita(fb, control, p, font, false),
+        ControlRole::RadioButton => draw_check_adwaita(fb, control, p, font, true),
+        ControlRole::Slider => draw_slider_adwaita(fb, control, p, font),
+        ControlRole::ListItem => draw_listitem_adwaita(fb, control, p, font),
+        ControlRole::Button => draw_button_adwaita(fb, control, p, font, pressed),
+        ControlRole::Tab => {}
+    }
+}
+
+fn draw_check_adwaita(fb: &mut Framebuffer, c: &ControlInfo, p: &Palette, font: &UiFont, radio: bool) {
+    let box_rect = Rect {
+        x: c.rect.x,
+        y: c.rect.y + (c.rect.height - CHECK_SIZE) / 2,
+        width: CHECK_SIZE,
+        height: CHECK_SIZE,
+    };
+    let checked = c.checked == Some(true);
+    let radius = if radio { CHECK_SIZE / 2 } else { 3 };
+    if checked {
+        adwaita::fill_rounded_rect(fb, box_rect.x, box_rect.y, CHECK_SIZE, CHECK_SIZE, radius, p.accent_bg);
+        if radio {
+            let d = 4;
+            adwaita::fill_rounded_rect(fb, box_rect.x + (CHECK_SIZE - d) / 2, box_rect.y + (CHECK_SIZE - d) / 2, d, d, d / 2, p.accent_fg);
+        } else {
+            for (dx, dy) in [(2, 6), (3, 7), (4, 8), (6, 5), (7, 4), (8, 3)] {
+                adwaita::fill_rect(fb, box_rect.x + dx, box_rect.y + dy, 2, 2, p.accent_fg);
+            }
+        }
+    } else {
+        adwaita::fill_rounded_rect(fb, box_rect.x, box_rect.y, CHECK_SIZE, CHECK_SIZE, radius, p.view_bg);
+        adwaita::stroke_rounded_rect(fb, box_rect.x, box_rect.y, CHECK_SIZE, CHECK_SIZE, radius, 1, p.border);
+    }
+    let color = if c.enabled { p.fg } else { p.dim_fg };
+    atext(fb, font, c.rect.x + CHECK_SIZE + 8, c.rect.y + (c.rect.height - BODY_PX as i32) / 2, &c.label, BODY_PX, color);
+    if c.focused {
+        let label_w = font.text_width(&c.label, BODY_PX) as i32;
+        adwaita::draw_focus_ring(fb, c.rect.x - 3, c.rect.y, (CHECK_SIZE + 11 + label_w).min(c.rect.width), c.rect.height, 6, p);
+    }
+}
+
+fn draw_slider_adwaita(fb: &mut Framebuffer, c: &ControlInfo, p: &Palette, font: &UiFont) {
+    let Some(range) = c.range else {
+        return;
+    };
+    let track = Rect {
+        x: c.rect.x + SLIDER_THUMB_W / 2,
+        y: c.rect.y + 8,
+        width: (c.rect.width - SLIDER_THUMB_W + 1).max(1),
+        height: 4,
+    };
+    adwaita::fill_rounded_rect(fb, track.x, track.y, track.width, track.height, 2, p.border);
+    let span = (track.width - 1).max(1);
+    let value_span = i32::from(range.maximum.saturating_sub(range.minimum)).max(1);
+    let offset = i32::from(range.value.saturating_sub(range.minimum)) * span / value_span;
+    adwaita::fill_rounded_rect(fb, track.x, track.y, offset.max(1), track.height, 2, p.accent_bg);
+    let tsize = 14;
+    let tx = track.x + offset - tsize / 2;
+    let ty = track.y + track.height / 2 - tsize / 2;
+    adwaita::fill_rounded_rect(fb, tx, ty, tsize, tsize, tsize / 2, p.accent_fg);
+    adwaita::stroke_rounded_rect(fb, tx, ty, tsize, tsize, tsize / 2, 1, p.border);
+
+    let labels_y = c.rect.y + 27;
+    atext(fb, font, c.rect.x, labels_y, "Slow", BODY_PX, p.dim_fg);
+    let fast_w = font.text_width("Fast", BODY_PX) as i32;
+    atext(fb, font, c.rect.x + c.rect.width - fast_w, labels_y, "Fast", BODY_PX, p.dim_fg);
+    let value = range.value.to_string();
+    let vw = font.text_width(&value, BODY_PX) as i32;
+    atext(fb, font, c.rect.x + (c.rect.width - vw) / 2, labels_y, &value, BODY_PX, p.fg);
+    if c.focused {
+        adwaita::draw_focus_ring(fb, tx - 2, ty - 2, tsize + 4, tsize + 4, (tsize + 4) / 2, p);
+    }
+}
+
+fn draw_button_adwaita(fb: &mut Framebuffer, c: &ControlInfo, p: &Palette, font: &UiFont, pressed: bool) {
+    let r = c.rect;
+    let primary = matches!(c.id, ControlId::Close);
+    let (bg, fg) = if primary { (p.accent_bg, p.accent_fg) } else { (p.view_bg, p.fg) };
+    adwaita::fill_rounded_rect(fb, r.x, r.y, r.width, r.height, 7, bg);
+    if !primary {
+        adwaita::stroke_rounded_rect(fb, r.x, r.y, r.width, r.height, 7, 1, p.border);
+    }
+    if pressed {
+        adwaita::fill_rounded_rect(fb, r.x, r.y, r.width, r.height, 7, p.active);
+    }
+    let color = if c.enabled { fg } else { p.dim_fg };
+    let lw = font.text_width(&c.label, BODY_PX) as i32;
+    atext(fb, font, r.x + (r.width - lw) / 2, r.y + (r.height - BODY_PX as i32) / 2, &c.label, BODY_PX, color);
+    if c.focused {
+        adwaita::draw_focus_ring(fb, r.x, r.y, r.width, r.height, 7, p);
+    }
+}
+
+fn draw_listitem_adwaita(fb: &mut Framebuffer, c: &ControlInfo, p: &Palette, font: &UiFont) {
+    let r = c.rect;
+    if c.selected {
+        adwaita::fill_rounded_rect(fb, r.x, r.y, r.width, r.height, 6, p.accent_bg);
+    }
+    let color = if c.selected { p.accent_fg } else { p.fg };
+    atext_clipped(fb, font, r.x + 6, r.y + (r.height - BODY_PX as i32) / 2, &c.label, r.width - 12, BODY_PX, color);
+    if c.focused && !c.selected {
+        adwaita::draw_focus_ring(fb, r.x, r.y, r.width, r.height, 6, p);
+    }
+}
+
+fn compose_classic(state: &PreferencesState, width: i32, height: i32) -> Framebuffer {
     let (width, height) = clamped_size(width, height);
     let mut fb = Framebuffer::new(width as u32, height as u32);
     fill(
@@ -1764,13 +2074,29 @@ mod tests {
     #[test]
     fn composition_is_opaque_deterministic_and_clamps_tiny_sizes() {
         let state = PreferencesState::default();
-        let first = compose(&state, 1, 1);
-        let second = compose(&state, PREFERENCES_W, PREFERENCES_H);
+        let theme = PrefsTheme::classic();
+        let first = compose(&state, 1, 1, &theme);
+        let second = compose(&state, PREFERENCES_W, PREFERENCES_H, &theme);
         assert_eq!(
             (first.width, first.height),
             (PREFERENCES_W as u32, PREFERENCES_H as u32)
         );
         assert_eq!(first.rgba, second.rgba);
         assert!(first.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
+    fn adwaita_theme_is_opaque_and_differs_by_palette_when_a_font_is_present() {
+        // Skip on hosts without a system UI font (headless), so this passes anywhere.
+        let Some(font) = UiFont::load_system() else {
+            return;
+        };
+        let state = PreferencesState::default();
+        let light = compose(&state, PREFERENCES_W, PREFERENCES_H, &PrefsTheme::adwaita(Palette::light(), &font));
+        let dark = compose(&state, PREFERENCES_W, PREFERENCES_H, &PrefsTheme::adwaita(Palette::dark(), &font));
+        assert!(light.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255), "opaque");
+        assert_ne!(light.rgba, dark.rgba, "light and dark render differently");
+        // The Adwaita body background differs from the classic gray.
+        assert_ne!(&light.rgba[..3], &BG[..], "adwaita body is not the classic gray");
     }
 }

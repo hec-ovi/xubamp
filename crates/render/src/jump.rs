@@ -6,6 +6,7 @@
 
 use xubamp_skin::font;
 
+use crate::adwaita::{self, Palette, UiFont};
 use crate::pledit::Row;
 use crate::Framebuffer;
 
@@ -145,8 +146,139 @@ impl JumpState {
     }
 }
 
+/// Rendering theme for the Jump dialog. `classic()` keeps the original dark neutral chrome (used
+/// when no system UI font is available); `adwaita(...)` paints a native GNOME look in the palette
+/// with the system font. Interaction geometry is identical, so hit-testing is unaffected.
+pub struct JumpTheme<'a> {
+    palette: Palette,
+    font: Option<&'a UiFont>,
+}
+
+impl Default for JumpTheme<'_> {
+    fn default() -> Self {
+        Self::classic()
+    }
+}
+
+impl<'a> JumpTheme<'a> {
+    pub fn classic() -> Self {
+        Self {
+            palette: Palette::dark(),
+            font: None,
+        }
+    }
+
+    pub fn adwaita(palette: Palette, font: &'a UiFont) -> Self {
+        Self {
+            palette,
+            font: Some(font),
+        }
+    }
+}
+
+/// Compose the dialog. With a system font it renders the native Adwaita look; otherwise the classic
+/// dark chrome.
+pub fn compose(state: &JumpState, width: i32, height: i32, theme: &JumpTheme) -> Framebuffer {
+    match theme.font {
+        Some(font) => compose_adwaita(state, width, height, &theme.palette, font),
+        None => compose_classic(state, width, height),
+    }
+}
+
+fn jtext(fb: &mut Framebuffer, font: &UiFont, x: i32, top_y: i32, s: &str, px: f32, color: [u8; 4]) {
+    let baseline = top_y + (px * 0.78).round() as i32;
+    font.draw_text(fb, x, baseline, s, px, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn jtext_clipped(
+    fb: &mut Framebuffer,
+    font: &UiFont,
+    x: i32,
+    top_y: i32,
+    s: &str,
+    max_w: i32,
+    px: f32,
+    color: [u8; 4],
+) {
+    if font.text_width(s, px) as i32 <= max_w {
+        jtext(fb, font, x, top_y, s, px, color);
+        return;
+    }
+    let mut chars: Vec<char> = s.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let candidate: String = chars.iter().collect::<String>() + "\u{2026}";
+        if font.text_width(&candidate, px) as i32 <= max_w {
+            jtext(fb, font, x, top_y, &candidate, px, color);
+            return;
+        }
+    }
+}
+
+fn compose_adwaita(
+    state: &JumpState,
+    width: i32,
+    height: i32,
+    p: &Palette,
+    font: &UiFont,
+) -> Framebuffer {
+    let (w, h) = (width.max(JUMP_W), height.max(JUMP_H));
+    let mut fb = Framebuffer::new(w as u32, h as u32);
+    adwaita::fill_rect(&mut fb, 0, 0, w, h, p.window_bg);
+
+    // Headerbar.
+    jtext(&mut fb, font, PAD + 2, 2, "Jump to file", 13.0, p.fg);
+    adwaita::draw_separator(&mut fb, 0, TITLE_H - 1, w, p);
+
+    // Search entry (view background rounded field with a hairline border).
+    let field_y = TITLE_H + 3;
+    let field_h = SEARCH_H;
+    adwaita::fill_rounded_rect(&mut fb, PAD, field_y, w - 2 * PAD, field_h, 6, p.view_bg);
+    adwaita::stroke_rounded_rect(&mut fb, PAD, field_y, w - 2 * PAD, field_h, 6, 1, p.border);
+    let matches = state.matches();
+    let shown = format!("{}_", state.query);
+    jtext(&mut fb, font, PAD + 7, field_y + 2, &shown, 12.0, p.fg);
+    let counter = format!("{}/{}", matches.len(), state.rows.len());
+    let cw = font.text_width(&counter, 11.0) as i32;
+    jtext(&mut fb, font, w - PAD - 7 - cw, field_y + 3, &counter, 11.0, p.dim_fg);
+
+    // Results list.
+    let vis = JumpState::visible_rows(h);
+    let list_w = w - 2 * PAD;
+    for (row, &track) in matches.iter().enumerate().skip(state.scroll).take(vis) {
+        let screen = (row - state.scroll) as i32;
+        let y = LIST_TOP + screen * ROW_H;
+        let title = state.rows.get(track).map(|r| r.title.as_str()).unwrap_or("");
+        let selected = row == state.selected;
+        if selected {
+            adwaita::fill_rounded_rect(&mut fb, PAD - 1, y - 1, list_w, ROW_H, 5, p.accent_bg);
+        }
+        let color = if selected { p.accent_fg } else { p.fg };
+        jtext_clipped(&mut fb, font, PAD + 4, y - 2, title, list_w - 8, 11.0, color);
+    }
+
+    // Bottom bar with rounded buttons (Jump is the suggested/primary action).
+    let by = h - BUTTON_H;
+    adwaita::draw_separator(&mut fb, 0, by, w, p);
+    abutton(&mut fb, font, PAD, by + 3, "Jump", p, true);
+    abutton(&mut fb, font, w - PAD - BTN_W, by + 3, "Close", p, false);
+    fb
+}
+
+fn abutton(fb: &mut Framebuffer, font: &UiFont, x: i32, y: i32, label: &str, p: &Palette, primary: bool) {
+    let (h, r) = (BUTTON_H - 6, 6);
+    let (bg, fg) = if primary { (p.accent_bg, p.accent_fg) } else { (p.view_bg, p.fg) };
+    adwaita::fill_rounded_rect(fb, x, y, BTN_W, h, r, bg);
+    if !primary {
+        adwaita::stroke_rounded_rect(fb, x, y, BTN_W, h, r, 1, p.border);
+    }
+    let lw = font.text_width(label, 12.0) as i32;
+    jtext(fb, font, x + (BTN_W - lw) / 2, y + (h - 12) / 2, label, 12.0, fg);
+}
+
 /// Compose the dialog at `width` x `height`.
-pub fn compose(state: &JumpState, width: i32, height: i32) -> Framebuffer {
+fn compose_classic(state: &JumpState, width: i32, height: i32) -> Framebuffer {
     let (w, h) = (width.max(JUMP_W), height.max(JUMP_H));
     let mut fb = Framebuffer::new(w as u32, h as u32);
     fill(&mut fb, 0, 0, w, h, BG);
@@ -303,10 +435,23 @@ mod tests {
     #[test]
     fn compose_renders_at_least_the_default_size() {
         let s = state(&["hello world"]);
-        let fb = compose(&s, JUMP_W, JUMP_H);
+        let theme = JumpTheme::classic();
+        let fb = compose(&s, JUMP_W, JUMP_H, &theme);
         assert_eq!((fb.width, fb.height), (JUMP_W as u32, JUMP_H as u32));
         // A smaller request is clamped up to the minimum.
-        let fb = compose(&s, 10, 10);
+        let fb = compose(&s, 10, 10, &theme);
         assert_eq!((fb.width, fb.height), (JUMP_W as u32, JUMP_H as u32));
+    }
+
+    #[test]
+    fn adwaita_theme_is_opaque_and_differs_by_palette_when_a_font_is_present() {
+        let Some(font) = UiFont::load_system() else {
+            return;
+        };
+        let s = state(&["hello world", "another track"]);
+        let light = compose(&s, JUMP_W, JUMP_H, &JumpTheme::adwaita(Palette::light(), &font));
+        let dark = compose(&s, JUMP_W, JUMP_H, &JumpTheme::adwaita(Palette::dark(), &font));
+        assert!(light.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255), "opaque");
+        assert_ne!(light.rgba, dark.rgba, "light and dark differ");
     }
 }

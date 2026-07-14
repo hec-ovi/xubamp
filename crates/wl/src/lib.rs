@@ -1298,6 +1298,20 @@ impl App {
         }
     }
 
+    fn prefs_theme(&self) -> preferences::PrefsTheme<'_> {
+        match &self.ui_font {
+            Some(font) => preferences::PrefsTheme::adwaita(self.ui_palette, font),
+            None => preferences::PrefsTheme::classic(),
+        }
+    }
+
+    fn jump_theme(&self) -> jump::JumpTheme<'_> {
+        match &self.ui_font {
+            Some(font) => jump::JumpTheme::adwaita(self.ui_palette, font),
+            None => jump::JumpTheme::classic(),
+        }
+    }
+
     fn open_equalizer_presets_menu(&mut self) {
         let names = self
             .equalizer_presets
@@ -2233,7 +2247,7 @@ impl App {
         };
         self.preferences_state.model.visualization_show_peaks = self.state.vis.show_peaks;
         let (width, height) = (preferences::PREFERENCES_W, preferences::PREFERENCES_H);
-        let fb = preferences::compose(&self.preferences_state, width, height);
+        let fb = preferences::compose(&self.preferences_state, width, height, &self.prefs_theme());
         let surface = self.compositor.create_surface(&self.qh);
         let window =
             self.xdg_shell
@@ -2275,7 +2289,7 @@ impl App {
         if !configured {
             return;
         }
-        let fb = preferences::compose(&self.preferences_state, width, height);
+        let fb = preferences::compose(&self.preferences_state, width, height, &self.prefs_theme());
         let window = self.preferences_win.as_mut().unwrap();
         window.fb = fb;
         window.present();
@@ -2422,7 +2436,7 @@ impl App {
             scroll: 0,
         };
         let (w, h) = (jump::JUMP_W, jump::JUMP_H);
-        let fb = jump::compose(&self.jump_state, w, h);
+        let fb = jump::compose(&self.jump_state, w, h, &self.jump_theme());
         let surface = self.compositor.create_surface(&self.qh);
         let window =
             self.xdg_shell
@@ -2477,7 +2491,7 @@ impl App {
         else {
             return;
         };
-        let fb = jump::compose(&self.jump_state, w, h);
+        let fb = jump::compose(&self.jump_state, w, h, &self.jump_theme());
         let j = self.jump_win.as_mut().unwrap();
         j.fb = fb;
         j.present();

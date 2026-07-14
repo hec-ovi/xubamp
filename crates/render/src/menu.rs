@@ -182,6 +182,22 @@ pub enum ClassicMenuAction {
     PlaylistAddUrl,
     PlaylistAddDirectory,
     PlaylistAddFile,
+    PlaylistRemoveSelected,
+    PlaylistRemoveAll,
+    PlaylistCrop,
+    PlaylistRemoveDead,
+    PlaylistSelectAll,
+    PlaylistSelectNone,
+    PlaylistSelectInvert,
+    PlaylistSortTitle,
+    PlaylistSortFilename,
+    PlaylistSortPath,
+    PlaylistReverse,
+    PlaylistRandomize,
+    PlaylistFileInfo,
+    PlaylistNewList,
+    PlaylistSaveList,
+    PlaylistLoadList,
     EqualizerLoadPreset(usize),
     EqualizerLoadEqf,
     EqualizerSaveAs,
@@ -301,6 +317,62 @@ pub fn playlist_add_menu() -> Menu<ClassicMenuAction> {
         MenuItem::action("URL...", ClassicMenuAction::PlaylistAddUrl),
         MenuItem::action("Directory...", ClassicMenuAction::PlaylistAddDirectory),
         MenuItem::action("File...", ClassicMenuAction::PlaylistAddFile),
+    ])
+}
+
+/// The playlist editor's Remove flyout: a Remove Misc submenu (dead-file cleanup), Remove All, Crop
+/// (keep only the selection), and Remove Selected.
+pub fn playlist_rem_menu() -> Menu<ClassicMenuAction> {
+    let misc = Menu::new(vec![MenuItem::action(
+        "Remove all dead files",
+        ClassicMenuAction::PlaylistRemoveDead,
+    )]);
+    Menu::new(vec![
+        MenuItem::submenu("Remove Misc", misc),
+        MenuItem::action("Remove All", ClassicMenuAction::PlaylistRemoveAll),
+        MenuItem::action("Crop", ClassicMenuAction::PlaylistCrop),
+        MenuItem::action("Remove Selected", ClassicMenuAction::PlaylistRemoveSelected),
+    ])
+}
+
+/// The playlist editor's Selection flyout.
+pub fn playlist_sel_menu() -> Menu<ClassicMenuAction> {
+    Menu::new(vec![
+        MenuItem::action("Invert Selection", ClassicMenuAction::PlaylistSelectInvert),
+        MenuItem::action("Select None", ClassicMenuAction::PlaylistSelectNone),
+        MenuItem::action("Select All", ClassicMenuAction::PlaylistSelectAll),
+    ])
+}
+
+/// The playlist editor's Misc flyout: the Sort List submenu (the full classic set of sorts plus
+/// reverse and randomize) and a File Info entry (disabled until per-track info exists).
+pub fn playlist_misc_menu() -> Menu<ClassicMenuAction> {
+    let sort = Menu::new(vec![
+        MenuItem::action("Sort list by title", ClassicMenuAction::PlaylistSortTitle),
+        MenuItem::action(
+            "Sort list by filename",
+            ClassicMenuAction::PlaylistSortFilename,
+        ),
+        MenuItem::action(
+            "Sort list by path and filename",
+            ClassicMenuAction::PlaylistSortPath,
+        ),
+        MenuItem::separator(),
+        MenuItem::action("Reverse list", ClassicMenuAction::PlaylistReverse),
+        MenuItem::action("Randomize list", ClassicMenuAction::PlaylistRandomize),
+    ]);
+    Menu::new(vec![
+        MenuItem::submenu("Sort List", sort),
+        MenuItem::action("File Info", ClassicMenuAction::PlaylistFileInfo).with_enabled(false),
+    ])
+}
+
+/// The playlist editor's List flyout: clear, save, and load the whole playlist.
+pub fn playlist_list_menu() -> Menu<ClassicMenuAction> {
+    Menu::new(vec![
+        MenuItem::action("New List", ClassicMenuAction::PlaylistNewList),
+        MenuItem::action("Save List", ClassicMenuAction::PlaylistSaveList),
+        MenuItem::action("Load List", ClassicMenuAction::PlaylistLoadList),
     ])
 }
 
@@ -1188,6 +1260,44 @@ mod tests {
         assert_eq!(
             labels(&playlist_add_menu()),
             ["URL...", "Directory...", "File..."]
+        );
+    }
+
+    #[test]
+    fn playlist_cluster_menus_match_the_classic_set() {
+        assert_eq!(
+            labels(&playlist_rem_menu()),
+            [
+                "Remove Misc",
+                "Remove all dead files",
+                "Remove All",
+                "Crop",
+                "Remove Selected",
+            ]
+        );
+        assert_eq!(
+            labels(&playlist_sel_menu()),
+            ["Invert Selection", "Select None", "Select All"]
+        );
+        assert_eq!(
+            labels(&playlist_misc_menu()),
+            [
+                "Sort List",
+                "Sort list by title",
+                "Sort list by filename",
+                "Sort list by path and filename",
+                "Reverse list",
+                "Randomize list",
+                "File Info",
+            ]
+        );
+        // File Info is present but disabled until per-track info exists.
+        let misc = playlist_misc_menu();
+        let file_info = misc.items.iter().find(|i| i.label == "File Info").unwrap();
+        assert!(!file_info.state.enabled);
+        assert_eq!(
+            labels(&playlist_list_menu()),
+            ["New List", "Save List", "Load List"]
         );
     }
 

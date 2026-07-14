@@ -21,6 +21,17 @@ enum Direction {
     Backward,
 }
 
+/// A nonzero seed for the one-shot Randomize shuffle, taken from the wall clock so successive
+/// randomizes differ. Only drives cosmetic playlist ordering, never anything reproducible.
+fn random_seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1
+}
+
 pub struct Player {
     playlist: Playlist,
     /// The engine for the current track, or `None` before the first track starts / after a failed
@@ -116,6 +127,77 @@ impl Player {
 
     pub fn is_empty(&self) -> bool {
         self.playlist.is_empty()
+    }
+
+    /// Remove the playlist rows at the given display indices (editor "Remove Selected" / Del).
+    pub fn remove_indices(&mut self, indices: &[usize]) {
+        let ids: Vec<TrackId> = indices
+            .iter()
+            .filter_map(|&i| self.playlist.track_id(i))
+            .collect();
+        self.playlist.remove_ids(&ids);
+    }
+
+    /// Keep only the rows at the given display indices, removing the rest (editor "Crop").
+    pub fn crop_indices(&mut self, indices: &[usize]) {
+        let ids: Vec<TrackId> = indices
+            .iter()
+            .filter_map(|&i| self.playlist.track_id(i))
+            .collect();
+        self.playlist.retain_ids(&ids);
+    }
+
+    /// Clear the whole playlist and stop playback (editor "New List" / "Remove All").
+    pub fn clear_playlist(&mut self) {
+        self.engine = None;
+        self.playlist.clear();
+        self.shuffle_cycle.clear();
+        self.stopped = true;
+    }
+
+    /// Drop entries whose file no longer exists on disk (editor "Remove all dead files").
+    pub fn remove_dead_tracks(&mut self) {
+        let dead: Vec<TrackId> = self
+            .playlist
+            .entries()
+            .filter(|(_, path)| !path.exists())
+            .map(|(id, _)| id)
+            .collect();
+        self.playlist.remove_ids(&dead);
+    }
+
+    /// Stable id and path of every entry in display order, so the editor can compute a sort key
+    /// (title / filename / path) without reaching into the playlist internals.
+    pub fn playlist_entries(&self) -> Vec<(TrackId, PathBuf)> {
+        self.playlist
+            .entries()
+            .map(|(id, path)| (id, path.to_owned()))
+            .collect()
+    }
+
+    /// Reorder the playlist to a caller-computed permutation of stable ids (the sort primitive).
+    pub fn reorder_playlist(&mut self, order: &[TrackId]) {
+        self.playlist.set_order(order);
+    }
+
+    /// Reverse the playlist display order (editor "Reverse list").
+    pub fn reverse_playlist(&mut self) {
+        self.playlist.reverse();
+    }
+
+    /// Randomly shuffle the playlist display order (editor "Randomize list"). This changes the shown
+    /// order, distinct from Shuffle-mode playback which keeps its own permutation.
+    pub fn randomize_playlist(&mut self) {
+        let mut ids: Vec<TrackId> = self.playlist.ids().collect();
+        let mut x = random_seed();
+        for i in (1..ids.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let j = (x % (i as u64 + 1)) as usize;
+            ids.swap(i, j);
+        }
+        self.playlist.set_order(&ids);
     }
 
     /// Start playing the current track (called once at startup). No-op on an empty playlist.
@@ -577,6 +659,7 @@ impl Player {
             .map(|(i, path)| pledit::Row {
                 title: format!("{}. {}", i + 1, track_title(&path.to_string_lossy())),
                 duration: String::new(),
+                duration_secs: None,
             })
             .collect();
         (rows, self.playlist.current_index())

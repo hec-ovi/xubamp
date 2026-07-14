@@ -101,6 +101,32 @@ pub enum MenuRequest {
     /// Main/playlist Eject and Play-on-empty use the file chooser's replace-and-play behavior.
     OpenMedia,
     SaveEqualizer(equalizer::Preset),
+    /// Playlist editor mutations that need the player. The window layer attaches the selection (as
+    /// display-row indices) or the sort key; the application layer maps them to the player.
+    Playlist(PlaylistRequest),
+}
+
+/// A playlist-editor operation to carry out on the player, emitted by the REM/SEL/MISC/LIST clusters
+/// and the Del key. Selection is passed as display-row indices captured at the moment of the action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlaylistRequest {
+    RemoveSelected(Vec<usize>),
+    Crop(Vec<usize>),
+    RemoveAll,
+    RemoveDead,
+    Sort(PlaylistSort),
+    Reverse,
+    Randomize,
+    Save,
+    Load,
+}
+
+/// The reorderings the MISC > Sort List submenu offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaylistSort {
+    Title,
+    Filename,
+    Path,
 }
 
 type MenuSink = Box<dyn FnMut(MenuRequest)>;
@@ -312,7 +338,7 @@ struct EqualizerWin {
 enum PopupOwner {
     Main,
     EqualizerPresets,
-    PlaylistAdd,
+    PlaylistMenu(pledit::BottomButton),
 }
 
 struct PopupMenuWin {
@@ -1291,24 +1317,36 @@ impl App {
         self.open_popup_menu(PopupOwner::Main, model, interaction, fb, position);
     }
 
-    fn open_playlist_add_menu(&mut self) {
+    fn open_playlist_menu(&mut self, button: pledit::BottomButton) {
         if self.playlist_state.shade {
             return;
         }
-        let model = menu::playlist_add_menu();
+        let model = match button {
+            pledit::BottomButton::Add => menu::playlist_add_menu(),
+            pledit::BottomButton::Rem => menu::playlist_rem_menu(),
+            pledit::BottomButton::Sel => menu::playlist_sel_menu(),
+            pledit::BottomButton::Misc => menu::playlist_misc_menu(),
+            pledit::BottomButton::List => menu::playlist_list_menu(),
+        };
         let mut interaction = menu::MenuInteraction::default();
         interaction.open(&model);
         let fb = menu::compose(&model, &interaction);
         let Some(playlist) = self.playlist.as_ref() else {
             return;
         };
-        let (_, add_y, _, _) = pledit::add_button_rect(playlist.height);
+        let (bx, by, _, _) = pledit::bottom_button_rect(button, playlist.width, playlist.height);
         let position = panes::Point {
-            x: playlist.position.x + pledit::ADD_BUTTON_X,
-            y: playlist.position.y + add_y - fb.height as i32,
+            x: playlist.position.x + bx,
+            y: playlist.position.y + by - fb.height as i32,
         };
-        self.open_popup_menu(PopupOwner::PlaylistAdd, model, interaction, fb, position);
-        self.playlist_state.pressed_add = true;
+        self.open_popup_menu(
+            PopupOwner::PlaylistMenu(button),
+            model,
+            interaction,
+            fb,
+            position,
+        );
+        self.playlist_state.pressed_menu = Some(button);
         self.redraw_playlist();
     }
 
@@ -1355,8 +1393,8 @@ impl App {
         };
         popup.subsurface.destroy();
         popup.surface.destroy();
-        if popup.owner == PopupOwner::PlaylistAdd && self.playlist_state.pressed_add {
-            self.playlist_state.pressed_add = false;
+        if matches!(popup.owner, PopupOwner::PlaylistMenu(_)) && self.playlist_state.pressed_menu.is_some() {
+            self.playlist_state.pressed_menu = None;
             self.redraw_playlist();
         }
         // Destroying the popup subsurface is parent-latched state on the compositor: it only takes
@@ -1448,8 +1486,74 @@ impl App {
                     bands_db: self.equalizer_state.bands_db,
                 }));
             }
+            // Selection lives entirely in the window layer, so these mutate the pane state directly.
+            menu::ClassicMenuAction::PlaylistSelectAll => {
+                if self.playlist_state.select_all() {
+                    self.redraw_playlist();
+                }
+            }
+            menu::ClassicMenuAction::PlaylistSelectNone => {
+                if self.playlist_state.select_none() {
+                    self.redraw_playlist();
+                }
+            }
+            menu::ClassicMenuAction::PlaylistSelectInvert => {
+                if self.playlist_state.invert_selection() {
+                    self.redraw_playlist();
+                }
+            }
+            menu::ClassicMenuAction::PlaylistFileInfo => {}
+            // Everything else mutates the player, so route it to the application layer with the
+            // current selection (as display-row indices) attached.
+            menu::ClassicMenuAction::PlaylistRemoveSelected => {
+                self.request_playlist(PlaylistRequest::RemoveSelected(self.selected_rows()));
+            }
+            menu::ClassicMenuAction::PlaylistCrop => {
+                self.request_playlist(PlaylistRequest::Crop(self.selected_rows()));
+            }
+            menu::ClassicMenuAction::PlaylistRemoveAll
+            | menu::ClassicMenuAction::PlaylistNewList => {
+                self.request_playlist(PlaylistRequest::RemoveAll);
+            }
+            menu::ClassicMenuAction::PlaylistRemoveDead => {
+                self.request_playlist(PlaylistRequest::RemoveDead);
+            }
+            menu::ClassicMenuAction::PlaylistSortTitle => {
+                self.request_playlist(PlaylistRequest::Sort(PlaylistSort::Title));
+            }
+            menu::ClassicMenuAction::PlaylistSortFilename => {
+                self.request_playlist(PlaylistRequest::Sort(PlaylistSort::Filename));
+            }
+            menu::ClassicMenuAction::PlaylistSortPath => {
+                self.request_playlist(PlaylistRequest::Sort(PlaylistSort::Path));
+            }
+            menu::ClassicMenuAction::PlaylistReverse => {
+                self.request_playlist(PlaylistRequest::Reverse);
+            }
+            menu::ClassicMenuAction::PlaylistRandomize => {
+                self.request_playlist(PlaylistRequest::Randomize);
+            }
+            menu::ClassicMenuAction::PlaylistSaveList => {
+                self.request_playlist(PlaylistRequest::Save);
+            }
+            menu::ClassicMenuAction::PlaylistLoadList => {
+                self.request_playlist(PlaylistRequest::Load);
+            }
             action => (self.on_menu)(MenuRequest::Action(action)),
         }
+    }
+
+    /// The current playlist selection as display-row indices, in ascending order.
+    fn selected_rows(&self) -> Vec<usize> {
+        let mut rows = self.playlist_state.selected.clone();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// Emit a playlist mutation to the application layer. The playlist rows resync on the next tick
+    /// via `playlist_source`, so the pane repaints without any extra redraw here.
+    fn request_playlist(&mut self, request: PlaylistRequest) {
+        (self.on_menu)(MenuRequest::Playlist(request));
     }
 
     fn set_time_display(&mut self, display: hit::TimeDisplay) {
@@ -1536,7 +1640,7 @@ impl App {
         if self
             .popup_menu
             .as_ref()
-            .is_some_and(|popup| popup.owner == PopupOwner::PlaylistAdd)
+            .is_some_and(|popup| matches!(popup.owner, PopupOwner::PlaylistMenu(_)))
         {
             self.close_popup_menu();
         }
@@ -1806,8 +1910,8 @@ impl App {
                             pl.resize = None;
                         }
                     }
-                    pledit::Region::AddMenu => {
-                        self.playlist_state.pressed_add = true;
+                    pledit::Region::BottomMenu(button) => {
+                        self.playlist_state.pressed_menu = Some(button);
                         if let Some(pl) = &mut self.playlist {
                             pl.drag = None;
                             pl.resize = None;
@@ -1951,14 +2055,14 @@ impl App {
                     pl.drag = None;
                     pl.resize = None;
                 }
-                if self.playlist_state.pressed_add {
-                    self.playlist_state.pressed_add = false;
+                if let Some(pressed) = self.playlist_state.pressed_menu {
+                    self.playlist_state.pressed_menu = None;
                     let fired = self.playlist.as_ref().is_some_and(|pl| {
                         pledit::region_at(&self.playlist_state, pl.width, pl.height, x, y)
-                            == pledit::Region::AddMenu
+                            == pledit::Region::BottomMenu(pressed)
                     });
                     if fired {
-                        self.open_playlist_add_menu();
+                        self.open_playlist_menu(pressed);
                     } else {
                         self.redraw_playlist();
                     }
@@ -1981,13 +2085,13 @@ impl App {
                 }
             }
             PointerEventKind::Leave { .. } => {
-                let menu_keeps_add_pressed = self
+                let menu_keeps_pressed = self
                     .popup_menu
                     .as_ref()
-                    .is_some_and(|popup| popup.owner == PopupOwner::PlaylistAdd);
-                let add_cleared =
-                    !menu_keeps_add_pressed && std::mem::take(&mut self.playlist_state.pressed_add);
-                let redraw = self.playlist_state.pressed_title.take().is_some() || add_cleared;
+                    .is_some_and(|popup| matches!(popup.owner, PopupOwner::PlaylistMenu(_)));
+                let menu_cleared = !menu_keeps_pressed
+                    && std::mem::take(&mut self.playlist_state.pressed_menu).is_some();
+                let redraw = self.playlist_state.pressed_title.take().is_some() || menu_cleared;
                 if let Some(pl) = &mut self.playlist {
                     pl.grip_hover = false;
                     // During the implicit button grab, moving the subsurface may cause an enter or
@@ -2939,10 +3043,25 @@ impl App {
                     self.open_preferences();
                     return;
                 }
+                Keysym::a | Keysym::A => {
+                    // Ctrl+A selects every playlist row (only meaningful while the pane is open).
+                    if self.playlist.is_some() && self.playlist_state.select_all() {
+                        self.redraw_playlist();
+                    }
+                    return;
+                }
                 _ => {}
             }
         }
         if m.ctrl || m.alt || m.logo {
+            return;
+        }
+        // Del removes the selected playlist rows when the pane is open.
+        if event.keysym == Keysym::Delete && self.playlist.is_some() {
+            let rows = self.selected_rows();
+            if !rows.is_empty() {
+                self.request_playlist(PlaylistRequest::RemoveSelected(rows));
+            }
             return;
         }
         let Some(key) = decode_key(event) else {

@@ -629,10 +629,27 @@ mod tests {
     #[test]
     fn audio_eqf_and_skin_filters_cover_case_variants() {
         let audio = audio_filter();
-        assert_eq!(audio.pattern_filters(), ["*.[mM][pP]3", "*.[wW][aA][vV]"]);
+        assert_eq!(
+            audio.pattern_filters(),
+            [
+                "*.[mM][pP]3",
+                "*.[wW][aA][vV]",
+                "*.[fF][lL][aA][cC]",
+                "*.[oO][gG][gG]",
+                "*.[oO][gG][aA]",
+            ]
+        );
         assert_eq!(
             audio.mimetype_filters(),
-            ["audio/mpeg", "audio/wav", "audio/x-wav"]
+            [
+                "audio/mpeg",
+                "audio/wav",
+                "audio/x-wav",
+                "audio/flac",
+                "audio/x-flac",
+                "audio/ogg",
+                "audio/vorbis",
+            ]
         );
         assert_eq!(eqf_filter().pattern_filters(), ["*.[eE][qQ][fF]"]);
         assert_eq!(

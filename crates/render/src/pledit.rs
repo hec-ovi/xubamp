@@ -3,6 +3,8 @@
 //! window. Track rows use the clean-room 5x7 font (Winamp uses the skin's system font; we
 //! approximate with our own bitmap font for now) coloured from `pledit.txt`.
 
+use std::collections::HashSet;
+
 use xubamp_skin::bmp::Image;
 use xubamp_skin::color::Rgb;
 use xubamp_skin::sprites::{self, Rect};
@@ -10,11 +12,39 @@ use xubamp_skin::{font, Skin};
 
 use crate::{blit, Framebuffer};
 
+/// Format a whole-second count as Winamp's `M:SS` (or `MM:SS`, `MMM:SS` for long values): minutes
+/// with no leading zero, seconds always two digits. There is no hours field, matching the classic
+/// playlist readout.
+fn mmss(total_secs: u32) -> String {
+    format!("{}:{:02}", total_secs / 60, total_secs % 60)
+}
+
+/// The bottom-bar running-time readout: `selected/total`, where the left side sums the durations of
+/// the selected rows and the right side sums every row, each as `M:SS`. Unknown row durations count
+/// as zero (the player does not probe lengths yet), so a fresh list reads `0:00/0:00`.
+pub fn running_time_message(state: &PlState) -> String {
+    let selected: HashSet<usize> = state.selected.iter().copied().collect();
+    let mut sel_secs = 0u32;
+    let mut total_secs = 0u32;
+    for (i, row) in state.rows.iter().enumerate() {
+        let secs = row.duration_secs.unwrap_or(0);
+        total_secs = total_secs.saturating_add(secs);
+        if selected.contains(&i) {
+            sel_secs = sel_secs.saturating_add(secs);
+        }
+    }
+    format!("{}/{}", mmss(sel_secs), mmss(total_secs))
+}
+
 /// One playlist row: its already-formatted title (`"N. Name"`) and duration (`"M:SS"` or empty).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Row {
     pub title: String,
     pub duration: String,
+    /// Track length in seconds when known, for the bottom-bar selected/total readout. Rows created
+    /// from a plain path carry `None` (the player does not probe durations yet); a real probe is a
+    /// later follow-up, at which point the per-row `duration` string can be derived from this too.
+    pub duration_secs: Option<u32>,
 }
 
 /// The two buttons at the playlist title bar's right edge. Both expanded and shaded forms use the
@@ -28,29 +58,74 @@ pub enum TitleButton {
 
 /// Interactive playlist regions. Keeping this geometry pure makes the title buttons, drag band,
 /// and the different expanded/shaded resize targets testable without a Wayland compositor.
+/// The five bottom-bar menu buttons. Each opens a flyout: ADD (url/dir/file), REM (remove), SEL
+/// (selection), MISC (sort/info), LIST (new/save/load). Winamp's exact positions: all are 22x18 and
+/// 12px off the bottom; ADD/REM/SEL/MISC are left-anchored, LIST is anchored to the right edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BottomButton {
+    Add,
+    Rem,
+    Sel,
+    Misc,
+    List,
+}
+
+impl BottomButton {
+    /// The five buttons in left-to-right order, so hit-testing and drawing can iterate them.
+    pub const ALL: [BottomButton; 5] = [
+        BottomButton::Add,
+        BottomButton::Rem,
+        BottomButton::Sel,
+        BottomButton::Misc,
+        BottomButton::List,
+    ];
+
+    /// The three-letter face label the fallback (no-skin) frame draws on the button.
+    fn label(self) -> &'static str {
+        match self {
+            BottomButton::Add => "ADD",
+            BottomButton::Rem => "REM",
+            BottomButton::Sel => "SEL",
+            BottomButton::Misc => "MSC",
+            BottomButton::List => "LST",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
     TitleButton(TitleButton),
     TitleBar,
     Resize,
-    /// The bottom-left ADD control, which opens URL/Directory/File choices.
-    AddMenu,
+    /// One of the five bottom-bar cluster buttons, each of which opens its flyout menu.
+    BottomMenu(BottomButton),
     Body,
     None,
 }
 
 pub const ADD_BUTTON_X: i32 = 14;
-pub const ADD_BUTTON_BOTTOM: i32 = 12;
-pub const ADD_BUTTON_W: i32 = 22;
-pub const ADD_BUTTON_H: i32 = 18;
+pub const BOTTOM_BUTTON_BOTTOM: i32 = 12;
+pub const BOTTOM_BUTTON_W: i32 = 22;
+pub const BOTTOM_BUTTON_H: i32 = 18;
+/// Left offsets of the left-anchored buttons and the right offset of the right-anchored LIST button.
+const REM_BUTTON_X: i32 = 43;
+const SEL_BUTTON_X: i32 = 72;
+const MISC_BUTTON_X: i32 = 101;
+const LIST_BUTTON_RIGHT: i32 = 22;
 
-pub fn add_button_rect(height: i32) -> (i32, i32, i32, i32) {
-    (
-        ADD_BUTTON_X,
-        height - ADD_BUTTON_BOTTOM - ADD_BUTTON_H,
-        ADD_BUTTON_W,
-        ADD_BUTTON_H,
-    )
+/// The window-local rectangle of a bottom-bar button, given the current window size. All buttons
+/// sit `BOTTOM_BUTTON_BOTTOM` px off the bottom; LIST is measured from the right edge so it tracks a
+/// resized window.
+pub fn bottom_button_rect(button: BottomButton, width: i32, height: i32) -> (i32, i32, i32, i32) {
+    let y = height - BOTTOM_BUTTON_BOTTOM - BOTTOM_BUTTON_H;
+    let x = match button {
+        BottomButton::Add => ADD_BUTTON_X,
+        BottomButton::Rem => REM_BUTTON_X,
+        BottomButton::Sel => SEL_BUTTON_X,
+        BottomButton::Misc => MISC_BUTTON_X,
+        BottomButton::List => width - LIST_BUTTON_RIGHT - BOTTOM_BUTTON_W,
+    };
+    (x, y, BOTTOM_BUTTON_W, BOTTOM_BUTTON_H)
 }
 
 /// Playlist-window UI state: the rows to show, which track is playing, which rows are selected, and
@@ -72,8 +147,8 @@ pub struct PlState {
     /// Held title button, for depressed feedback until release. The action fires only when release
     /// lands on this same button.
     pub pressed_title: Option<TitleButton>,
-    /// The ADD control stays depressed while its popup menu is open.
-    pub pressed_add: bool,
+    /// Whichever bottom cluster button stays depressed while its popup menu is open.
+    pub pressed_menu: Option<BottomButton>,
 }
 
 /// The x coordinate of a 9px playlist title button at `right` pixels from the window's right edge.
@@ -92,9 +167,6 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
     if x < 0 || y < 0 || x >= width || y >= height {
         return Region::None;
     }
-    let (add_x, add_y, add_w, add_h) = add_button_rect(height);
-    let over_add = x >= add_x && x < add_x + add_w && y >= add_y && y < add_y + add_h;
-
     let button_y = sprites::PLEDIT_TITLE_BUTTON_Y;
     let button_h = sprites::PLEDIT_TITLE_BUTTON_W;
     if y >= button_y && y < button_y + button_h {
@@ -124,13 +196,21 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
         }
     } else if x >= width - 20 && y >= height - 20 {
         Region::Resize
-    } else if over_add {
-        Region::AddMenu
+    } else if let Some(button) = bottom_button_at(width, height, x, y) {
+        Region::BottomMenu(button)
     } else if y < sprites::PLEDIT_TITLE_H {
         Region::TitleBar
     } else {
         Region::Body
     }
+}
+
+/// Which bottom cluster button, if any, is under a window-local point.
+fn bottom_button_at(width: i32, height: i32, x: i32, y: i32) -> Option<BottomButton> {
+    BottomButton::ALL.into_iter().find(|&button| {
+        let (bx, by, bw, bh) = bottom_button_rect(button, width, height);
+        x >= bx && x < bx + bw && y >= by && y < by + bh
+    })
 }
 
 impl PlState {
@@ -196,6 +276,38 @@ impl PlState {
     /// the anchor is left in place).
     pub fn clear_selection(&mut self) {
         self.selected.clear();
+    }
+
+    /// SEL cluster "Select All": select every row. Returns whether the selection changed.
+    pub fn select_all(&mut self) -> bool {
+        let all: Vec<usize> = (0..self.rows.len()).collect();
+        if self.selected.len() == all.len() {
+            return false;
+        }
+        self.selected = all;
+        true
+    }
+
+    /// SEL cluster "Select None". Returns whether the selection changed.
+    pub fn select_none(&mut self) -> bool {
+        if self.selected.is_empty() {
+            return false;
+        }
+        self.selected.clear();
+        true
+    }
+
+    /// SEL cluster "Invert Selection": every previously-unselected row becomes selected and vice
+    /// versa. Returns whether anything changed (only an empty playlist leaves it unchanged).
+    pub fn invert_selection(&mut self) -> bool {
+        if self.rows.is_empty() {
+            return false;
+        }
+        let selected: HashSet<usize> = self.selected.iter().copied().collect();
+        self.selected = (0..self.rows.len())
+            .filter(|i| !selected.contains(i))
+            .collect();
+        true
     }
 
     /// Scroll by `tracks` rows (positive scrolls toward the end), in a window `window_h` px tall. A
@@ -317,19 +429,62 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
         w - sprites::PLEDIT_BOTTOM_RIGHT.w,
         mid_y1,
     );
-    if state.pressed_add {
-        let (_, add_y, _, _) = add_button_rect(h);
-        blit(
-            &mut fb,
-            sheet,
-            Rect::new(23, 149, ADD_BUTTON_W, ADD_BUTTON_H),
-            ADD_BUTTON_X,
-            add_y,
-        );
+    if let Some(button) = state.pressed_menu {
+        let (bx, by, bw, bh) = bottom_button_rect(button, w, h);
+        if button == BottomButton::Add {
+            // The skin bakes an ADD-pressed sprite; the other clusters have none, so darken them.
+            blit(
+                &mut fb,
+                sheet,
+                Rect::new(23, 149, BOTTOM_BUTTON_W, BOTTOM_BUTTON_H),
+                bx,
+                by,
+            );
+        } else {
+            darken_rect(&mut fb, bx, by, bw, bh);
+        }
     }
 
+    draw_running_time(&mut fb, state, &colors, w, h);
     draw_rows(&mut fb, state, &colors, h, list_w);
     fb
+}
+
+/// Multiply a rectangle's pixels toward black, a skin-independent "pressed" cue for the cluster
+/// buttons that have no baked pressed sprite (everything but ADD).
+fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
+    for yy in y.max(0)..(y + h).min(fb.height as i32) {
+        for xx in x.max(0)..(x + w).min(fb.width as i32) {
+            let o = ((yy as u32 * fb.width + xx as u32) * 4) as usize;
+            for c in 0..3 {
+                fb.rgba[o + c] = (fb.rgba[o + c] as u32 * 5 / 8) as u8;
+            }
+        }
+    }
+}
+
+/// Draw the `selected/total` running-time readout, right-aligned in the open bottom-bar space just
+/// left of the LIST button, in the playlist's normal text colour.
+fn draw_running_time(
+    fb: &mut Framebuffer,
+    state: &PlState,
+    colors: &xubamp_skin::pledit::PlEdit,
+    width: i32,
+    height: i32,
+) {
+    let text = running_time_message(state);
+    let right = width - LIST_BUTTON_RIGHT - BOTTOM_BUTTON_W - 5;
+    let x = right - font::text_width(&text) as i32;
+    let y = height - BOTTOM_BUTTON_BOTTOM - BOTTOM_BUTTON_H + 5;
+    font::draw_text(
+        &mut fb.rgba,
+        fb.width,
+        fb.height,
+        x,
+        y,
+        &text,
+        [colors.normal.r, colors.normal.g, colors.normal.b],
+    );
 }
 
 /// Compose the 14px playlist windowshade strip. The width is independent of the expanded/shaded
@@ -416,38 +571,44 @@ fn draw_fallback_expanded(
         [colors.normal.r, colors.normal.g, colors.normal.b],
     );
     draw_fallback_title_buttons(fb, state, w);
-    draw_fallback_add_button(fb, state, h, colors);
+    draw_fallback_bottom_buttons(fb, state, w, h, colors);
+    draw_running_time(fb, state, colors, w, h);
     draw_rows(fb, state, colors, h, list_w);
 }
 
-fn draw_fallback_add_button(
+/// Draw all five bottom cluster buttons for the no-skin fallback frame, each a small bevelled face
+/// with its three-letter label, so the base skin's playlist exposes the same working controls.
+fn draw_fallback_bottom_buttons(
     fb: &mut Framebuffer,
     state: &PlState,
+    width: i32,
     height: i32,
     colors: &xubamp_skin::pledit::PlEdit,
 ) {
-    let (x, y, w, h) = add_button_rect(height);
-    let face = if state.pressed_add {
-        colors.selected_bg
-    } else {
-        Rgb::new(34, 64, 76)
-    };
     let light = Rgb::new(92, 146, 158);
     let dark = Rgb::new(5, 18, 24);
-    fill_rect(fb, x, y, w, h, face);
-    fill_rect(fb, x, y, w, 1, light);
-    fill_rect(fb, x, y, 1, h, light);
-    fill_rect(fb, x, y + h - 1, w, 1, dark);
-    fill_rect(fb, x + w - 1, y, 1, h, dark);
-    font::draw_text(
-        &mut fb.rgba,
-        fb.width,
-        fb.height,
-        x + 3,
-        y + 6,
-        "ADD",
-        [colors.normal.r, colors.normal.g, colors.normal.b],
-    );
+    for button in BottomButton::ALL {
+        let (x, y, w, h) = bottom_button_rect(button, width, height);
+        let face = if state.pressed_menu == Some(button) {
+            colors.selected_bg
+        } else {
+            Rgb::new(34, 64, 76)
+        };
+        fill_rect(fb, x, y, w, h, face);
+        fill_rect(fb, x, y, w, 1, light);
+        fill_rect(fb, x, y, 1, h, light);
+        fill_rect(fb, x, y + h - 1, w, 1, dark);
+        fill_rect(fb, x + w - 1, y, 1, h, dark);
+        font::draw_text(
+            &mut fb.rgba,
+            fb.width,
+            fb.height,
+            x + 2,
+            y + 6,
+            button.label(),
+            [colors.normal.r, colors.normal.g, colors.normal.b],
+        );
+    }
 }
 
 fn draw_pressed_title(
@@ -723,12 +884,14 @@ mod tests {
         );
         assert_eq!(region_at(&expanded, w, h, 40, 7), Region::TitleBar);
         assert_eq!(region_at(&expanded, w, h, 40, 40), Region::Body);
-        let (add_x, add_y, add_w, add_h) = add_button_rect(h);
-        assert_eq!(
-            region_at(&expanded, w, h, add_x + add_w / 2, add_y + add_h / 2),
-            Region::AddMenu,
-            "the resized bottom bar keeps the classic ADD target"
-        );
+        for button in BottomButton::ALL {
+            let (bx, by, bw, bh) = bottom_button_rect(button, w, h);
+            assert_eq!(
+                region_at(&expanded, w, h, bx + bw / 2, by + bh / 2),
+                Region::BottomMenu(button),
+                "the resized bottom bar keeps every cluster target, including right-anchored LIST"
+            );
+        }
         assert_eq!(region_at(&expanded, w, h, w - 1, h - 1), Region::Resize);
 
         let shaded = PlState {
@@ -762,6 +925,60 @@ mod tests {
     }
 
     #[test]
+    fn selection_ops_cover_all_none_and_invert() {
+        let mut state = PlState {
+            rows: rows(4),
+            ..Default::default()
+        };
+        assert!(state.select_all());
+        assert_eq!(state.selected, [0, 1, 2, 3]);
+        assert!(!state.select_all(), "already all-selected is a no-op");
+        assert!(state.invert_selection());
+        assert!(state.selected.is_empty(), "inverting a full selection clears it");
+        assert!(state.invert_selection());
+        assert_eq!(state.selected, [0, 1, 2, 3], "inverting nothing selects everything");
+        assert!(state.select_none());
+        assert!(state.selected.is_empty());
+        assert!(!state.select_none(), "already empty is a no-op");
+
+        // Invert a partial selection.
+        state.selected = vec![1, 3];
+        assert!(state.invert_selection());
+        assert_eq!(state.selected, [0, 2]);
+
+        // An empty playlist has nothing to invert.
+        let mut empty = PlState::default();
+        assert!(!empty.invert_selection());
+    }
+
+    #[test]
+    fn running_time_shows_selected_over_total() {
+        let mut state = PlState {
+            rows: vec![
+                Row {
+                    title: "a".into(),
+                    duration: String::new(),
+                    duration_secs: Some(90),
+                },
+                Row {
+                    title: "b".into(),
+                    duration: String::new(),
+                    duration_secs: Some(30),
+                },
+                Row {
+                    title: "c".into(),
+                    duration: String::new(),
+                    duration_secs: None,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(running_time_message(&state), "0:00/2:00", "unknown counts as zero");
+        state.selected = vec![0];
+        assert_eq!(running_time_message(&state), "1:30/2:00");
+    }
+
+    #[test]
     fn held_add_control_uses_the_selected_skin_cell() {
         let mut sheet = solid_sheet(300, 170, [20, 30, 40, 255]);
         for y in 149..167 {
@@ -771,7 +988,7 @@ mod tests {
             }
         }
         let state = PlState {
-            pressed_add: true,
+            pressed_menu: Some(BottomButton::Add),
             ..Default::default()
         };
         let fb = compose(
@@ -783,7 +1000,7 @@ mod tests {
             sprites::PLEDIT_W,
             sprites::PLEDIT_H,
         );
-        let (x, y, w, h) = add_button_rect(sprites::PLEDIT_H);
+        let (x, y, w, h) = bottom_button_rect(BottomButton::Add, sprites::PLEDIT_W, sprites::PLEDIT_H);
         assert_eq!(
             px(&fb, (x + w / 2) as u32, (y + h / 2) as u32),
             [220, 40, 90, 255]
@@ -864,6 +1081,7 @@ mod tests {
             rows: vec![Row {
                 title: "1. current song".into(),
                 duration: "3:21".into(),
+                duration_secs: Some(201),
             }],
             current: Some(0),
             ..Default::default()
@@ -969,6 +1187,7 @@ mod tests {
             .map(|i| Row {
                 title: format!("track {i}"),
                 duration: String::new(),
+                duration_secs: None,
             })
             .collect()
     }

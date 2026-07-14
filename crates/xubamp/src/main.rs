@@ -244,6 +244,55 @@ fn dispatch_portal_request(launcher: &portal_actions::Launcher, request: xubamp_
     }
 }
 
+/// Carry out a playlist-editor mutation on the player. Save and Load need a native file dialog, so
+/// they go through the portal launcher (whose completions are applied on the event-loop tick); the
+/// rest mutate the player directly and the playlist pane resyncs on the next tick.
+#[cfg(feature = "audio")]
+fn apply_playlist_request(
+    player: &std::rc::Rc<std::cell::RefCell<player::Player>>,
+    launcher: &portal_actions::Launcher,
+    op: xubamp_wl::PlaylistRequest,
+) {
+    use xubamp_wl::PlaylistRequest as P;
+    if matches!(op, P::Save | P::Load) {
+        dispatch_portal_request(launcher, xubamp_wl::MenuRequest::Playlist(op));
+        return;
+    }
+    let mut player = player.borrow_mut();
+    match op {
+        P::RemoveSelected(indices) => player.remove_indices(&indices),
+        P::Crop(indices) => player.crop_indices(&indices),
+        P::RemoveAll => player.clear_playlist(),
+        P::RemoveDead => player.remove_dead_tracks(),
+        P::Reverse => player.reverse_playlist(),
+        P::Randomize => player.randomize_playlist(),
+        P::Sort(sort) => {
+            let mut entries = player.playlist_entries();
+            entries.sort_by(|a, b| {
+                playlist_sort_key(sort, &a.1).cmp(&playlist_sort_key(sort, &b.1))
+            });
+            let order: Vec<_> = entries.into_iter().map(|(id, _)| id).collect();
+            player.reorder_playlist(&order);
+        }
+        P::Save | P::Load => {}
+    }
+}
+
+/// The comparable key a playlist Sort uses: the derived display title, the file name, or the whole
+/// path, each lowercased so the sort is case-insensitive like Winamp's.
+#[cfg(feature = "audio")]
+fn playlist_sort_key(sort: xubamp_wl::PlaylistSort, path: &Path) -> String {
+    use xubamp_wl::PlaylistSort as S;
+    match sort {
+        S::Title => track_title(&path.to_string_lossy()).to_lowercase(),
+        S::Filename => path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default(),
+        S::Path => path.to_string_lossy().to_lowercase(),
+    }
+}
+
 /// Eject always invokes the replace-and-play chooser. Play does so only for an empty playlist;
 /// Pause stays inert there instead of becoming another chooser shortcut.
 fn transport_opens_media(t: xubamp_render::hit::Transport, playlist_empty: bool) -> bool {
@@ -493,13 +542,11 @@ fn main() {
             let portal_launcher = portal_launcher.clone();
             let settings = Rc::clone(&settings);
             let settings_path = settings_path.clone();
-            move |request: xubamp_wl::MenuRequest| {
-                if matches!(
-                    request,
-                    xubamp_wl::MenuRequest::Action(
-                        xubamp_render::menu::ClassicMenuAction::UseBaseSkin
-                    )
-                ) {
+            let player = Rc::clone(&player);
+            move |request: xubamp_wl::MenuRequest| match request {
+                xubamp_wl::MenuRequest::Action(
+                    xubamp_render::menu::ClassicMenuAction::UseBaseSkin,
+                ) => {
                     if let Err(error) = persist_skin_path(
                         settings_path.as_deref(),
                         &mut settings.borrow_mut(),
@@ -507,9 +554,11 @@ fn main() {
                     ) {
                         eprintln!("xubamp: cannot save base skin selection: {error}");
                     }
-                } else {
-                    dispatch_portal_request(&portal_launcher, request);
                 }
+                xubamp_wl::MenuRequest::Playlist(op) => {
+                    apply_playlist_request(&player, &portal_launcher, op);
+                }
+                other => dispatch_portal_request(&portal_launcher, other),
             }
         };
         let playback_source = {
@@ -1035,7 +1084,7 @@ mod tests {
     fn no_recognized_args_yields_none() {
         let (skin, media) = classify(s(&[
             "readme.md",
-            "not-enabled.flac",
+            "cover.png",
             "movie.mp4",
             "playlist.m3u",
         ]));

@@ -219,7 +219,7 @@ mod tests {
 
     fn state(titles: &[&str]) -> JumpState {
         JumpState {
-            rows: titles.iter().map(|t| Row { title: (*t).into(), duration: String::new() }).collect(),
+            rows: titles.iter().map(|t| Row { title: (*t).into(), duration: String::new(), duration_secs: None }).collect(),
             ..Default::default()
         }
     }

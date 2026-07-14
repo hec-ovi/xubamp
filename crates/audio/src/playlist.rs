@@ -2,7 +2,7 @@
 //! audio), so mutation and navigation are unit-tested without a device. The player layer turns a
 //! returned path into actual playback.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// The most recent tracks remembered for Back/Forward navigation. Bounds memory over a long session
@@ -407,6 +407,91 @@ impl Playlist {
         true
     }
 
+    /// Stable identity paired with the path, in display order. Lets the playlist-editor layer sort
+    /// or filter by a key derived from the path without exposing the private track storage.
+    pub fn entries(&self) -> impl ExactSizeIterator<Item = (TrackId, &Path)> + '_ {
+        self.tracks
+            .iter()
+            .map(|track| (track.id, track.path.as_path()))
+    }
+
+    /// Remove every entry whose stable ID is in `remove`; returns how many were removed. The current
+    /// track follows the same "nearest survivor" rule as single [`Self::remove`] when it is deleted,
+    /// and navigation history forgets only the removed identities. This is the playlist editor's
+    /// "Remove selected".
+    pub fn remove_ids(&mut self, remove: &[TrackId]) -> usize {
+        let set: HashSet<TrackId> = remove.iter().copied().collect();
+        self.remove_where(|id| set.contains(&id))
+    }
+
+    /// Keep only the entries whose stable ID is in `keep`, removing the rest; returns how many were
+    /// removed. This is the playlist editor's "Crop" (keep the selection, drop everything else).
+    pub fn retain_ids(&mut self, keep: &[TrackId]) -> usize {
+        let set: HashSet<TrackId> = keep.iter().copied().collect();
+        self.remove_where(|id| !set.contains(&id))
+    }
+
+    /// Reorder the display to place the named IDs first, in the given order; any live entry not named
+    /// in `order` keeps its relative position after them. The current track and Back/Forward history
+    /// are stored by stable ID, so they follow the reorder untouched. This is the primitive behind
+    /// sort-by-key and randomize, whose ordering is computed by the caller from the paths.
+    pub fn set_order(&mut self, order: &[TrackId]) {
+        let want: HashSet<TrackId> = order.iter().copied().collect();
+        let original = std::mem::take(&mut self.tracks);
+        let mut leftover: Vec<TrackId> = Vec::new();
+        let mut by_id: HashMap<TrackId, Track> = HashMap::with_capacity(original.len());
+        for track in original {
+            if !want.contains(&track.id) {
+                leftover.push(track.id);
+            }
+            by_id.insert(track.id, track);
+        }
+        let mut result = Vec::with_capacity(by_id.len());
+        for id in order.iter().chain(leftover.iter()) {
+            if let Some(track) = by_id.remove(id) {
+                result.push(track);
+            }
+        }
+        self.tracks = result;
+    }
+
+    /// Reverse the display order. Current and history follow by stable ID.
+    pub fn reverse(&mut self) {
+        self.tracks.reverse();
+    }
+
+    /// Retain entries for which `keep` returns false-to-remove, preserving order, fixing the current
+    /// track to the nearest survivor of its old position, and pruning history. Shared by
+    /// [`Self::remove_ids`] and [`Self::retain_ids`].
+    fn remove_where(&mut self, mut should_remove: impl FnMut(TrackId) -> bool) -> usize {
+        let current_old = self.current.and_then(|id| self.index_of(id));
+        let mut removed: HashSet<TrackId> = HashSet::new();
+        let mut kept_before_current = 0usize;
+        let mut kept: Vec<Track> = Vec::with_capacity(self.tracks.len());
+        for (index, track) in std::mem::take(&mut self.tracks).into_iter().enumerate() {
+            if should_remove(track.id) {
+                removed.insert(track.id);
+            } else {
+                if current_old.is_some_and(|old| index < old) {
+                    kept_before_current += 1;
+                }
+                kept.push(track);
+            }
+        }
+        self.tracks = kept;
+        self.history.retain(|id| !removed.contains(id));
+        self.future.retain(|id| !removed.contains(id));
+        if self.current.is_some_and(|id| removed.contains(&id)) {
+            self.current = if self.tracks.is_empty() {
+                None
+            } else {
+                let index = kept_before_current.min(self.tracks.len() - 1);
+                self.tracks.get(index).map(|track| track.id)
+            };
+        }
+        removed.len()
+    }
+
     /// Whether repeat-all is on.
     pub fn repeat(&self) -> bool {
         self.repeat
@@ -693,6 +778,88 @@ mod tests {
         assert_eq!(p.current_index(), Some(0));
         assert_eq!(p.current(), Some(Path::new("a.mp3")));
         assert!(!p.is_empty());
+    }
+
+    fn names(p: &Playlist) -> Vec<String> {
+        p.tracks()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn remove_ids_drops_the_selection_and_keeps_current_on_a_survivor() {
+        let mut p = pl(&["a", "b", "c", "d", "e"]);
+        p.select(2); // current = "c"
+        let b = p.track_id(1).unwrap();
+        let d = p.track_id(3).unwrap();
+        assert_eq!(p.remove_ids(&[b, d]), 2);
+        assert_eq!(names(&p), ["a", "c", "e"]);
+        assert_eq!(p.current(), Some(Path::new("c")), "current survives in place");
+    }
+
+    #[test]
+    fn removing_the_current_track_falls_to_the_nearest_survivor() {
+        let mut p = pl(&["a", "b", "c", "d"]);
+        p.select(2); // current = "c"
+        let c = p.track_id(2).unwrap();
+        p.remove_ids(&[c]);
+        assert_eq!(names(&p), ["a", "b", "d"]);
+        assert_eq!(p.current(), Some(Path::new("d")), "the entry that shifted in");
+
+        // Removing the (new) last current falls back to the previous final entry.
+        let d = p.track_id(2).unwrap();
+        p.remove_ids(&[d]);
+        assert_eq!(p.current(), Some(Path::new("b")));
+
+        // Removing everything clears the current selection.
+        let all: Vec<_> = p.ids().collect();
+        p.remove_ids(&all);
+        assert!(p.is_empty());
+        assert_eq!(p.current_id(), None);
+    }
+
+    #[test]
+    fn retain_ids_crops_to_the_selection() {
+        let mut p = pl(&["a", "b", "c", "d", "e"]);
+        let b = p.track_id(1).unwrap();
+        let d = p.track_id(3).unwrap();
+        assert_eq!(p.retain_ids(&[b, d]), 3);
+        assert_eq!(names(&p), ["b", "d"]);
+    }
+
+    #[test]
+    fn set_order_sorts_by_a_caller_key_and_keeps_current_by_identity() {
+        let mut p = pl(&["charlie", "alpha", "bravo"]);
+        p.select(0); // current = "charlie"
+        let mut sorted: Vec<_> = p.entries().map(|(id, path)| (path.to_owned(), id)).collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let order: Vec<TrackId> = sorted.into_iter().map(|(_, id)| id).collect();
+        p.set_order(&order);
+        assert_eq!(names(&p), ["alpha", "bravo", "charlie"]);
+        assert_eq!(
+            p.current(),
+            Some(Path::new("charlie")),
+            "current follows its stable id across the reorder"
+        );
+    }
+
+    #[test]
+    fn set_order_appends_unnamed_live_entries_after_the_named_ones() {
+        let mut p = pl(&["a", "b", "c", "d"]);
+        // Name only c then a; b and d keep their relative order at the end.
+        let c = p.track_id(2).unwrap();
+        let a = p.track_id(0).unwrap();
+        p.set_order(&[c, a]);
+        assert_eq!(names(&p), ["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn reverse_flips_display_order_and_current_follows() {
+        let mut p = pl(&["a", "b", "c"]);
+        p.select(0);
+        p.reverse();
+        assert_eq!(names(&p), ["c", "b", "a"]);
+        assert_eq!(p.current(), Some(Path::new("a")));
     }
 
     #[test]

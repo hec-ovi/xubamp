@@ -157,6 +157,7 @@ impl<A> Default for Menu<A> {
 /// not support have no action variant and are not placed in any constructor below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassicMenuAction {
+    OpenMedia,
     Play,
     ToggleMainWindow,
     ToggleEqualizer,
@@ -168,9 +169,7 @@ pub enum ClassicMenuAction {
     ToggleDoubleSize,
     ToggleRepeat,
     ToggleShuffle,
-    OpenVisualizationSettings,
-    OpenDisplaySettings,
-    OpenAudioLibrarySettings,
+    OpenPreferences,
     Previous,
     Pause,
     Stop,
@@ -227,34 +226,33 @@ impl Default for MainMenuState {
 pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
     let skins = Menu::new(vec![
         MenuItem::action("Load Skin...", ClassicMenuAction::LoadSkin),
-        MenuItem::action("Base Skin", ClassicMenuAction::UseBaseSkin),
+        MenuItem::separator(),
+        MenuItem::action("<Base Skin>", ClassicMenuAction::UseBaseSkin),
     ]);
     let options = Menu::new(vec![
-        MenuItem::action("Elapsed Time", ClassicMenuAction::ShowElapsedTime)
-            .with_mark(ItemMark::Radio(state.time_display == TimeDisplay::Elapsed)),
-        MenuItem::action("Remaining Time", ClassicMenuAction::ShowRemainingTime).with_mark(
-            ItemMark::Radio(state.time_display == TimeDisplay::Remaining),
-        ),
+        MenuItem::action("Preferences...", ClassicMenuAction::OpenPreferences)
+            .with_shortcut("Ctrl+P"),
         MenuItem::separator(),
+        MenuItem::submenu("Skins", skins.clone()),
+        MenuItem::separator(),
+        MenuItem::action("Time elapsed", ClassicMenuAction::ShowElapsedTime)
+            .with_shortcut("(Ctrl+T toggles)")
+            .with_mark(ItemMark::Radio(state.time_display == TimeDisplay::Elapsed)),
+        MenuItem::action("Time remaining", ClassicMenuAction::ShowRemainingTime)
+            .with_shortcut("(Ctrl+T toggles)")
+            .with_mark(ItemMark::Radio(
+                state.time_display == TimeDisplay::Remaining,
+            )),
         MenuItem::action("Double Size", ClassicMenuAction::ToggleDoubleSize)
+            .with_shortcut("Ctrl+D")
             .with_mark(ItemMark::Check(state.double_size)),
+        MenuItem::separator(),
         MenuItem::action("Repeat", ClassicMenuAction::ToggleRepeat)
+            .with_shortcut("R")
             .with_mark(ItemMark::Check(state.repeat)),
         MenuItem::action("Shuffle", ClassicMenuAction::ToggleShuffle)
+            .with_shortcut("S")
             .with_mark(ItemMark::Check(state.shuffle)),
-        MenuItem::separator(),
-        MenuItem::action(
-            "Visualization Settings...",
-            ClassicMenuAction::OpenVisualizationSettings,
-        ),
-        MenuItem::action(
-            "Display Settings...",
-            ClassicMenuAction::OpenDisplaySettings,
-        ),
-        MenuItem::action(
-            "Audio Library Settings...",
-            ClassicMenuAction::OpenAudioLibrarySettings,
-        ),
     ]);
     let playback = Menu::new(vec![
         MenuItem::action("Previous", ClassicMenuAction::Previous).with_shortcut("Z"),
@@ -263,15 +261,24 @@ pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
         MenuItem::action("Stop", ClassicMenuAction::Stop).with_shortcut("V"),
         MenuItem::action("Next", ClassicMenuAction::Next).with_shortcut("B"),
         MenuItem::separator(),
-        MenuItem::action("Back 5 Seconds", ClassicMenuAction::BackFiveSeconds),
-        MenuItem::action("Forward 5 Seconds", ClassicMenuAction::ForwardFiveSeconds),
-        MenuItem::separator(),
-        MenuItem::action("Back 10 Tracks", ClassicMenuAction::BackTenTracks),
-        MenuItem::action("Forward 10 Tracks", ClassicMenuAction::ForwardTenTracks),
+        MenuItem::action("Back 5 seconds", ClassicMenuAction::BackFiveSeconds)
+            .with_shortcut("Left"),
+        MenuItem::action("Fwd 5 seconds", ClassicMenuAction::ForwardFiveSeconds)
+            .with_shortcut("Right"),
+        MenuItem::action("10 tracks back", ClassicMenuAction::BackTenTracks)
+            .with_shortcut("Num. 1"),
+        MenuItem::action("10 tracks fwd", ClassicMenuAction::ForwardTenTracks)
+            .with_shortcut("Num. 3"),
     ]);
+    let play = Menu::new(vec![MenuItem::action(
+        "File...",
+        ClassicMenuAction::OpenMedia,
+    )
+    .with_shortcut("L")]);
 
     Menu::new(vec![
-        MenuItem::action("Play", ClassicMenuAction::Play),
+        MenuItem::submenu("Play", play),
+        MenuItem::separator(),
         MenuItem::action("Main Window", ClassicMenuAction::ToggleMainWindow)
             .with_mark(ItemMark::Check(state.main_window_open)),
         MenuItem::action("Equalizer", ClassicMenuAction::ToggleEqualizer)
@@ -280,6 +287,7 @@ pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
             .with_mark(ItemMark::Check(state.playlist_open)),
         MenuItem::separator(),
         MenuItem::submenu("Skins", skins),
+        MenuItem::separator(),
         MenuItem::submenu("Options", options),
         MenuItem::submenu("Playback", playback),
         MenuItem::separator(),
@@ -1117,15 +1125,34 @@ mod tests {
         );
         assert_eq!(
             labels(submenu(&menu, "Skins")),
-            ["Load Skin...", "Base Skin"]
+            ["Load Skin...", "<Base Skin>"]
         );
         let options = submenu(&menu, "Options");
-        assert!(labels(options).contains(&"Audio Library Settings..."));
-        assert_eq!(options.items[0].state.mark, ItemMark::Radio(false));
-        assert_eq!(options.items[1].state.mark, ItemMark::Radio(true));
-        assert_eq!(options.items[3].state.mark, ItemMark::Check(true));
-        assert_eq!(options.items[4].state.mark, ItemMark::Check(true));
-        assert_eq!(options.items[5].state.mark, ItemMark::Check(true));
+        assert_eq!(
+            labels(options),
+            [
+                "Preferences...",
+                "Skins",
+                "Load Skin...",
+                "<Base Skin>",
+                "Time elapsed",
+                "Time remaining",
+                "Double Size",
+                "Repeat",
+                "Shuffle"
+            ]
+        );
+        assert_eq!(options.items[0].shortcut.as_deref(), Some("Ctrl+P"));
+        assert_eq!(options.items[4].state.mark, ItemMark::Radio(false));
+        assert_eq!(options.items[5].state.mark, ItemMark::Radio(true));
+        assert_eq!(options.items[6].state.mark, ItemMark::Check(true));
+        assert_eq!(options.items[8].state.mark, ItemMark::Check(true));
+        assert_eq!(options.items[9].state.mark, ItemMark::Check(true));
+        assert_eq!(
+            options.items[4].shortcut.as_deref(),
+            Some("(Ctrl+T toggles)")
+        );
+        assert_eq!(options.items[6].shortcut.as_deref(), Some("Ctrl+D"));
 
         let all = labels(&menu).join("|").to_ascii_lowercase();
         for omitted in [
@@ -1151,12 +1178,13 @@ mod tests {
                 "Pause",
                 "Stop",
                 "Next",
-                "Back 5 Seconds",
-                "Forward 5 Seconds",
-                "Back 10 Tracks",
-                "Forward 10 Tracks"
+                "Back 5 seconds",
+                "Fwd 5 seconds",
+                "10 tracks back",
+                "10 tracks fwd"
             ]
         );
+        assert_eq!(labels(submenu(&menu, "Play")), ["File..."]);
         assert_eq!(
             labels(&playlist_add_menu()),
             ["URL...", "Directory...", "File..."]

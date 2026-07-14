@@ -26,7 +26,7 @@ use smithay_client_toolkit::{
     seat::{
         pointer::{
             CursorIcon, PointerData, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec,
-            ThemedPointer, BTN_LEFT,
+            ThemedPointer, BTN_LEFT, BTN_RIGHT,
         },
         Capability, SeatHandler, SeatState,
     },
@@ -260,6 +260,7 @@ struct EqualizerWin {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PopupOwner {
+    Main,
     EqualizerPresets,
     PlaylistAdd,
 }
@@ -664,9 +665,10 @@ impl App {
                 hit::TitleButton::Close => self.exit = true,
                 hit::TitleButton::Minimize => self.window.set_minimized(),
                 hit::TitleButton::Shade => self.toggle_shade(),
-                // The main menu is a later phase; the button still shows its pressed feedback, but
-                // the action is a no-op for now.
-                hit::TitleButton::Options => eprintln!("xubamp: main menu not implemented yet"),
+                hit::TitleButton::Options => self.open_main_menu_at(panes::Point {
+                    x: xubamp_skin::sprites::TITLE_BUTTONS_PRESSED[0].dst_x,
+                    y: hit::TITLEBAR_H,
+                }),
             }
         }
         if let Some(t) = outcome.toggle {
@@ -1114,6 +1116,21 @@ impl App {
         );
     }
 
+    fn open_main_menu_at(&mut self, position: panes::Point) {
+        let model = menu::main_menu(menu::MainMenuState {
+            main_window_open: true,
+            equalizer_open: self.equalizer.is_some(),
+            playlist_open: self.playlist.is_some(),
+            repeat: self.state.repeat_on,
+            shuffle: self.state.shuffle_on,
+            ..menu::MainMenuState::default()
+        });
+        let mut interaction = menu::MenuInteraction::default();
+        interaction.open(&model);
+        let fb = menu::compose(&model, &interaction);
+        self.open_popup_menu(PopupOwner::Main, model, interaction, fb, position);
+    }
+
     fn open_playlist_add_menu(&mut self) {
         if self.playlist_state.shade {
             return;
@@ -1206,6 +1223,39 @@ impl App {
 
     fn activate_popup_action(&mut self, action: menu::ClassicMenuAction) {
         match action {
+            menu::ClassicMenuAction::OpenMedia => (self.on_menu)(MenuRequest::OpenMedia),
+            menu::ClassicMenuAction::Play => {
+                (self.on_command)(hit::Command::Transport(hit::Transport::Play));
+            }
+            menu::ClassicMenuAction::Previous => {
+                (self.on_command)(hit::Command::Transport(hit::Transport::Prev));
+            }
+            menu::ClassicMenuAction::Pause => {
+                (self.on_command)(hit::Command::Transport(hit::Transport::Pause));
+            }
+            menu::ClassicMenuAction::Stop => {
+                (self.on_command)(hit::Command::Transport(hit::Transport::Stop));
+            }
+            menu::ClassicMenuAction::Next => {
+                (self.on_command)(hit::Command::Transport(hit::Transport::Next));
+            }
+            menu::ClassicMenuAction::ToggleEqualizer => self.toggle_equalizer(),
+            menu::ClassicMenuAction::TogglePlaylistEditor => self.toggle_playlist(),
+            menu::ClassicMenuAction::ToggleRepeat => {
+                (self.on_command)(hit::Command::ToggleMode(hit::ModeButton::Repeat));
+            }
+            menu::ClassicMenuAction::ToggleShuffle => {
+                (self.on_command)(hit::Command::ToggleMode(hit::ModeButton::Shuffle));
+            }
+            menu::ClassicMenuAction::BackFiveSeconds => {
+                let outcome = hit::on_key(&mut self.state, hit::KeyPress::Left, false);
+                self.apply(outcome);
+            }
+            menu::ClassicMenuAction::ForwardFiveSeconds => {
+                let outcome = hit::on_key(&mut self.state, hit::KeyPress::Right, false);
+                self.apply(outcome);
+            }
+            menu::ClassicMenuAction::Exit => self.exit = true,
             menu::ClassicMenuAction::EqualizerLoadPreset(index) => {
                 let Some(preset) = self.equalizer_presets.get(index).cloned() else {
                     return;
@@ -2219,6 +2269,33 @@ impl PointerHandler for App {
             if on_popup {
                 self.popup_menu_pointer(conn, &event.kind, x, y);
                 continue;
+            }
+            if matches!(event.kind, PointerEventKind::Press { button, .. } if button == BTN_RIGHT) {
+                let position = if on_main {
+                    Some(panes::Point { x, y })
+                } else if let Some(equalizer) = self
+                    .equalizer
+                    .as_ref()
+                    .filter(|equalizer| event.surface == equalizer.surface)
+                {
+                    Some(panes::Point {
+                        x: equalizer.position.x + x,
+                        y: equalizer.position.y + y,
+                    })
+                } else {
+                    self.playlist
+                        .as_ref()
+                        .filter(|playlist| event.surface == playlist.surface)
+                        .map(|playlist| panes::Point {
+                            x: playlist.position.x + x,
+                            y: playlist.position.y + y,
+                        })
+                };
+                if let Some(position) = position {
+                    self.close_popup_menu();
+                    self.open_main_menu_at(position);
+                    continue;
+                }
             }
             if self.popup_menu.is_some()
                 && matches!(

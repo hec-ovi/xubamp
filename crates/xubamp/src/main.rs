@@ -356,8 +356,7 @@ fn main() {
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        let (portal_launcher, mut portal_receiver) =
-            portal_actions::bridge(settings.library.recurse);
+        let (portal_launcher, mut portal_receiver) = portal_actions::bridge();
         let tracks: Vec<std::path::PathBuf> =
             media_args.iter().map(std::path::PathBuf::from).collect();
         let equalizer = xubamp_audio::EqSettings {
@@ -558,8 +557,7 @@ fn main() {
         if !media_args.is_empty() {
             eprintln!("xubamp: built without audio; rebuild with `--features audio` to play files");
         }
-        let (portal_launcher, mut portal_receiver) =
-            portal_actions::bridge(settings.library.recurse);
+        let (portal_launcher, mut portal_receiver) = portal_actions::bridge();
         let on_command = {
             let portal_launcher = portal_launcher.clone();
             move |command: xubamp_render::hit::Command| {

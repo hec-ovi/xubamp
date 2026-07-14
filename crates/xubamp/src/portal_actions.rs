@@ -36,7 +36,6 @@ pub(crate) enum LaunchResult {
 pub(crate) struct Launcher {
     sender: mpsc::Sender<Completion>,
     busy: Arc<AtomicBool>,
-    recurse: bool,
 }
 
 pub(crate) struct Receiver {
@@ -44,14 +43,13 @@ pub(crate) struct Receiver {
     busy: Arc<AtomicBool>,
 }
 
-pub(crate) fn bridge(recurse: bool) -> (Launcher, Receiver) {
+pub(crate) fn bridge() -> (Launcher, Receiver) {
     let (sender, receiver) = mpsc::channel();
     let busy = Arc::new(AtomicBool::new(false));
     (
         Launcher {
             sender,
             busy: Arc::clone(&busy),
-            recurse,
         },
         Receiver { receiver, busy },
     )
@@ -74,12 +72,11 @@ impl Launcher {
 
         let sender = self.sender.clone();
         let busy = Arc::clone(&self.busy);
-        let recurse = self.recurse;
         let result = std::thread::Builder::new()
             .name("xubamp-portal".to_owned())
             .spawn(move || {
                 let _reset = BusyReset(Arc::clone(&busy));
-                match execute(request, recurse) {
+                match execute(request) {
                     Ok(Some(completion)) => {
                         let _ = sender.send(completion);
                     }
@@ -134,7 +131,7 @@ fn is_supported(request: &MenuRequest) -> bool {
     )
 }
 
-fn execute(request: MenuRequest, recurse: bool) -> Result<Option<Completion>, String> {
+fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
     let chooser = FileChooser::new();
     match request {
         MenuRequest::OpenMedia => chooser
@@ -159,10 +156,7 @@ fn execute(request: MenuRequest, recurse: bool) -> Result<Option<Completion>, St
             .map_err(|error| format!("cannot open directory chooser: {error}"))
             .map(|result| match result {
                 DialogResult::Selected(root) => {
-                    let report = xubamp_library::scan(
-                        &root,
-                        xubamp_library::ScanOptions { recursive: recurse },
-                    );
+                    let report = xubamp_library::scan(&root, playlist_directory_scan_options());
                     Some(Completion::AddPaths {
                         paths: report.tracks,
                         warnings: report
@@ -221,6 +215,12 @@ fn execute(request: MenuRequest, recurse: bool) -> Result<Option<Completion>, St
         }
         _ => Ok(None),
     }
+}
+
+/// Playlist Add Directory is a one-shot recursive import. Library recursion is a separate catalog
+/// preference and must never change what this classic playlist command discovers.
+fn playlist_directory_scan_options() -> xubamp_library::ScanOptions {
+    xubamp_library::ScanOptions { recursive: true }
 }
 
 /// Create and sync an adjacent temporary file before replacing the destination. This prevents a
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn unsupported_menu_actions_do_not_start_a_worker() {
-        let (launcher, mut receiver) = bridge(true);
+        let (launcher, mut receiver) = bridge();
         assert_eq!(
             launcher.launch(MenuRequest::Action(ClassicMenuAction::PlaylistAddUrl)),
             LaunchResult::Unsupported
@@ -317,5 +317,10 @@ mod tests {
         let (completions, pending) = receiver.poll();
         assert!(completions.is_empty());
         assert!(!pending);
+    }
+
+    #[test]
+    fn playlist_directory_add_is_always_recursive() {
+        assert!(playlist_directory_scan_options().recursive);
     }
 }

@@ -134,6 +134,7 @@ pub struct Runtime {
     sample_source: SampleSource,
     playlist_source: PlaylistSource,
     external_source: ExternalSource,
+    ui_options: UiOptions,
 }
 
 impl Runtime {
@@ -155,6 +156,7 @@ impl Runtime {
             sample_source: Box::new(sample_source),
             playlist_source: Box::new(playlist_source),
             external_source: Box::new(ExternalPoll::default),
+            ui_options: UiOptions::default(),
         }
     }
 
@@ -163,6 +165,18 @@ impl Runtime {
         self.external_source = Box::new(source);
         self
     }
+
+    /// Restore user-facing display choices before the first frame is composed.
+    pub fn with_ui_options(mut self, options: UiOptions) -> Self {
+        self.ui_options = options;
+        self
+    }
+}
+
+/// Display choices owned by the window layer and persisted by the application after the session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UiOptions {
+    pub time_display: hit::TimeDisplay,
 }
 
 /// Persistable pane layout restored before the first mapped frame. Positions are relative to the
@@ -187,6 +201,7 @@ pub struct SessionState {
     pub equalizer_shaded: bool,
     pub equalizer_preamp_db: f32,
     pub equalizer_bands_db: [f32; 10],
+    pub time_display: hit::TimeDisplay,
 }
 
 impl Default for PaneLayout {
@@ -369,6 +384,7 @@ pub fn run(
     let state = hit::UiState {
         title,
         shade: pane_layout.main_shaded,
+        time_display: runtime.ui_options.time_display,
         ..Default::default()
     };
     let fb = compose_main_window(&skin, &state);
@@ -632,6 +648,7 @@ impl App {
             equalizer_shaded: self.equalizer_state.shade,
             equalizer_preamp_db: self.equalizer_state.preamp_db,
             equalizer_bands_db: self.equalizer_state.bands_db,
+            time_display: self.state.time_display,
         }
     }
 
@@ -1135,6 +1152,10 @@ impl App {
             playlist_open: self.playlist.is_some(),
             repeat: self.state.repeat_on,
             shuffle: self.state.shuffle_on,
+            time_display: match self.state.time_display {
+                hit::TimeDisplay::Elapsed => menu::TimeDisplay::Elapsed,
+                hit::TimeDisplay::Remaining => menu::TimeDisplay::Remaining,
+            },
             ..menu::MainMenuState::default()
         });
         let mut interaction = menu::MenuInteraction::default();
@@ -1267,6 +1288,12 @@ impl App {
                 let outcome = hit::on_key(&mut self.state, hit::KeyPress::Right, false);
                 self.apply(outcome);
             }
+            menu::ClassicMenuAction::ShowElapsedTime => {
+                self.set_time_display(hit::TimeDisplay::Elapsed);
+            }
+            menu::ClassicMenuAction::ShowRemainingTime => {
+                self.set_time_display(hit::TimeDisplay::Remaining);
+            }
             menu::ClassicMenuAction::UseBaseSkin => {
                 self.replace_skin(default_skin());
                 (self.on_menu)(MenuRequest::Action(action));
@@ -1287,6 +1314,22 @@ impl App {
             }
             action => (self.on_menu)(MenuRequest::Action(action)),
         }
+    }
+
+    fn set_time_display(&mut self, display: hit::TimeDisplay) {
+        if self.state.time_display != display {
+            self.state.time_display = display;
+            self.redraw();
+        }
+    }
+
+    #[cfg(feature = "keyboard")]
+    fn toggle_time_display(&mut self) {
+        let display = match self.state.time_display {
+            hit::TimeDisplay::Elapsed => hit::TimeDisplay::Remaining,
+            hit::TimeDisplay::Remaining => hit::TimeDisplay::Elapsed,
+        };
+        self.set_time_display(display);
     }
 
     fn popup_menu_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
@@ -2510,8 +2553,18 @@ impl App {
             return;
         }
         // Plain shortcuts only (Shift/Caps merely change letter case). A Ctrl/Alt/Super chord is
-        // left for the compositor or a later binding, so e.g. Ctrl+X never triggers Play.
+        // otherwise left for the compositor, so e.g. Ctrl+X never triggers Play. Ctrl+T is the
+        // classic clock-mode toggle and fires once rather than repeating while held.
         let m = self.modifiers;
+        if m.ctrl
+            && !m.alt
+            && !m.logo
+            && !is_repeat
+            && matches!(event.keysym, Keysym::t | Keysym::T)
+        {
+            self.toggle_time_display();
+            return;
+        }
         if m.ctrl || m.alt || m.logo {
             return;
         }

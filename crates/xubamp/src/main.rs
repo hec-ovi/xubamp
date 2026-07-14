@@ -173,6 +173,20 @@ fn persist_skin_path(
     }
 }
 
+fn ui_time_display(display: xubamp_config::TimeDisplay) -> xubamp_render::hit::TimeDisplay {
+    match display {
+        xubamp_config::TimeDisplay::Elapsed => xubamp_render::hit::TimeDisplay::Elapsed,
+        xubamp_config::TimeDisplay::Remaining => xubamp_render::hit::TimeDisplay::Remaining,
+    }
+}
+
+fn config_time_display(display: xubamp_render::hit::TimeDisplay) -> xubamp_config::TimeDisplay {
+    match display {
+        xubamp_render::hit::TimeDisplay::Elapsed => xubamp_config::TimeDisplay::Elapsed,
+        xubamp_render::hit::TimeDisplay::Remaining => xubamp_config::TimeDisplay::Remaining,
+    }
+}
+
 /// Copy the final, user-visible window and equalizer state out of the Wayland event loop before the
 /// settings file is saved. Runtime-only hover/drag state never crosses this boundary.
 fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::SessionState) {
@@ -192,6 +206,7 @@ fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::
     settings.equalizer.enabled = session.equalizer_enabled;
     settings.equalizer.preamp_db = session.equalizer_preamp_db;
     settings.equalizer.bands_db = session.equalizer_bands_db;
+    settings.display.time = config_time_display(session.time_display);
 }
 
 fn classic_equalizer_presets() -> Vec<xubamp_render::equalizer::Preset> {
@@ -302,6 +317,9 @@ fn main() {
             settings.windows.playlist.height,
         ),
     };
+    let ui_options = xubamp_wl::UiOptions {
+        time_display: ui_time_display(settings.display.time),
+    };
     let equalizer_presets = classic_equalizer_presets();
 
     // Debug affordance / seed for the later headless render-diff harness: dump the raw RGBA the
@@ -312,6 +330,7 @@ fn main() {
     if let Ok(path) = std::env::var("XUBAMP_DUMP_RGBA") {
         let mut state = xubamp_render::hit::UiState {
             title: std::env::var("XUBAMP_TITLE").unwrap_or_else(|_| title.clone()),
+            time_display: ui_options.time_display,
             ..Default::default()
         };
         if let Some(v) = std::env::var("XUBAMP_VOLUME")
@@ -554,6 +573,7 @@ fn main() {
                 sample_source,
                 playlist_source,
             )
+            .with_ui_options(ui_options)
             .with_external_source(external_source),
         );
         if let Ok(session) = result.as_ref() {
@@ -683,6 +703,7 @@ fn main() {
                 sample_source,
                 playlist_source,
             )
+            .with_ui_options(ui_options)
             .with_external_source(external_source),
         ) {
             Ok(session) => {
@@ -704,9 +725,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_ui_session, classic_equalizer_presets, classify, persist_playback_modes,
-        persist_skin_path, preferred_skin_path, track_title, transport_opens_media, transport_ops,
-        EngineOp, TransportState, DEV_SKIN,
+        apply_ui_session, classic_equalizer_presets, classify, config_time_display,
+        persist_playback_modes, persist_skin_path, preferred_skin_path, track_title,
+        transport_opens_media, transport_ops, ui_time_display, EngineOp, TransportState, DEV_SKIN,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -832,6 +853,7 @@ mod tests {
             equalizer_shaded: true,
             equalizer_preamp_db: 3.5,
             equalizer_bands_db: [-12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 1.5],
+            time_display: xubamp_render::hit::TimeDisplay::Remaining,
         };
 
         apply_ui_session(&mut settings, session);
@@ -857,11 +879,22 @@ mod tests {
         assert!(!settings.equalizer.enabled);
         assert_eq!(settings.equalizer.preamp_db, 3.5);
         assert_eq!(settings.equalizer.bands_db, session.equalizer_bands_db);
+        assert_eq!(settings.display.time, xubamp_config::TimeDisplay::Remaining);
         assert!(
             settings.playback.shuffle,
             "unrelated playback state is kept"
         );
         assert_eq!(settings.skin_path, Some(PathBuf::from("/skins/kept.wsz")));
+    }
+
+    #[test]
+    fn config_and_render_time_modes_round_trip_without_loss() {
+        for config in [
+            xubamp_config::TimeDisplay::Elapsed,
+            xubamp_config::TimeDisplay::Remaining,
+        ] {
+            assert_eq!(config_time_display(ui_time_display(config)), config);
+        }
     }
 
     #[test]

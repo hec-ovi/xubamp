@@ -713,9 +713,15 @@ impl Player {
         match &self.engine {
             Some(engine) => {
                 let h = engine.handle();
+                // Once a track has played out at a hard playlist end, show 0:00 with the seek bar
+                // rewound rather than parked at the end. The decoder itself stays at the end (the
+                // next Play restarts from the top), so this is a display-only reset with no seek of
+                // a drained ring. Auto-advance replaces the finished engine before this is read, so
+                // `is_finished` is only true at a real end-of-playlist stop.
+                let finished = h.is_finished();
                 Playback {
-                    elapsed: Some(h.elapsed_secs()),
-                    position: h.position_fraction(),
+                    elapsed: Some(if finished { 0 } else { h.elapsed_secs() }),
+                    position: if finished { Some(0.0) } else { h.position_fraction() },
                     duration: h.duration_secs(),
                     playing: h.is_playing(),
                     stopped: self.stopped,
@@ -1095,7 +1101,7 @@ mod tests {
 
     #[test]
     #[ignore = "needs a running PipeWire session"]
-    fn a_single_track_stops_at_the_end_without_rewinding() {
+    fn a_single_track_stops_and_resets_the_shown_clock_at_the_end() {
         let path = std::env::temp_dir().join("xubamp_player_eos.wav");
         write_wav(&path, 48_000, 1); // one second, finishes quickly
         let mut player = Player::new(vec![path.clone()]);
@@ -1116,21 +1122,24 @@ mod tests {
             thread::sleep(Duration::from_millis(30));
         }
 
-        // The hard end is handled once, but the decoder/clock remains at the final position. This is
-        // distinct from pressing Stop, which explicitly rewinds to zero.
+        // The hard end is handled once. The decoder stays parked at the end (the next Play restarts
+        // from the top), but the shown clock and seek bar reset to zero rather than sitting at the
+        // end, so a finished playlist reads as 0:00 with the thumb rewound.
         thread::sleep(Duration::from_millis(400));
         player.poll();
         let pb = player.playback();
         assert!(!pb.playing, "stopped at the end, not left playing");
         assert!(pb.stopped, "the end-of-playlist stop holds");
-        assert!(
-            pb.position.unwrap_or(0.0) > 0.95,
-            "position remains at the end ({:?})",
+        assert_eq!(
+            pb.position,
+            Some(0.0),
+            "the seek bar resets to the start on finish ({:?})",
             pb.position
         );
-        assert!(
-            pb.elapsed.unwrap_or(0) >= 1,
-            "clock remains at the end ({:?})",
+        assert_eq!(
+            pb.elapsed,
+            Some(0),
+            "the clock resets to 0:00 on finish ({:?})",
             pb.elapsed
         );
 

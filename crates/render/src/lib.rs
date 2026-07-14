@@ -16,6 +16,7 @@ pub mod marquee;
 pub mod menu;
 pub mod pledit;
 pub mod posbar;
+pub mod preferences;
 pub mod shade;
 pub mod slider;
 pub mod vis;

@@ -14,6 +14,7 @@ pub mod jump;
 pub mod marquee;
 pub mod pledit;
 pub mod posbar;
+pub mod shade;
 pub mod slider;
 pub mod vis;
 
@@ -63,7 +64,7 @@ pub fn blit(fb: &mut Framebuffer, src: &Image, rect: Rect, dst_x: i32, dst_y: i3
     }
 }
 
-fn blit_placement(fb: &mut Framebuffer, sheet: &Image, p: Placement) {
+pub(crate) fn blit_placement(fb: &mut Framebuffer, sheet: &Image, p: Placement) {
     blit(fb, sheet, p.src, p.dst_x, p.dst_y);
 }
 
@@ -86,6 +87,10 @@ pub fn mmss_digits(secs: u32) -> [u8; 4] {
 /// held. Missing sheets are simply skipped (their pixels stay whatever the lower layer left),
 /// which is the default-skin fallback point.
 pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
+    // Collapsed (windowshade) mode is just the title strip, composed separately.
+    if state.shade {
+        return shade::compose(skin, state);
+    }
     let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
     if let Some(main) = &skin.main {
         blit_placement(&mut fb, main, sprites::MAIN_BG);
@@ -95,7 +100,10 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
         // A held title-bar button shows its pressed sprite over the strip (its up graphic is
         // already baked into the strip).
         if let Some(b) = state.pressed_title {
-            let idx = hit::TITLE_BUTTON_ORDER.iter().position(|&t| t == b).unwrap();
+            let idx = hit::TITLE_BUTTON_ORDER
+                .iter()
+                .position(|&t| t == b)
+                .unwrap();
             blit_placement(&mut fb, titlebar, sprites::TITLE_BUTTONS_PRESSED[idx]);
         }
     }
@@ -194,10 +202,24 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     // is loaded. They share the marquee's font sheet.
     if let Some(text) = &skin.text {
         if let Some(kbps) = state.kbps {
-            draw_small_number(&mut fb, text, kbps, sprites::KBPS_X, sprites::KBPS_Y, sprites::KBPS_DIGITS);
+            draw_small_number(
+                &mut fb,
+                text,
+                kbps,
+                sprites::KBPS_X,
+                sprites::KBPS_Y,
+                sprites::KBPS_DIGITS,
+            );
         }
         if let Some(khz) = state.khz {
-            draw_small_number(&mut fb, text, khz, sprites::KHZ_X, sprites::KHZ_Y, sprites::KHZ_DIGITS);
+            draw_small_number(
+                &mut fb,
+                text,
+                khz,
+                sprites::KHZ_X,
+                sprites::KHZ_Y,
+                sprites::KHZ_DIGITS,
+            );
         }
     }
     // Mono/stereo indicator: both words are drawn; the one matching the channel count is lit, the
@@ -223,7 +245,14 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
 
 /// Draw `value` as small `text.bmp` digits, left-aligned at (`x`, `y`) and clipped to `max_digits`
 /// (matching the classic fixed-width field). Non-digit chars are skipped.
-fn draw_small_number(fb: &mut Framebuffer, text: &Image, value: u32, x: i32, y: i32, max_digits: usize) {
+fn draw_small_number(
+    fb: &mut Framebuffer,
+    text: &Image,
+    value: u32,
+    x: i32,
+    y: i32,
+    max_digits: usize,
+) {
     for (i, ch) in value.to_string().chars().take(max_digits).enumerate() {
         if let Some(cell) = textfont::cell(ch) {
             blit(fb, text, cell, x + i as i32 * textfont::ADVANCE, y);
@@ -281,6 +310,34 @@ mod tests {
     }
 
     #[test]
+    fn compose_collapses_to_the_title_strip_in_shade_mode() {
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            titlebar: Some(solid(344, 87, GREEN)),
+            ..Default::default()
+        };
+        // Shade mode dispatches to the compact strip (275x14); expanded is the full window.
+        let shaded = compose_main_window(
+            &skin,
+            &hit::UiState {
+                shade: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            (shaded.width, shaded.height),
+            (275, 14),
+            "shade collapses to the strip"
+        );
+        let full = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(
+            (full.width, full.height),
+            (275, 116),
+            "expanded is the full window"
+        );
+    }
+
+    #[test]
     fn transport_buttons_land_on_their_rects() {
         let skin = Skin {
             main: Some(solid(275, 116, RED)),
@@ -317,7 +374,11 @@ mod tests {
         };
         let fb = compose_main_window(&skin, &state);
         // Play (dst 39,88) is pressed -> sampled from the WHITE bottom row.
-        assert_eq!(px(&fb, 39 + 11, 88 + 9), [255, 255, 255, 255], "play pressed");
+        assert_eq!(
+            px(&fb, 39 + 11, 88 + 9),
+            [255, 255, 255, 255],
+            "play pressed"
+        );
         // Stop (dst 85,88) is not pressed -> still the BLUE normal row.
         assert_eq!(px(&fb, 85 + 11, 88 + 9), [0, 0, 255, 255], "stop normal");
     }
@@ -339,14 +400,22 @@ mod tests {
         };
         // Idle: the close area shows the (blue) strip, no pressed sprite.
         let idle = compose_main_window(&skin, &hit::UiState::default());
-        assert_eq!(px(&idle, 264 + 4, 3 + 4), [0, 0, 255, 255], "close area is the strip when idle");
+        assert_eq!(
+            px(&idle, 264 + 4, 3 + 4),
+            [0, 0, 255, 255],
+            "close area is the strip when idle"
+        );
         // Held: the WHITE down sprite is drawn at the close destination (264,3,9,9).
         let state = hit::UiState {
             pressed_title: Some(hit::TitleButton::Close),
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &state);
-        assert_eq!(px(&fb, 264 + 4, 3 + 4), [255, 255, 255, 255], "held close shows its pressed sprite");
+        assert_eq!(
+            px(&fb, 264 + 4, 3 + 4),
+            [255, 255, 255, 255],
+            "held close shows its pressed sprite"
+        );
     }
 
     #[test]
@@ -382,7 +451,9 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &state);
-        for (&(dx, dy), &d) in xubamp_skin::sprites::TIME_DIGITS.iter().zip([0u32, 1, 0, 5].iter())
+        for (&(dx, dy), &d) in xubamp_skin::sprites::TIME_DIGITS
+            .iter()
+            .zip([0u32, 1, 0, 5].iter())
         {
             let want = [(10 + d * 20) as u8, 0, 0, 255];
             let (cx, cy) = (dx as u32 + 4, dy as u32 + 6); // sample a pixel inside the cell
@@ -391,7 +462,11 @@ mod tests {
 
         // With no elapsed time the slots stay blank: the main background shows through.
         let blank = compose_main_window(&skin, &hit::UiState::default());
-        assert_eq!(px(&blank, 48 + 4, 26 + 6), RED, "blank display draws no digit");
+        assert_eq!(
+            px(&blank, 48 + 4, 26 + 6),
+            RED,
+            "blank display draws no digit"
+        );
     }
 
     #[test]
@@ -407,21 +482,53 @@ mod tests {
                 }
             }
         }
-        let skin = Skin { main: Some(solid(275, 116, RED)), text: Some(text), ..Default::default() };
-        let state = hit::UiState { kbps: Some(192), khz: Some(44), ..Default::default() };
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            text: Some(text),
+            ..Default::default()
+        };
+        let state = hit::UiState {
+            kbps: Some(192),
+            khz: Some(44),
+            ..Default::default()
+        };
         let fb = compose_main_window(&skin, &state);
         let color = |d: u32| [(10 + d * 20) as u8, 0, 0, 255];
         use xubamp_skin::sprites::{KBPS_X, KBPS_Y, KHZ_X, KHZ_Y};
         // kbps "192": digits at x=111,116,121 (y=43), sampled a couple pixels into each cell.
-        assert_eq!(px(&fb, KBPS_X as u32 + 2, KBPS_Y as u32 + 2), color(1), "kbps hundreds");
-        assert_eq!(px(&fb, KBPS_X as u32 + 7, KBPS_Y as u32 + 2), color(9), "kbps tens");
-        assert_eq!(px(&fb, KBPS_X as u32 + 12, KBPS_Y as u32 + 2), color(2), "kbps units");
+        assert_eq!(
+            px(&fb, KBPS_X as u32 + 2, KBPS_Y as u32 + 2),
+            color(1),
+            "kbps hundreds"
+        );
+        assert_eq!(
+            px(&fb, KBPS_X as u32 + 7, KBPS_Y as u32 + 2),
+            color(9),
+            "kbps tens"
+        );
+        assert_eq!(
+            px(&fb, KBPS_X as u32 + 12, KBPS_Y as u32 + 2),
+            color(2),
+            "kbps units"
+        );
         // khz "44": digits at x=156,161 (y=43).
-        assert_eq!(px(&fb, KHZ_X as u32 + 2, KHZ_Y as u32 + 2), color(4), "khz tens");
-        assert_eq!(px(&fb, KHZ_X as u32 + 7, KHZ_Y as u32 + 2), color(4), "khz units");
+        assert_eq!(
+            px(&fb, KHZ_X as u32 + 2, KHZ_Y as u32 + 2),
+            color(4),
+            "khz tens"
+        );
+        assert_eq!(
+            px(&fb, KHZ_X as u32 + 7, KHZ_Y as u32 + 2),
+            color(4),
+            "khz units"
+        );
         // Nothing loaded: the readouts stay blank.
         let blank = compose_main_window(&skin, &hit::UiState::default());
-        assert_eq!(px(&blank, KBPS_X as u32 + 2, KBPS_Y as u32 + 2), RED, "no kbps without a track");
+        assert_eq!(
+            px(&blank, KBPS_X as u32 + 2, KBPS_Y as u32 + 2),
+            RED,
+            "no kbps without a track"
+        );
     }
 
     #[test]
@@ -436,23 +543,50 @@ mod tests {
                 monoster.rgba[o..o + 4].copy_from_slice(&GREEN);
             }
         }
-        let skin =
-            Skin { main: Some(solid(275, 116, RED)), monoster: Some(monoster), ..Default::default() };
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            monoster: Some(monoster),
+            ..Default::default()
+        };
         let (mono_x, mono_y) = (MONO_LIT.dst_x as u32 + 3, MONO_LIT.dst_y as u32 + 3);
         let (stereo_x, stereo_y) = (STEREO_LIT.dst_x as u32 + 3, STEREO_LIT.dst_y as u32 + 3);
 
         // Stereo (2 channels): stereo lit (green), mono dim (blue).
-        let st = compose_main_window(&skin, &hit::UiState { channels: 2, ..Default::default() });
-        assert_eq!(px(&st, stereo_x, stereo_y), GREEN, "stereo lit for 2 channels");
+        let st = compose_main_window(
+            &skin,
+            &hit::UiState {
+                channels: 2,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            px(&st, stereo_x, stereo_y),
+            GREEN,
+            "stereo lit for 2 channels"
+        );
         assert_eq!(px(&st, mono_x, mono_y), BLUE, "mono dim for 2 channels");
         // Mono (1 channel): mono lit, stereo dim.
-        let mo = compose_main_window(&skin, &hit::UiState { channels: 1, ..Default::default() });
+        let mo = compose_main_window(
+            &skin,
+            &hit::UiState {
+                channels: 1,
+                ..Default::default()
+            },
+        );
         assert_eq!(px(&mo, mono_x, mono_y), GREEN, "mono lit for 1 channel");
-        assert_eq!(px(&mo, stereo_x, stereo_y), BLUE, "stereo dim for 1 channel");
+        assert_eq!(
+            px(&mo, stereo_x, stereo_y),
+            BLUE,
+            "stereo dim for 1 channel"
+        );
         // Nothing loaded (0 channels): both dim.
         let none = compose_main_window(&skin, &hit::UiState::default());
         assert_eq!(px(&none, mono_x, mono_y), BLUE, "mono dim with no track");
-        assert_eq!(px(&none, stereo_x, stereo_y), BLUE, "stereo dim with no track");
+        assert_eq!(
+            px(&none, stereo_x, stereo_y),
+            BLUE,
+            "stereo dim with no track"
+        );
     }
 
     #[test]
@@ -463,7 +597,10 @@ mod tests {
             text: Some(solid(155, 18, GREEN)),
             ..Default::default()
         };
-        let (mx, my) = (xubamp_skin::sprites::MARQUEE_X as u32, xubamp_skin::sprites::MARQUEE_Y as u32);
+        let (mx, my) = (
+            xubamp_skin::sprites::MARQUEE_X as u32,
+            xubamp_skin::sprites::MARQUEE_Y as u32,
+        );
 
         // With a title, the first glyph cell paints the marquee origin green.
         let playing = hit::UiState {
@@ -471,10 +608,18 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &playing);
-        assert_eq!(px(&fb, mx, my), GREEN, "title glyph drawn at the marquee origin");
+        assert_eq!(
+            px(&fb, mx, my),
+            GREEN,
+            "title glyph drawn at the marquee origin"
+        );
         // The glyph row is confined to CELL_H pixels: the rows just above and below stay the
         // red background, so a mis-sized cell (drawing above or below the strip) would be caught.
-        assert_eq!(px(&fb, mx, my - 1), RED, "nothing drawn above the glyph row");
+        assert_eq!(
+            px(&fb, mx, my - 1),
+            RED,
+            "nothing drawn above the glyph row"
+        );
         assert_eq!(
             px(&fb, mx, my + xubamp_skin::textfont::CELL_H as u32),
             RED,
@@ -483,7 +628,11 @@ mod tests {
 
         // With no title the strip is untouched: the red background shows through.
         let idle = compose_main_window(&skin, &hit::UiState::default());
-        assert_eq!(px(&idle, mx, my), RED, "empty title leaves the panel background");
+        assert_eq!(
+            px(&idle, mx, my),
+            RED,
+            "empty title leaves the panel background"
+        );
 
         // A skin without text.bmp never draws a marquee, even with a title set.
         let no_font = Skin {
@@ -512,7 +661,10 @@ mod tests {
             text: Some(solid(155, 18, GREEN)),
             ..Default::default()
         };
-        let (mx, my) = (xubamp_skin::sprites::MARQUEE_X as u32, xubamp_skin::sprites::MARQUEE_Y as u32);
+        let (mx, my) = (
+            xubamp_skin::sprites::MARQUEE_X as u32,
+            xubamp_skin::sprites::MARQUEE_Y as u32,
+        );
 
         // No title, not dragging: the marquee stays the background.
         let idle = compose_main_window(&skin, &hit::UiState::default());
@@ -525,7 +677,11 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &vol);
-        assert_eq!(px(&fb, mx, my), GREEN, "volume readout drawn while dragging");
+        assert_eq!(
+            px(&fb, mx, my),
+            GREEN,
+            "volume readout drawn while dragging"
+        );
 
         // Dragging balance paints its readout too.
         let bal = hit::UiState {
@@ -534,7 +690,11 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &bal);
-        assert_eq!(px(&fb, mx, my), GREEN, "balance readout drawn while dragging");
+        assert_eq!(
+            px(&fb, mx, my),
+            GREEN,
+            "balance readout drawn while dragging"
+        );
     }
 
     #[test]
@@ -549,10 +709,25 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &hit::UiState::default());
-        assert_eq!(px(&fb, sprites::VOLUME_X as u32, sprites::VOLUME_Y as u32), GREEN, "volume drawn");
-        assert_eq!(px(&fb, sprites::BALANCE_X as u32, sprites::BALANCE_Y as u32), GREEN, "balance drawn");
+        assert_eq!(
+            px(&fb, sprites::VOLUME_X as u32, sprites::VOLUME_Y as u32),
+            GREEN,
+            "volume drawn"
+        );
+        assert_eq!(
+            px(&fb, sprites::BALANCE_X as u32, sprites::BALANCE_Y as u32),
+            GREEN,
+            "balance drawn"
+        );
         // Between the two sliders the main background shows through.
-        assert_eq!(px(&fb, (sprites::VOLUME_X + sprites::VOLUME_W) as u32, sprites::VOLUME_Y as u32), RED);
+        assert_eq!(
+            px(
+                &fb,
+                (sprites::VOLUME_X + sprites::VOLUME_W) as u32,
+                sprites::VOLUME_Y as u32
+            ),
+            RED
+        );
 
         // A skin without the slider sheets draws neither.
         let bare = Skin {
@@ -560,8 +735,16 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&bare, &hit::UiState::default());
-        assert_eq!(px(&fb, sprites::VOLUME_X as u32, sprites::VOLUME_Y as u32), RED, "no volume sheet");
-        assert_eq!(px(&fb, sprites::BALANCE_X as u32, sprites::BALANCE_Y as u32), RED, "no balance sheet");
+        assert_eq!(
+            px(&fb, sprites::VOLUME_X as u32, sprites::VOLUME_Y as u32),
+            RED,
+            "no volume sheet"
+        );
+        assert_eq!(
+            px(&fb, sprites::BALANCE_X as u32, sprites::BALANCE_Y as u32),
+            RED,
+            "no balance sheet"
+        );
     }
 
     #[test]
@@ -575,10 +758,18 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&skin, &hit::UiState::default());
-        assert_eq!(px(&fb, sprites::POSBAR_X as u32, sprites::POSBAR_Y as u32), GREEN, "posbar drawn");
+        assert_eq!(
+            px(&fb, sprites::POSBAR_X as u32, sprites::POSBAR_Y as u32),
+            GREEN,
+            "posbar drawn"
+        );
         // Just below the 10px-tall bar the main background shows through.
         assert_eq!(
-            px(&fb, sprites::POSBAR_X as u32, (sprites::POSBAR_Y + sprites::POSBAR_H) as u32),
+            px(
+                &fb,
+                sprites::POSBAR_X as u32,
+                (sprites::POSBAR_Y + sprites::POSBAR_H) as u32
+            ),
             RED,
             "nothing drawn below the bar",
         );
@@ -589,7 +780,11 @@ mod tests {
             ..Default::default()
         };
         let fb = compose_main_window(&bare, &hit::UiState::default());
-        assert_eq!(px(&fb, sprites::POSBAR_X as u32, sprites::POSBAR_Y as u32), RED, "no posbar sheet");
+        assert_eq!(
+            px(&fb, sprites::POSBAR_X as u32, sprites::POSBAR_Y as u32),
+            RED,
+            "no posbar sheet"
+        );
     }
 
     #[test]

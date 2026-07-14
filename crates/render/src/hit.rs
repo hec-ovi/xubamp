@@ -7,7 +7,7 @@
 use xubamp_skin::sprites;
 
 use crate::vis::VisState;
-use crate::{posbar, slider};
+use crate::{posbar, shade, slider};
 
 /// The six classic transport buttons, in the order they appear on the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +174,10 @@ pub fn hit_test(x: i32, y: i32) -> Region {
         return Region::None;
     }
     // Title-bar buttons win over the drag band (a click on a button never starts a move).
-    for (placement, id) in sprites::TITLE_BUTTONS_PRESSED.iter().zip(TITLE_BUTTON_ORDER) {
+    for (placement, id) in sprites::TITLE_BUTTONS_PRESSED
+        .iter()
+        .zip(TITLE_BUTTON_ORDER)
+    {
         if in_button(placement, x, y) {
             return Region::TitleButton(id);
         }
@@ -184,16 +187,44 @@ pub fn hit_test(x: i32, y: i32) -> Region {
             return Region::Transport(id);
         }
     }
-    if in_rect(x, y, sprites::VOLUME_X, sprites::VOLUME_Y, sprites::VOLUME_W, sprites::SLIDER_BG_H) {
+    if in_rect(
+        x,
+        y,
+        sprites::VOLUME_X,
+        sprites::VOLUME_Y,
+        sprites::VOLUME_W,
+        sprites::SLIDER_BG_H,
+    ) {
         return Region::Volume;
     }
-    if in_rect(x, y, sprites::BALANCE_X, sprites::BALANCE_Y, sprites::BALANCE_W, sprites::SLIDER_BG_H) {
+    if in_rect(
+        x,
+        y,
+        sprites::BALANCE_X,
+        sprites::BALANCE_Y,
+        sprites::BALANCE_W,
+        sprites::SLIDER_BG_H,
+    ) {
         return Region::Balance;
     }
-    if in_rect(x, y, sprites::POSBAR_X, sprites::POSBAR_Y, sprites::POSBAR_W, sprites::POSBAR_H) {
+    if in_rect(
+        x,
+        y,
+        sprites::POSBAR_X,
+        sprites::POSBAR_Y,
+        sprites::POSBAR_W,
+        sprites::POSBAR_H,
+    ) {
         return Region::Position;
     }
-    if in_rect(x, y, sprites::VIS_X, sprites::VIS_Y, sprites::VIS_W, sprites::VIS_H) {
+    if in_rect(
+        x,
+        y,
+        sprites::VIS_X,
+        sprites::VIS_Y,
+        sprites::VIS_W,
+        sprites::VIS_H,
+    ) {
         return Region::Vis;
     }
     if in_button(&sprites::EQ_OFF, x, y) {
@@ -212,6 +243,73 @@ pub fn hit_test(x: i32, y: i32) -> Region {
         return Region::TitleBar;
     }
     Region::None
+}
+
+/// Which region of the collapsed (windowshade) main window is at window-local (`x`, `y`)? The strip
+/// carries the title buttons (same places as expanded), the mini transport click targets and the
+/// mini seek bar (their art baked into the strip), and is otherwise the drag band. Points below the
+/// [`sprites::MAIN_SHADE_H`] strip, or outside it, map to [`Region::None`].
+pub fn hit_test_shade(x: i32, y: i32) -> Region {
+    if x < 0 || y < 0 || x >= sprites::MAIN_W || y >= sprites::MAIN_SHADE_H {
+        return Region::None;
+    }
+    // Title buttons keep their expanded destinations, so reuse those rectangles.
+    for (placement, id) in sprites::TITLE_BUTTONS_PRESSED
+        .iter()
+        .zip(TITLE_BUTTON_ORDER)
+    {
+        if in_button(placement, x, y) {
+            return Region::TitleButton(id);
+        }
+    }
+    // The mini transport glyphs are click targets baked into the strip.
+    for (&(rx, ry, rw, rh), id) in sprites::SHADE_TRANSPORT.iter().zip(TRANSPORT_ORDER) {
+        if in_rect(x, y, rx, ry, rw, rh) {
+            return Region::Transport(id);
+        }
+    }
+    if in_rect(
+        x,
+        y,
+        sprites::SHADE_POSBAR_X,
+        sprites::SHADE_POSBAR_Y,
+        sprites::SHADE_POSBAR_W,
+        sprites::SHADE_POSBAR_H,
+    ) {
+        return Region::Position;
+    }
+    // The rest of the strip is the drag band (a double-click there also toggles shade, in `wl`).
+    Region::TitleBar
+}
+
+/// The interactive region at (`x`, `y`), dispatched by window mode: the compact shade strip when
+/// collapsed, else the full main window.
+fn region_at(shade: bool, x: i32, y: i32) -> Region {
+    if shade {
+        hit_test_shade(x, y)
+    } else {
+        hit_test(x, y)
+    }
+}
+
+/// The 0..=1 seek fraction for a pointer x, using the mini geometry while collapsed and the full
+/// position bar when expanded, so a scrub maps correctly in either mode.
+fn seek_fraction(shade: bool, x: i32) -> f32 {
+    if shade {
+        shade::seek_from_x(x)
+    } else {
+        posbar::position_from_x(x)
+    }
+}
+
+/// The thumb pixel offset for a `fraction` in the current mode, used to skip a redraw when a drag
+/// would not move the thumb.
+fn seek_offset(shade: bool, fraction: f32) -> i32 {
+    if shade {
+        shade::seek_thumb_offset(fraction)
+    } else {
+        posbar::position_thumb_offset(fraction)
+    }
 }
 
 /// Mutable UI state that drives composition: which button is held, the clock, the marquee, and
@@ -267,6 +365,9 @@ pub struct UiState {
     pub khz: Option<u32>,
     /// Channel count: 2 lights "stereo", 1 lights "mono", 0 (nothing loaded) dims both.
     pub channels: u8,
+    /// Whether the main window is collapsed to its title strip (windowshade mode). Composition draws
+    /// the compact strip and hit-testing uses the shade layout; the `wl` layer resizes the toplevel.
+    pub shade: bool,
 }
 
 impl Default for UiState {
@@ -295,6 +396,7 @@ impl Default for UiState {
             kbps: None,
             khz: None,
             channels: 0,
+            shade: false,
         }
     }
 }
@@ -360,7 +462,7 @@ fn preview_seek(state: &mut UiState, fraction: f32) {
 /// jumps the value to the click, emitting it immediately; a seek-bar press begins a drag and
 /// previews the target (thumb + time) but emits nothing yet (the seek commits on release).
 pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
-    match hit_test(x, y) {
+    match region_at(state.shade, x, y) {
         Region::TitleBar => Outcome {
             start_move: true,
             ..Default::default()
@@ -405,7 +507,7 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
                 return Outcome::default();
             }
             state.dragging = Some(Slider::Position);
-            preview_seek(state, posbar::position_from_x(x));
+            preview_seek(state, seek_fraction(state.shade, x));
             Outcome {
                 redraw: true,
                 ..Default::default()
@@ -471,12 +573,11 @@ pub fn on_motion(state: &mut UiState, x: i32, _y: i32) -> Outcome {
             }
         }
         Some(Slider::Position) => {
-            let f = posbar::position_from_x(x);
+            let f = seek_fraction(state.shade, x);
             // Preview only; the seek fires on release. Skip the redraw when the thumb would not
             // move (same pixel offset) so a jittery cursor does not recompose needlessly.
-            if posbar::position_thumb_offset(f)
-                == state.position.map_or(-1, posbar::position_thumb_offset)
-            {
+            let shade = state.shade;
+            if seek_offset(shade, f) == state.position.map_or(-1, |p| seek_offset(shade, p)) {
                 return Outcome::default();
             }
             preview_seek(state, f);
@@ -496,6 +597,7 @@ pub fn on_motion(state: &mut UiState, x: i32, _y: i32) -> Outcome {
 /// fires only when the release lands on the same button that was pressed (releasing off the
 /// button cancels), matching classic button behavior.
 pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
+    let shade = state.shade;
     if let Some(slider) = state.dragging.take() {
         let command = match slider {
             // Volume and balance already emitted their value live; only the seek bar defers. Hold
@@ -515,7 +617,7 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
     }
     if let Some(b) = state.pressed_title.take() {
         // A title-bar button carries out its window action only if released over the same button.
-        let fired = hit_test(x, y) == Region::TitleButton(b);
+        let fired = region_at(shade, x, y) == Region::TitleButton(b);
         return Outcome {
             window: fired.then_some(b),
             redraw: true,
@@ -524,7 +626,7 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
     }
     if let Some(t) = state.pressed_toggle.take() {
         // The EQ/PL toggle fires only if released over the same button.
-        let fired = hit_test(x, y) == Region::Toggle(t);
+        let fired = region_at(shade, x, y) == Region::Toggle(t);
         return Outcome {
             toggle: fired.then_some(t),
             redraw: true,
@@ -533,7 +635,7 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
     }
     if let Some(m) = state.pressed_mode.take() {
         // The shuffle/repeat mode toggle fires only if released over the same button.
-        let fired = hit_test(x, y) == Region::Mode(m);
+        let fired = region_at(shade, x, y) == Region::Mode(m);
         return Outcome {
             command: fired.then_some(Command::ToggleMode(m)),
             redraw: true,
@@ -542,7 +644,7 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
     }
     match state.pressed.take() {
         Some(b) => {
-            let fired = hit_test(x, y) == Region::Transport(b);
+            let fired = region_at(shade, x, y) == Region::Transport(b);
             Outcome {
                 command: fired.then_some(Command::Transport(b)),
                 redraw: true,
@@ -751,27 +853,52 @@ mod tests {
         // move the window.
         assert!(!exceeds_move_threshold(0, 0), "no motion is a click");
         assert!(!exceeds_move_threshold(3, 0), "a 3px jitter stays a click");
-        assert!(!exceeds_move_threshold(-2, 2), "diagonal within the threshold");
-        assert!(!exceeds_move_threshold(0, 4), "exactly the threshold is not yet a drag");
+        assert!(
+            !exceeds_move_threshold(-2, 2),
+            "diagonal within the threshold"
+        );
+        assert!(
+            !exceeds_move_threshold(0, 4),
+            "exactly the threshold is not yet a drag"
+        );
         // A deliberate drag past the threshold starts the move, in any direction.
         assert!(exceeds_move_threshold(5, 0), "5px horizontal is a drag");
         assert!(exceeds_move_threshold(0, -5), "upward drag counts");
-        assert!(exceeds_move_threshold(4, 4), "diagonal beyond the threshold");
+        assert!(
+            exceeds_move_threshold(4, 4),
+            "diagonal beyond the threshold"
+        );
     }
 
     #[test]
     fn title_bar_band_is_the_top_strip() {
         assert_eq!(TITLEBAR_H, 14);
         assert_eq!(hit_test(0, 0), Region::TitleBar, "top-left corner");
-        assert_eq!(hit_test(274, 13), Region::TitleBar, "bottom-right of the band");
+        assert_eq!(
+            hit_test(274, 13),
+            Region::TitleBar,
+            "bottom-right of the band"
+        );
         assert_eq!(hit_test(137, 7), Region::TitleBar, "middle of the band");
     }
 
     #[test]
     fn below_the_band_is_not_draggable() {
-        assert_eq!(hit_test(0, 14), Region::None, "first row under the title bar");
-        assert_eq!(hit_test(137, 45), Region::None, "window body above the sliders");
-        assert_eq!(hit_test(274, 115), Region::None, "bottom-right of the window");
+        assert_eq!(
+            hit_test(0, 14),
+            Region::None,
+            "first row under the title bar"
+        );
+        assert_eq!(
+            hit_test(137, 45),
+            Region::None,
+            "window body above the sliders"
+        );
+        assert_eq!(
+            hit_test(274, 115),
+            Region::None,
+            "bottom-right of the window"
+        );
     }
 
     #[test]
@@ -811,17 +938,34 @@ mod tests {
     #[test]
     fn sliders_have_their_own_regions() {
         // Inside each slider's background rectangle.
-        assert_eq!(hit_test(sprites::VOLUME_X, sprites::VOLUME_Y), Region::Volume, "volume top-left");
         assert_eq!(
-            hit_test(sprites::VOLUME_X + sprites::VOLUME_W - 1, sprites::VOLUME_Y + sprites::SLIDER_BG_H - 1),
+            hit_test(sprites::VOLUME_X, sprites::VOLUME_Y),
+            Region::Volume,
+            "volume top-left"
+        );
+        assert_eq!(
+            hit_test(
+                sprites::VOLUME_X + sprites::VOLUME_W - 1,
+                sprites::VOLUME_Y + sprites::SLIDER_BG_H - 1
+            ),
             Region::Volume,
             "volume bottom-right",
         );
-        assert_eq!(hit_test(sprites::BALANCE_X, sprites::BALANCE_Y), Region::Balance, "balance top-left");
+        assert_eq!(
+            hit_test(sprites::BALANCE_X, sprites::BALANCE_Y),
+            Region::Balance,
+            "balance top-left"
+        );
         // The gap between the two sliders belongs to neither.
-        assert_eq!(hit_test(sprites::VOLUME_X + sprites::VOLUME_W, sprites::VOLUME_Y), Region::None);
+        assert_eq!(
+            hit_test(sprites::VOLUME_X + sprites::VOLUME_W, sprites::VOLUME_Y),
+            Region::None
+        );
         // One row below the sliders is the body.
-        assert_eq!(hit_test(sprites::VOLUME_X, sprites::VOLUME_Y + sprites::SLIDER_BG_H), Region::None);
+        assert_eq!(
+            hit_test(sprites::VOLUME_X, sprites::VOLUME_Y + sprites::SLIDER_BG_H),
+            Region::None
+        );
     }
 
     #[test]
@@ -830,6 +974,150 @@ mod tests {
         assert_eq!(s.volume, 100, "fresh window is at unity gain, not silent");
         assert_eq!(s.balance, 0, "centered");
         assert_eq!(s.dragging, None);
+        assert!(!s.shade, "the window starts expanded, not collapsed");
+    }
+
+    #[test]
+    fn shade_hit_test_only_yields_strip_regions() {
+        // Below the 14px strip, nothing is interactive.
+        assert_eq!(
+            hit_test_shade(10, 14),
+            Region::None,
+            "first row under the strip"
+        );
+        assert_eq!(hit_test_shade(10, 40), Region::None, "well below the strip");
+        assert_eq!(hit_test_shade(-1, 5), Region::None, "left of the window");
+        // The title buttons keep their expanded destinations.
+        assert_eq!(
+            hit_test_shade(254 + 4, 3 + 4),
+            Region::TitleButton(TitleButton::Shade),
+            "restore"
+        );
+        assert_eq!(
+            hit_test_shade(264 + 4, 3 + 4),
+            Region::TitleButton(TitleButton::Close)
+        );
+        assert_eq!(
+            hit_test_shade(6 + 4, 3 + 4),
+            Region::TitleButton(TitleButton::Options)
+        );
+        // The mini transport glyphs and the mini seek bar are their own regions.
+        let (px, py, pw, _) = sprites::SHADE_TRANSPORT[1]; // play
+        assert_eq!(
+            hit_test_shade(px + pw / 2, py + 4),
+            Region::Transport(Transport::Play)
+        );
+        let (ex, ey, ew, _) = sprites::SHADE_TRANSPORT[5]; // eject
+        assert_eq!(
+            hit_test_shade(ex + ew / 2, ey + 4),
+            Region::Transport(Transport::Eject)
+        );
+        assert_eq!(
+            hit_test_shade(sprites::SHADE_POSBAR_X + 2, sprites::SHADE_POSBAR_Y + 2),
+            Region::Position,
+            "mini seek bar",
+        );
+        // Bare strip between the controls is the drag band.
+        assert_eq!(
+            hit_test_shade(90, 7),
+            Region::TitleBar,
+            "empty strip is draggable"
+        );
+    }
+
+    #[test]
+    fn shade_transport_press_and_release_fires_the_command() {
+        // While collapsed, a click on a baked-in transport glyph still arms and fires on release.
+        let mut s = UiState {
+            shade: true,
+            ..Default::default()
+        };
+        let (px, py, pw, _) = sprites::SHADE_TRANSPORT[1]; // play
+        let out = on_press(&mut s, px + pw / 2, py + 4);
+        assert_eq!(s.pressed, Some(Transport::Play), "shade play arms");
+        assert!(out.redraw);
+        let out = on_release(&mut s, px + pw / 2, py + 4);
+        assert_eq!(
+            out.command,
+            Some(Command::Transport(Transport::Play)),
+            "shade play fires on release"
+        );
+    }
+
+    #[test]
+    fn shade_button_press_release_requests_the_window_action() {
+        // Pressing and releasing the shade (restore) button in collapsed mode asks the platform to
+        // toggle back, exactly as the button does when expanded.
+        let mut s = UiState {
+            shade: true,
+            ..Default::default()
+        };
+        let (bx, by) = (254 + 4, 3 + 4);
+        let out = on_press(&mut s, bx, by);
+        assert_eq!(
+            s.pressed_title,
+            Some(TitleButton::Shade),
+            "restore button arms"
+        );
+        assert!(out.redraw && !out.start_move);
+        let out = on_release(&mut s, bx, by);
+        assert_eq!(
+            out.window,
+            Some(TitleButton::Shade),
+            "restore fires on release over it"
+        );
+    }
+
+    #[test]
+    fn shade_seek_press_uses_the_mini_geometry_not_the_full_posbar() {
+        // A press on the mini seek bar while collapsed starts a Position drag mapped through the
+        // mini geometry (far right pins to 1.0), previewing without seeking.
+        let mut s = UiState {
+            shade: true,
+            duration: Some(100),
+            ..Default::default()
+        };
+        let x = sprites::SHADE_POSBAR_X + sprites::SHADE_POSBAR_W - 1; // the right end of the track
+        let out = on_press(&mut s, x, sprites::SHADE_POSBAR_Y + 3);
+        assert_eq!(s.dragging, Some(Slider::Position), "mini seek drag begins");
+        assert_eq!(s.position, Some(1.0), "pinned to the mini track end");
+        assert_eq!(
+            s.elapsed,
+            Some(100),
+            "time previews the end of a 100s track"
+        );
+        assert_eq!(out.command, None, "the seek still commits on release");
+        // The same window x is NOT on the full-window seek bar, so this only works via the mini map.
+        assert_eq!(
+            hit_test(x, sprites::SHADE_POSBAR_Y + 3),
+            Region::TitleBar,
+            "expanded: that x is the title band"
+        );
+    }
+
+    #[test]
+    fn on_press_dispatches_by_shade_mode_at_the_same_point() {
+        // A point on the expanded volume slider row is unreachable when collapsed (off the 14px
+        // strip): the same coordinates arm a volume drag expanded, but do nothing collapsed.
+        let (vx, vy) = (sprites::VOLUME_X + 2, sprites::VOLUME_Y + 2);
+        let mut expanded = UiState::default();
+        let out = on_press(&mut expanded, vx, vy);
+        assert_eq!(
+            expanded.dragging,
+            Some(Slider::Volume),
+            "expanded: volume drag"
+        );
+        assert!(out.redraw);
+        let mut collapsed = UiState {
+            shade: true,
+            ..Default::default()
+        };
+        let out = on_press(&mut collapsed, vx, vy);
+        assert_eq!(
+            collapsed.dragging, None,
+            "collapsed: that row is off the strip"
+        );
+        assert_eq!(out, Outcome::default());
     }
 
     #[test]
@@ -854,7 +1142,10 @@ mod tests {
         // Close (264,3) and minimize (244,3) are their own regions, not the drag band.
         let (cx, cy) = (264 + 4, 3 + 4);
         assert_eq!(hit_test(cx, cy), Region::TitleButton(TitleButton::Close));
-        assert_eq!(hit_test(244 + 4, 3 + 4), Region::TitleButton(TitleButton::Minimize));
+        assert_eq!(
+            hit_test(244 + 4, 3 + 4),
+            Region::TitleButton(TitleButton::Minimize)
+        );
         // Bare title-bar area away from the buttons is still the drag band (no move suppressed).
         assert_eq!(hit_test(137, 5), Region::TitleBar);
 
@@ -862,28 +1153,51 @@ mod tests {
         let mut s = UiState::default();
         let out = on_press(&mut s, cx, cy);
         assert_eq!(s.pressed_title, Some(TitleButton::Close));
-        assert!(out.redraw && !out.start_move && out.window.is_none(), "arm only");
+        assert!(
+            out.redraw && !out.start_move && out.window.is_none(),
+            "arm only"
+        );
         // Release over the same button carries out the window action.
         let out = on_release(&mut s, cx, cy);
-        assert_eq!(out.window, Some(TitleButton::Close), "close fires on release over it");
+        assert_eq!(
+            out.window,
+            Some(TitleButton::Close),
+            "close fires on release over it"
+        );
         assert_eq!(s.pressed_title, None);
     }
 
     #[test]
     fn eq_and_pl_toggle_buttons_arm_and_fire_on_release() {
         // From shufrep dests: EQ at (219,58), PL at (242,58), each 23x12.
-        assert_eq!(hit_test(219 + 4, 58 + 4), Region::Toggle(WindowToggle::Equalizer));
-        assert_eq!(hit_test(242 + 4, 58 + 4), Region::Toggle(WindowToggle::Playlist));
+        assert_eq!(
+            hit_test(219 + 4, 58 + 4),
+            Region::Toggle(WindowToggle::Equalizer)
+        );
+        assert_eq!(
+            hit_test(242 + 4, 58 + 4),
+            Region::Toggle(WindowToggle::Playlist)
+        );
         // Press arms (drawn pressed), release over the same fires the toggle.
         let mut s = UiState::default();
         let out = on_press(&mut s, 242 + 4, 58 + 4);
         assert_eq!(s.pressed_toggle, Some(WindowToggle::Playlist));
-        assert!(out.redraw && out.toggle.is_none(), "arm only, no toggle yet");
+        assert!(
+            out.redraw && out.toggle.is_none(),
+            "arm only, no toggle yet"
+        );
         let out = on_release(&mut s, 242 + 4, 58 + 4);
-        assert_eq!(out.toggle, Some(WindowToggle::Playlist), "PL toggles on release over it");
+        assert_eq!(
+            out.toggle,
+            Some(WindowToggle::Playlist),
+            "PL toggles on release over it"
+        );
         assert_eq!(s.pressed_toggle, None);
         // Released off the button cancels (dragged away).
-        let mut s2 = UiState { pressed_toggle: Some(WindowToggle::Equalizer), ..Default::default() };
+        let mut s2 = UiState {
+            pressed_toggle: Some(WindowToggle::Equalizer),
+            ..Default::default()
+        };
         let out = on_release(&mut s2, 137, 45);
         assert_eq!(out.toggle, None, "off-button = no toggle");
         assert!(out.redraw);
@@ -892,24 +1206,37 @@ mod tests {
     #[test]
     fn shuffle_and_repeat_buttons_arm_and_fire_toggle_mode() {
         // From shufrep dests: shuffle at (164,89) 47x15, repeat at (210,89) 28x15.
-        assert_eq!(hit_test(164 + 10, 89 + 5), Region::Mode(ModeButton::Shuffle));
+        assert_eq!(
+            hit_test(164 + 10, 89 + 5),
+            Region::Mode(ModeButton::Shuffle)
+        );
         assert_eq!(hit_test(210 + 10, 89 + 5), Region::Mode(ModeButton::Repeat));
         let mut s = UiState::default();
         let out = on_press(&mut s, 164 + 10, 89 + 5);
         assert_eq!(s.pressed_mode, Some(ModeButton::Shuffle));
         assert!(out.redraw && out.command.is_none(), "arm only");
         let out = on_release(&mut s, 164 + 10, 89 + 5);
-        assert_eq!(out.command, Some(Command::ToggleMode(ModeButton::Shuffle)), "fires on release");
+        assert_eq!(
+            out.command,
+            Some(Command::ToggleMode(ModeButton::Shuffle)),
+            "fires on release"
+        );
         assert_eq!(s.pressed_mode, None);
         // Released off the button cancels.
-        let mut s2 = UiState { pressed_mode: Some(ModeButton::Repeat), ..Default::default() };
+        let mut s2 = UiState {
+            pressed_mode: Some(ModeButton::Repeat),
+            ..Default::default()
+        };
         let out = on_release(&mut s2, 137, 45);
         assert_eq!(out.command, None, "off-button = no toggle");
     }
 
     #[test]
     fn title_button_released_off_the_button_cancels() {
-        let mut s = UiState { pressed_title: Some(TitleButton::Close), ..Default::default() };
+        let mut s = UiState {
+            pressed_title: Some(TitleButton::Close),
+            ..Default::default()
+        };
         let out = on_release(&mut s, 137, 45); // released over the window body
         assert_eq!(out.window, None, "dragged off the button = no action");
         assert!(out.redraw, "still redraw to un-press");
@@ -918,8 +1245,14 @@ mod tests {
 
     #[test]
     fn leave_clears_a_pressed_title_button() {
-        let mut s = UiState { pressed_title: Some(TitleButton::Minimize), ..Default::default() };
-        assert!(on_leave(&mut s), "needs redraw to un-press the title button");
+        let mut s = UiState {
+            pressed_title: Some(TitleButton::Minimize),
+            ..Default::default()
+        };
+        assert!(
+            on_leave(&mut s),
+            "needs redraw to un-press the title button"
+        );
         assert_eq!(s.pressed_title, None);
     }
 
@@ -1001,7 +1334,10 @@ mod tests {
         let out = on_release(&mut s, 500, 500); // released anywhere
         assert_eq!(s.dragging, None, "drag ended");
         assert_eq!(s.volume, 42, "value held from the drag");
-        assert_eq!(out.command, None, "no new command on release; value already emitted");
+        assert_eq!(
+            out.command, None,
+            "no new command on release; value already emitted"
+        );
         assert!(out.redraw, "redraw to restore the normal thumb sprite");
     }
 
@@ -1058,40 +1394,69 @@ mod tests {
     /// A clock snapshot carrying only an elapsed value (no position/duration), for the tick tests
     /// that predate the seek bar.
     fn elapsed(secs: Option<u32>) -> Playback {
-        Playback { elapsed: secs, ..Default::default() }
+        Playback {
+            elapsed: secs,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn tick_redraws_only_when_the_shown_time_changes() {
         let mut s = UiState::default();
-        assert!(on_tick(&mut s, elapsed(Some(0))), "blank -> 00:00 is a change");
+        assert!(
+            on_tick(&mut s, elapsed(Some(0))),
+            "blank -> 00:00 is a change"
+        );
         assert_eq!(s.elapsed, Some(0));
-        assert!(!on_tick(&mut s, elapsed(Some(0))), "same second (e.g. paused): no redraw");
+        assert!(
+            !on_tick(&mut s, elapsed(Some(0))),
+            "same second (e.g. paused): no redraw"
+        );
         assert!(on_tick(&mut s, elapsed(Some(1))), "next second: redraw");
-        assert!(on_tick(&mut s, elapsed(None)), "stop blanks the display: redraw");
+        assert!(
+            on_tick(&mut s, elapsed(None)),
+            "stop blanks the display: redraw"
+        );
         assert_eq!(s.elapsed, None);
         assert!(!on_tick(&mut s, elapsed(None)), "still blank: no redraw");
     }
 
     #[test]
     fn posbar_has_its_own_region() {
-        assert_eq!(hit_test(sprites::POSBAR_X, sprites::POSBAR_Y), Region::Position, "posbar top-left");
         assert_eq!(
-            hit_test(sprites::POSBAR_X + sprites::POSBAR_W - 1, sprites::POSBAR_Y + sprites::POSBAR_H - 1),
+            hit_test(sprites::POSBAR_X, sprites::POSBAR_Y),
+            Region::Position,
+            "posbar top-left"
+        );
+        assert_eq!(
+            hit_test(
+                sprites::POSBAR_X + sprites::POSBAR_W - 1,
+                sprites::POSBAR_Y + sprites::POSBAR_H - 1
+            ),
             Region::Position,
             "posbar bottom-right",
         );
         // One row below the bar is the body.
-        assert_eq!(hit_test(sprites::POSBAR_X, sprites::POSBAR_Y + sprites::POSBAR_H), Region::None);
+        assert_eq!(
+            hit_test(sprites::POSBAR_X, sprites::POSBAR_Y + sprites::POSBAR_H),
+            Region::None
+        );
     }
 
     #[test]
     fn vis_region_click_cycles_the_mode() {
         use crate::vis::VisMode;
         // The panel is its own region.
-        assert_eq!(hit_test(sprites::VIS_X, sprites::VIS_Y), Region::Vis, "vis top-left");
         assert_eq!(
-            hit_test(sprites::VIS_X + sprites::VIS_W - 1, sprites::VIS_Y + sprites::VIS_H - 1),
+            hit_test(sprites::VIS_X, sprites::VIS_Y),
+            Region::Vis,
+            "vis top-left"
+        );
+        assert_eq!(
+            hit_test(
+                sprites::VIS_X + sprites::VIS_W - 1,
+                sprites::VIS_Y + sprites::VIS_H - 1
+            ),
             Region::Vis,
             "vis bottom-right",
         );
@@ -1099,7 +1464,11 @@ mod tests {
         let mut s = UiState::default();
         assert_eq!(s.vis.mode, VisMode::Bars);
         let out = on_press(&mut s, sprites::VIS_X + 10, sprites::VIS_Y + 8);
-        assert_eq!(s.vis.mode, VisMode::Oscilloscope, "one click advances the mode");
+        assert_eq!(
+            s.vis.mode,
+            VisMode::Oscilloscope,
+            "one click advances the mode"
+        );
         assert!(out.redraw && out.command.is_none() && !out.start_move);
         on_press(&mut s, sprites::VIS_X + 10, sprites::VIS_Y + 8);
         on_press(&mut s, sprites::VIS_X + 10, sprites::VIS_Y + 8);
@@ -1114,10 +1483,18 @@ mod tests {
         };
         // Press at the far-right edge of the track (still inside the window): the thumb pins to
         // the end and the time previews the track length, but NO command fires (seek on release).
-        let out = on_press(&mut s, sprites::POSBAR_X + sprites::POSBAR_W - 1, sprites::POSBAR_Y + 5);
+        let out = on_press(
+            &mut s,
+            sprites::POSBAR_X + sprites::POSBAR_W - 1,
+            sprites::POSBAR_Y + 5,
+        );
         assert_eq!(s.dragging, Some(Slider::Position));
         assert_eq!(s.position, Some(1.0), "thumb pinned to the end");
-        assert_eq!(s.elapsed, Some(200), "time preview at the end of a 200s track");
+        assert_eq!(
+            s.elapsed,
+            Some(200),
+            "time preview at the end of a 200s track"
+        );
         assert_eq!(out.command, None, "no seek on press; it commits on release");
         assert!(out.redraw);
     }
@@ -1126,7 +1503,10 @@ mod tests {
     fn posbar_is_inert_when_the_track_length_is_unknown() {
         // No duration (an unseekable / headerless stream): a press starts no drag, previews
         // nothing, and emits nothing, so the bar cannot phantom-scrub and then snap back.
-        let mut s = UiState { duration: None, ..Default::default() };
+        let mut s = UiState {
+            duration: None,
+            ..Default::default()
+        };
         let out = on_press(&mut s, sprites::POSBAR_X + 50, sprites::POSBAR_Y + 5);
         assert_eq!(s.dragging, None, "no drag begins without a known length");
         assert_eq!(s.position, None, "the thumb is not moved");
@@ -1142,9 +1522,21 @@ mod tests {
             ..Default::default()
         };
         // Motion to mid-track moves the thumb and previews ~50s, but emits nothing.
-        let out = on_motion(&mut s, sprites::POSBAR_X + posbar::POSBAR_TRAVEL / 2 + 14, sprites::POSBAR_Y);
-        assert!((s.position.unwrap() - 0.5).abs() < 0.02, "thumb near mid (got {:?})", s.position);
-        assert_eq!(s.elapsed, Some((s.position.unwrap() * 100.0).round() as u32), "time previews the target");
+        let out = on_motion(
+            &mut s,
+            sprites::POSBAR_X + posbar::POSBAR_TRAVEL / 2 + 14,
+            sprites::POSBAR_Y,
+        );
+        assert!(
+            (s.position.unwrap() - 0.5).abs() < 0.02,
+            "thumb near mid (got {:?})",
+            s.position
+        );
+        assert_eq!(
+            s.elapsed,
+            Some((s.position.unwrap() * 100.0).round() as u32),
+            "time previews the target"
+        );
         assert_eq!(out.command, None, "still no seek during the drag");
         assert!(out.redraw);
 
@@ -1152,7 +1544,11 @@ mod tests {
         let previewed = s.position.unwrap();
         let out = on_release(&mut s, 0, 0);
         assert_eq!(s.dragging, None, "drag ended");
-        assert_eq!(out.command, Some(Command::Seek(previewed)), "seek commits on release");
+        assert_eq!(
+            out.command,
+            Some(Command::Seek(previewed)),
+            "seek commits on release"
+        );
         assert!(out.redraw);
     }
 
@@ -1161,10 +1557,16 @@ mod tests {
         // The seek bar's release-to-commit must not leak into the other sliders, which committed
         // live during their drag.
         for slider in [Slider::Volume, Slider::Balance] {
-            let mut s = UiState { dragging: Some(slider), ..Default::default() };
+            let mut s = UiState {
+                dragging: Some(slider),
+                ..Default::default()
+            };
             let out = on_release(&mut s, 500, 500);
             assert_eq!(out.command, None, "{slider:?} release emits nothing");
-            assert!(out.redraw, "{slider:?} release still restores the normal thumb");
+            assert!(
+                out.redraw,
+                "{slider:?} release still restores the normal thumb"
+            );
         }
     }
 
@@ -1174,9 +1576,18 @@ mod tests {
         // Normal tick: the clock sets elapsed, position, and duration.
         assert!(on_tick(
             &mut s,
-            Playback { elapsed: Some(30), position: Some(0.25), duration: Some(120), playing: true, ..Default::default() }
+            Playback {
+                elapsed: Some(30),
+                position: Some(0.25),
+                duration: Some(120),
+                playing: true,
+                ..Default::default()
+            }
         ));
-        assert_eq!((s.elapsed, s.position, s.duration), (Some(30), Some(0.25), Some(120)));
+        assert_eq!(
+            (s.elapsed, s.position, s.duration),
+            (Some(30), Some(0.25), Some(120))
+        );
 
         // During a seek-bar drag the clock must not fight the preview: elapsed and position hold.
         // The (normally constant) duration is still refreshed though, so feed a CHANGED duration
@@ -1186,18 +1597,41 @@ mod tests {
         s.position = Some(0.75);
         let changed = on_tick(
             &mut s,
-            Playback { elapsed: Some(31), position: Some(0.26), duration: Some(130), playing: true, ..Default::default() },
+            Playback {
+                elapsed: Some(31),
+                position: Some(0.26),
+                duration: Some(130),
+                playing: true,
+                ..Default::default()
+            },
         );
         assert!(changed, "a changed duration still redraws mid-drag");
         assert_eq!(s.duration, Some(130), "duration refreshes during the drag");
-        assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview held against the clock");
+        assert_eq!(
+            (s.elapsed, s.position),
+            (Some(90), Some(0.75)),
+            "preview held against the clock"
+        );
         // With the duration unchanged, a drag-phase tick changes nothing at all.
         let changed = on_tick(
             &mut s,
-            Playback { elapsed: Some(32), position: Some(0.27), duration: Some(130), playing: true, ..Default::default() },
+            Playback {
+                elapsed: Some(32),
+                position: Some(0.27),
+                duration: Some(130),
+                playing: true,
+                ..Default::default()
+            },
         );
-        assert!(!changed, "no redraw: the drag owns the display and duration was unchanged");
-        assert_eq!((s.elapsed, s.position), (Some(90), Some(0.75)), "preview still held");
+        assert!(
+            !changed,
+            "no redraw: the drag owns the display and duration was unchanged"
+        );
+        assert_eq!(
+            (s.elapsed, s.position),
+            (Some(90), Some(0.75)),
+            "preview still held"
+        );
     }
 
     #[test]
@@ -1213,10 +1647,17 @@ mod tests {
             let mut s = UiState::default();
             let out = on_key(&mut s, KeyPress::Char(ch), false);
             assert_eq!(out.command, Some(Command::Transport(t)), "{ch} -> {t:?}");
-            assert!(!out.redraw, "a transport keystroke draws no depressed button");
+            assert!(
+                !out.redraw,
+                "a transport keystroke draws no depressed button"
+            );
             // Held: the auto-repeat must not re-fire the transport action.
             let repeat = on_key(&mut s, KeyPress::Char(ch), true);
-            assert_eq!(repeat, Outcome::default(), "{ch} held emits nothing on repeat");
+            assert_eq!(
+                repeat,
+                Outcome::default(),
+                "{ch} held emits nothing on repeat"
+            );
         }
     }
 
@@ -1228,14 +1669,26 @@ mod tests {
         let out = on_key(&mut s, KeyPress::Char('x'), false);
         assert_eq!(out.command, Some(Command::Restart), "x restarts");
         assert!(!out.redraw);
-        assert_eq!(on_key(&mut s, KeyPress::Char('x'), true), Outcome::default(), "x held: no repeat");
+        assert_eq!(
+            on_key(&mut s, KeyPress::Char('x'), true),
+            Outcome::default(),
+            "x held: no repeat"
+        );
     }
 
     #[test]
     fn unbound_keys_do_nothing() {
         let mut s = UiState::default();
-        for key in [KeyPress::Char('q'), KeyPress::Char('1'), KeyPress::Char(' ')] {
-            assert_eq!(on_key(&mut s, key, false), Outcome::default(), "{key:?} is unbound");
+        for key in [
+            KeyPress::Char('q'),
+            KeyPress::Char('1'),
+            KeyPress::Char(' '),
+        ] {
+            assert_eq!(
+                on_key(&mut s, key, false),
+                Outcome::default(),
+                "{key:?} is unbound"
+            );
         }
     }
 
@@ -1243,7 +1696,11 @@ mod tests {
     fn volume_keys_step_clamp_and_dedup() {
         // Fresh volume is 100 (full): Up is already at the rail, so it is a no-op.
         let mut s = UiState::default();
-        assert_eq!(on_key(&mut s, KeyPress::Up, false), Outcome::default(), "already at 100");
+        assert_eq!(
+            on_key(&mut s, KeyPress::Up, false),
+            Outcome::default(),
+            "already at 100"
+        );
         assert_eq!(s.volume, 100);
         // Down steps by VOLUME_STEP and emits + redraws.
         let out = on_key(&mut s, KeyPress::Down, false);
@@ -1260,7 +1717,11 @@ mod tests {
         assert_eq!(s.volume, 0);
         assert_eq!(out.command, Some(Command::Volume(0)));
         // At 0, Down is a no-op (no spam of identical commands while held at the rail).
-        assert_eq!(on_key(&mut s, KeyPress::Down, true), Outcome::default(), "pinned at 0");
+        assert_eq!(
+            on_key(&mut s, KeyPress::Down, true),
+            Outcome::default(),
+            "pinned at 0"
+        );
         // And Up clamps to 100 from the top.
         s.volume = 99;
         let out = on_key(&mut s, KeyPress::Up, false);
@@ -1278,11 +1739,18 @@ mod tests {
             }
         }
         // A 100s track at the halfway point: Right adds 5s, Left subtracts 5s.
-        let mut s = UiState { duration: Some(100), position: Some(0.5), ..Default::default() };
+        let mut s = UiState {
+            duration: Some(100),
+            position: Some(0.5),
+            ..Default::default()
+        };
         let out = on_key(&mut s, KeyPress::Right, false);
         assert!((seek_frac(&out) - 0.55).abs() < 1e-6, "50s + 5s = 55%");
         assert_eq!(s.elapsed, Some(55), "time preview updated at once");
-        assert!((s.position.unwrap() - 0.55).abs() < 1e-6, "thumb moved optimistically");
+        assert!(
+            (s.position.unwrap() - 0.55).abs() < 1e-6,
+            "thumb moved optimistically"
+        );
         assert!(out.redraw);
 
         // Reset the pending target too, to test an independent seek from the halfway point (a held
@@ -1296,7 +1764,11 @@ mod tests {
         s.seek_target = None;
         s.position = Some(0.02); // 2s in
         let out = on_key(&mut s, KeyPress::Left, false);
-        assert_eq!(out.command, Some(Command::Seek(0.0)), "clamps to the start, not negative");
+        assert_eq!(
+            out.command,
+            Some(Command::Seek(0.0)),
+            "clamps to the start, not negative"
+        );
         assert_eq!(s.elapsed, Some(0));
         s.seek_target = None;
         s.position = Some(0.99); // 99s in
@@ -1309,8 +1781,16 @@ mod tests {
     fn seek_keys_are_inert_without_a_length_or_during_a_pointer_drag() {
         // No duration/position (an unseekable or not-yet-playing stream): nothing happens.
         let mut s = UiState::default();
-        assert_eq!(on_key(&mut s, KeyPress::Right, false), Outcome::default(), "no length");
-        assert_eq!(on_key(&mut s, KeyPress::Left, false), Outcome::default(), "no length");
+        assert_eq!(
+            on_key(&mut s, KeyPress::Right, false),
+            Outcome::default(),
+            "no length"
+        );
+        assert_eq!(
+            on_key(&mut s, KeyPress::Left, false),
+            Outcome::default(),
+            "no length"
+        );
 
         // A known length but the pointer is mid-drag on the bar: the drag owns the thumb, so the
         // key must not fight it.
@@ -1320,13 +1800,21 @@ mod tests {
             dragging: Some(Slider::Position),
             ..Default::default()
         };
-        assert_eq!(on_key(&mut d, KeyPress::Right, false), Outcome::default(), "yields to the drag");
+        assert_eq!(
+            on_key(&mut d, KeyPress::Right, false),
+            Outcome::default(),
+            "yields to the drag"
+        );
         assert_eq!(d.position, Some(0.5), "preview untouched");
     }
 
     #[test]
     fn held_seek_accumulates_against_the_target_not_the_lagging_clock() {
-        let mut s = UiState { duration: Some(200), position: Some(0.5), ..Default::default() };
+        let mut s = UiState {
+            duration: Some(200),
+            position: Some(0.5),
+            ..Default::default()
+        };
         // First Right: 100s -> 105s, and it records the target.
         let o1 = on_key(&mut s, KeyPress::Right, false);
         assert!(matches!(o1.command, Some(Command::Seek(f)) if (f - 105.0 / 200.0).abs() < 1e-4));
@@ -1335,9 +1823,18 @@ mod tests {
         // display must hold at the target, not snap back to 100s.
         on_tick(
             &mut s,
-            Playback { position: Some(0.5), elapsed: Some(100), duration: Some(200), ..Default::default() },
+            Playback {
+                position: Some(0.5),
+                elapsed: Some(100),
+                duration: Some(200),
+                ..Default::default()
+            },
         );
-        assert_eq!(s.position, Some(105.0 / 200.0), "held at the target while the clock lags");
+        assert_eq!(
+            s.position,
+            Some(105.0 / 200.0),
+            "held at the target while the clock lags"
+        );
         assert_eq!(s.seek_target, Some(105.0 / 200.0));
         // Second Right (auto-repeat) accumulates from the target -> 110s, not from the lagging clock.
         let o2 = on_key(&mut s, KeyPress::Right, true);
@@ -1346,38 +1843,73 @@ mod tests {
 
     #[test]
     fn the_display_resumes_the_clock_once_the_seek_lands() {
-        let mut s = UiState { duration: Some(200), position: Some(0.5), ..Default::default() };
+        let mut s = UiState {
+            duration: Some(200),
+            position: Some(0.5),
+            ..Default::default()
+        };
         on_key(&mut s, KeyPress::Right, false); // target 105s
-        // The engine lands near 105s: the hold clears and the clock takes over.
+                                                // The engine lands near 105s: the hold clears and the clock takes over.
         on_tick(
             &mut s,
-            Playback { position: Some(105.0 / 200.0), elapsed: Some(105), duration: Some(200), ..Default::default() },
+            Playback {
+                position: Some(105.0 / 200.0),
+                elapsed: Some(105),
+                duration: Some(200),
+                ..Default::default()
+            },
         );
-        assert_eq!(s.seek_target, None, "cleared once the clock reached the target");
+        assert_eq!(
+            s.seek_target, None,
+            "cleared once the clock reached the target"
+        );
         assert_eq!(s.position, Some(105.0 / 200.0));
         // A normal tick now advances freely.
         on_tick(
             &mut s,
-            Playback { position: Some(106.0 / 200.0), elapsed: Some(106), duration: Some(200), ..Default::default() },
+            Playback {
+                position: Some(106.0 / 200.0),
+                elapsed: Some(106),
+                duration: Some(200),
+                ..Default::default()
+            },
         );
         assert_eq!(s.position, Some(106.0 / 200.0));
     }
 
     #[test]
     fn a_backward_seek_holds_until_the_clock_falls_back() {
-        let mut s = UiState { duration: Some(200), position: Some(0.5), ..Default::default() };
+        let mut s = UiState {
+            duration: Some(200),
+            position: Some(0.5),
+            ..Default::default()
+        };
         on_key(&mut s, KeyPress::Left, false); // 100s -> 95s
         assert_eq!(s.seek_target, Some(95.0 / 200.0));
         // Clock still at 100s: must NOT snap forward to 100.
         on_tick(
             &mut s,
-            Playback { position: Some(0.5), elapsed: Some(100), duration: Some(200), ..Default::default() },
+            Playback {
+                position: Some(0.5),
+                elapsed: Some(100),
+                duration: Some(200),
+                ..Default::default()
+            },
         );
-        assert_eq!(s.position, Some(95.0 / 200.0), "backward seek holds at the target");
+        assert_eq!(
+            s.position,
+            Some(95.0 / 200.0),
+            "backward seek holds at the target"
+        );
         // Engine falls back to 95s: resume the clock.
         on_tick(
             &mut s,
-            Playback { position: Some(95.0 / 200.0), elapsed: Some(95), duration: Some(200), ..Default::default() },
+            Playback {
+                position: Some(95.0 / 200.0),
+                elapsed: Some(95),
+                duration: Some(200),
+                ..Default::default()
+            },
         );
         assert_eq!(s.seek_target, None);
     }

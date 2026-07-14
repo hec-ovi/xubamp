@@ -58,14 +58,72 @@ pub const TITLE_BUTTONS_PRESSED: [Placement; 4] = [
     Placement::new(Rect::new(18, 9, 9, 9), 264, 3), // close
 ];
 
+// --- Windowshade (collapsed) mode of the main window ---
+//
+// In shade mode the window is just the title strip: MAIN_W wide x MAIN_SHADE_H tall. The
+// transport-button glyphs, the menu/minimize/shade/close up-art, and the mini clock/seek recesses
+// are all baked into SHADE_BG; only a held title button's pressed sprite, the mini seek thumb, and
+// the small text.bmp clock digits are drawn on top. Coordinates from TITLEBAR.BMP, cross-checked
+// against Webamp's skinSprites.ts and main-window.css.
+
+/// Shade strip height (the width stays [`MAIN_W`]).
+pub const MAIN_SHADE_H: i32 = 14;
+
+/// The shade title strip background (the focused variant, the one normally shown), from TITLEBAR.BMP.
+pub const SHADE_BG: Placement = Placement::new(Rect::new(27, 29, 275, 14), 0, 0);
+
+/// Title buttons in shade mode, parallel to [`TITLE_BUTTONS_PRESSED`] (same order and the same 9x9
+/// on-window destinations, so the expanded hit regions carry over unchanged). Only the windowshade
+/// button differs: in shade mode its pressed sprite is the "restore" cell at (9,27) rather than the
+/// "collapse" cell at (9,18).
+pub const SHADE_TITLE_BUTTONS_PRESSED: [Placement; 4] = [
+    Placement::new(Rect::new(0, 9, 9, 9), 6, 3), // options (menu)
+    Placement::new(Rect::new(9, 9, 9, 9), 244, 3), // minimize
+    Placement::new(Rect::new(9, 27, 9, 9), 254, 3), // windowshade (restore)
+    Placement::new(Rect::new(18, 9, 9, 9), 264, 3), // close
+];
+
+/// Click regions for the six transport buttons in shade mode, in TRANSPORT order (previous, play,
+/// pause, stop, next, eject), each `(x, y, w, h)`. Their artwork is baked into [`SHADE_BG`], so
+/// these are hit targets only: nothing extra is blitted and there is no pressed state. Coordinates
+/// from Webamp's shade-view CSS.
+pub const SHADE_TRANSPORT: [(i32, i32, i32, i32); 6] = [
+    (169, 2, 7, 10),  // previous
+    (176, 2, 10, 10), // play
+    (186, 2, 9, 10),  // pause
+    (195, 2, 9, 10),  // stop
+    (204, 2, 10, 10), // next
+    (215, 2, 10, 10), // eject
+];
+
+/// The mini seek/position bar in shade mode: a 17px trough at (226,4) with a 3px thumb sliding
+/// across it (travel = width - thumb). The thumb swaps to a left/right end variant near the
+/// extremes, matching Winamp's three-cell mini thumb. All from TITLEBAR.BMP.
+pub const SHADE_POSBAR_X: i32 = 226;
+pub const SHADE_POSBAR_Y: i32 = 4;
+pub const SHADE_POSBAR_W: i32 = 17;
+pub const SHADE_POSBAR_H: i32 = 7;
+pub const SHADE_POSBAR_BG: Rect = Rect::new(0, 36, 17, 7);
+pub const SHADE_POSBAR_THUMB_W: i32 = 3;
+pub const SHADE_POSBAR_THUMB_H: i32 = 7;
+pub const SHADE_POSBAR_THUMB: Rect = Rect::new(20, 36, 3, 7); // centre (34%-65%)
+pub const SHADE_POSBAR_THUMB_LEFT: Rect = Rect::new(17, 36, 3, 7); // <=33%
+pub const SHADE_POSBAR_THUMB_RIGHT: Rect = Rect::new(23, 36, 3, 7); // >=66%
+
+/// The mini MM:SS clock in shade mode, drawn from the small TEXT.BMP font (5x6 digits). Window x of
+/// the four digits (tens/units of minutes, then of seconds); the classic layout leaves a colon-width
+/// gap between the minute and second pairs. Elapsed only, so there is no leading sign cell.
+pub const SHADE_TIME_Y: i32 = 4;
+pub const SHADE_TIME_DIGITS_X: [i32; 4] = [134, 139, 147, 152];
+
 /// The six transport buttons from CBUTTONS.BMP (normal state, top row), in order:
 /// previous, play, pause, stop, next, eject.
 pub const CBUTTONS: [Placement; 6] = [
-    Placement::new(Rect::new(0, 0, 23, 18), 16, 88),    // previous
-    Placement::new(Rect::new(23, 0, 23, 18), 39, 88),   // play
-    Placement::new(Rect::new(46, 0, 23, 18), 62, 88),   // pause
-    Placement::new(Rect::new(69, 0, 23, 18), 85, 88),   // stop
-    Placement::new(Rect::new(92, 0, 22, 18), 108, 88),  // next
+    Placement::new(Rect::new(0, 0, 23, 18), 16, 88), // previous
+    Placement::new(Rect::new(23, 0, 23, 18), 39, 88), // play
+    Placement::new(Rect::new(46, 0, 23, 18), 62, 88), // pause
+    Placement::new(Rect::new(69, 0, 23, 18), 85, 88), // stop
+    Placement::new(Rect::new(92, 0, 22, 18), 108, 88), // next
     Placement::new(Rect::new(114, 0, 22, 16), 136, 89), // eject
 ];
 
@@ -74,11 +132,11 @@ pub const CBUTTONS: [Placement; 6] = [
 /// pressed art sits directly below the normal art: 18px for the first five, 16px for the
 /// shorter eject button (whose pressed art is one pixel higher, per the classic sheet).
 pub const CBUTTONS_PRESSED: [Placement; 6] = [
-    Placement::new(Rect::new(0, 18, 23, 18), 16, 88),    // previous
-    Placement::new(Rect::new(23, 18, 23, 18), 39, 88),   // play
-    Placement::new(Rect::new(46, 18, 23, 18), 62, 88),   // pause
-    Placement::new(Rect::new(69, 18, 23, 18), 85, 88),   // stop
-    Placement::new(Rect::new(92, 18, 22, 18), 108, 88),  // next
+    Placement::new(Rect::new(0, 18, 23, 18), 16, 88), // previous
+    Placement::new(Rect::new(23, 18, 23, 18), 39, 88), // play
+    Placement::new(Rect::new(46, 18, 23, 18), 62, 88), // pause
+    Placement::new(Rect::new(69, 18, 23, 18), 85, 88), // stop
+    Placement::new(Rect::new(92, 18, 22, 18), 108, 88), // next
     Placement::new(Rect::new(114, 16, 22, 16), 136, 89), // eject
 ];
 
@@ -161,13 +219,17 @@ pub const REPEAT_OFF_PRESSED: Placement = Placement::new(Rect::new(0, 15, 28, 15
 pub const REPEAT_ON: Placement = Placement::new(Rect::new(0, 30, 28, 15), 210, 89);
 pub const REPEAT_ON_PRESSED: Placement = Placement::new(Rect::new(0, 45, 28, 15), 210, 89);
 
-// --- The playlist editor (PLEDIT) window, from pledit.bmp. Built from tiles so it can resize; we
-// draw the classic collapsed size for now. Coordinates cross-checked against Webamp. ---
+// --- The playlist editor (PLEDIT) window, from pledit.bmp. Built from tiles so it can resize.
+// Coordinates cross-checked against Webamp. ---
 
-/// The playlist window's default (collapsed) size, same width as the main window. This is also the
-/// minimum size; the window only ever grows from here.
+/// The playlist window's default expanded size, same width and height as the main window. This is
+/// also the minimum expanded size; the window only ever grows from here.
 pub const PLEDIT_W: i32 = 275;
 pub const PLEDIT_H: i32 = 116;
+
+/// The playlist window's fully collapsed height. Its width is preserved while shaded and can still
+/// be resized horizontally.
+pub const PLEDIT_SHADE_H: i32 = 14;
 
 /// Classic Winamp resizes the playlist in whole segments: 25px wider or 29px taller at a time
 /// (`WINDOW_RESIZE_SEGMENT_WIDTH`/`_HEIGHT` in Webamp). We render at whatever size the Wayland
@@ -187,6 +249,17 @@ pub const PLEDIT_TITLE: Rect = Rect::new(26, 0, 100, 20);
 pub const PLEDIT_TOP_TILE: Rect = Rect::new(127, 0, 25, 20);
 pub const PLEDIT_TOP_RIGHT: Rect = Rect::new(153, 0, 25, 20);
 
+/// Pressed title-button cells. Their released artwork is baked into the expanded top-right tile and
+/// the shaded right cap. Destinations are relative to the right edge because the playlist is
+/// horizontally resizable: close is 2px from the edge, shade/restore is 12px from it.
+pub const PLEDIT_CLOSE_PRESSED: Rect = Rect::new(52, 42, 9, 9);
+pub const PLEDIT_COLLAPSE_PRESSED: Rect = Rect::new(62, 42, 9, 9);
+pub const PLEDIT_EXPAND_PRESSED: Rect = Rect::new(150, 42, 9, 9);
+pub const PLEDIT_TITLE_BUTTON_Y: i32 = 3;
+pub const PLEDIT_TITLE_BUTTON_W: i32 = 9;
+pub const PLEDIT_CLOSE_BUTTON_RIGHT: i32 = 2;
+pub const PLEDIT_SHADE_BUTTON_RIGHT: i32 = 12;
+
 /// Side edges, repeated vertically down the middle band (left 12px wide, right 20px wide).
 pub const PLEDIT_LEFT_TILE: Rect = Rect::new(0, 42, 12, 29);
 pub const PLEDIT_RIGHT_TILE: Rect = Rect::new(31, 42, 20, 29);
@@ -197,6 +270,16 @@ pub const PLEDIT_RIGHT_TILE: Rect = Rect::new(31, 42, 20, 29);
 pub const PLEDIT_BOTTOM_LEFT: Rect = Rect::new(0, 72, 125, 38);
 pub const PLEDIT_BOTTOM_RIGHT: Rect = Rect::new(126, 72, 150, 38);
 pub const PLEDIT_BOTTOM_TILE: Rect = Rect::new(179, 0, 25, 38);
+
+/// Playlist windowshade tiles. The 25px background repeats across the strip; the 25px left cap and
+/// 50px focused right cap overlay its ends. All live in `pledit.bmp`.
+pub const PLEDIT_SHADE_TILE: Rect = Rect::new(72, 57, 25, 14);
+pub const PLEDIT_SHADE_LEFT: Rect = Rect::new(72, 42, 25, 14);
+pub const PLEDIT_SHADE_RIGHT: Rect = Rect::new(99, 42, 50, 14);
+
+/// The width-only resize target in playlist windowshade mode: a 9px square 20px from the right.
+/// It sits immediately left of the shade button and has no separate artwork.
+pub const PLEDIT_SHADE_RESIZE_RIGHT: i32 = 20;
 
 /// The track-list content rectangle within the window (between the edges and the title/bottom
 /// bands): x 12..255 (width 243), y from 23, rows [`PLEDIT_ROW_H`] tall.
@@ -289,7 +372,11 @@ mod tests {
     fn digit_cells_tile_across_the_top_row() {
         assert_eq!(DIGITS.len(), 10);
         for (d, r) in DIGITS.iter().enumerate() {
-            assert_eq!(*r, Rect::new(d as i32 * DIGIT_W, 0, DIGIT_W, DIGIT_H), "digit {d}");
+            assert_eq!(
+                *r,
+                Rect::new(d as i32 * DIGIT_W, 0, DIGIT_W, DIGIT_H),
+                "digit {d}"
+            );
         }
     }
 
@@ -304,9 +391,21 @@ mod tests {
     #[test]
     fn time_digits_layout_leaves_room_for_the_colon() {
         assert_eq!(TIME_DIGITS, [(48, 26), (60, 26), (78, 26), (90, 26)]);
-        assert_eq!(TIME_DIGITS[1].0 - TIME_DIGITS[0].0, 12, "step within the MM pair");
-        assert_eq!(TIME_DIGITS[3].0 - TIME_DIGITS[2].0, 12, "step within the SS pair");
-        assert_eq!(TIME_DIGITS[2].0 - TIME_DIGITS[1].0, 18, "MM->SS spans the colon gap");
+        assert_eq!(
+            TIME_DIGITS[1].0 - TIME_DIGITS[0].0,
+            12,
+            "step within the MM pair"
+        );
+        assert_eq!(
+            TIME_DIGITS[3].0 - TIME_DIGITS[2].0,
+            12,
+            "step within the SS pair"
+        );
+        assert_eq!(
+            TIME_DIGITS[2].0 - TIME_DIGITS[1].0,
+            18,
+            "MM->SS spans the colon gap"
+        );
     }
 
     #[test]
@@ -316,16 +415,39 @@ mod tests {
         assert_eq!(VOLUME_Y, BALANCE_Y, "volume and balance share a row");
         // Geometry invariants over compile-time constants: static-assert them so a bad edit
         // fails to compile rather than at test time.
-        const { assert!(VOLUME_X + VOLUME_W <= BALANCE_X, "volume ends before balance begins") };
-        const { assert!(BALANCE_X + BALANCE_W < MAIN_W, "balance stays inside the window") };
-        const { assert!(VOLUME_W - SLIDER_THUMB_W > 0, "volume thumb travels a positive distance") };
-        const { assert!(BALANCE_W - SLIDER_THUMB_W > 0, "balance thumb travels a positive distance") };
+        const {
+            assert!(
+                VOLUME_X + VOLUME_W <= BALANCE_X,
+                "volume ends before balance begins"
+            )
+        };
+        const {
+            assert!(
+                BALANCE_X + BALANCE_W < MAIN_W,
+                "balance stays inside the window"
+            )
+        };
+        const {
+            assert!(
+                VOLUME_W - SLIDER_THUMB_W > 0,
+                "volume thumb travels a positive distance"
+            )
+        };
+        const {
+            assert!(
+                BALANCE_W - SLIDER_THUMB_W > 0,
+                "balance thumb travels a positive distance"
+            )
+        };
         // The background column is exactly SLIDER_FRAMES frames of SLIDER_FRAME_STRIDE px, and
         // the thumb sits just below it (y=422 = 28*15 + 2px gap).
         assert_eq!(SLIDER_FRAMES * SLIDER_FRAME_STRIDE, 420);
         assert_eq!(SLIDER_THUMB_NORMAL.y, 422);
         assert_eq!(SLIDER_THUMB_PRESSED.y, 422);
-        assert_ne!(SLIDER_THUMB_NORMAL.x, SLIDER_THUMB_PRESSED.x, "held thumb is a distinct cell");
+        assert_ne!(
+            SLIDER_THUMB_NORMAL.x, SLIDER_THUMB_PRESSED.x,
+            "held thumb is a distinct cell"
+        );
     }
 
     #[test]
@@ -334,20 +456,130 @@ mod tests {
         for p in &TITLE_BUTTONS_PRESSED {
             // Each button is 9x9 within the 14px title-bar band.
             assert_eq!((p.src.w, p.src.h), (9, 9));
-            assert!(p.dst_y >= 0 && p.dst_y + p.src.h <= TITLEBAR_ACTIVE.src.h, "inside the band");
-            assert!(p.dst_x >= 0 && p.dst_x + p.src.w <= MAIN_W, "inside the window");
+            assert!(
+                p.dst_y >= 0 && p.dst_y + p.src.h <= TITLEBAR_ACTIVE.src.h,
+                "inside the band"
+            );
+            assert!(
+                p.dst_x >= 0 && p.dst_x + p.src.w <= MAIN_W,
+                "inside the window"
+            );
         }
         // Close is the far-right button; options the far-left.
-        assert_eq!((TITLE_BUTTONS_PRESSED[3].dst_x, TITLE_BUTTONS_PRESSED[3].dst_y), (264, 3));
-        assert_eq!((TITLE_BUTTONS_PRESSED[0].dst_x, TITLE_BUTTONS_PRESSED[0].dst_y), (6, 3));
+        assert_eq!(
+            (
+                TITLE_BUTTONS_PRESSED[3].dst_x,
+                TITLE_BUTTONS_PRESSED[3].dst_y
+            ),
+            (264, 3)
+        );
+        assert_eq!(
+            (
+                TITLE_BUTTONS_PRESSED[0].dst_x,
+                TITLE_BUTTONS_PRESSED[0].dst_y
+            ),
+            (6, 3)
+        );
         // Minimize sits just left of close.
         assert_eq!(TITLE_BUTTONS_PRESSED[1].dst_x, 244);
     }
 
     #[test]
+    fn windowshade_strip_geometry_stays_inside_the_collapsed_bar() {
+        assert_eq!(MAIN_SHADE_H, 14);
+        assert_eq!(SHADE_BG.src, Rect::new(27, 29, 275, 14));
+        // The shade title buttons mirror the expanded ones in count, order and destination; only the
+        // windowshade button's source cell differs (restore vs collapse), so the expanded hit regions
+        // carry over unchanged.
+        assert_eq!(
+            SHADE_TITLE_BUTTONS_PRESSED.len(),
+            TITLE_BUTTONS_PRESSED.len()
+        );
+        for (shade, normal) in SHADE_TITLE_BUTTONS_PRESSED
+            .iter()
+            .zip(TITLE_BUTTONS_PRESSED.iter())
+        {
+            assert_eq!(
+                (shade.dst_x, shade.dst_y),
+                (normal.dst_x, normal.dst_y),
+                "same destination"
+            );
+            assert!(
+                shade.dst_y + shade.src.h <= MAIN_SHADE_H,
+                "button inside the strip"
+            );
+        }
+        assert_eq!(
+            SHADE_TITLE_BUTTONS_PRESSED[2].src,
+            Rect::new(9, 27, 9, 9),
+            "shade uses the restore cell"
+        );
+        assert_ne!(
+            SHADE_TITLE_BUTTONS_PRESSED[2].src, TITLE_BUTTONS_PRESSED[2].src,
+            "distinct from collapse"
+        );
+        // The six mini transport targets sit in the strip, in order, and do not overlap.
+        assert_eq!(SHADE_TRANSPORT.len(), 6);
+        for &(_, ry, _, rh) in &SHADE_TRANSPORT {
+            assert!(ry + rh <= MAIN_SHADE_H, "transport target inside the strip");
+        }
+        for pair in SHADE_TRANSPORT.windows(2) {
+            assert!(
+                pair[0].0 + pair[0].2 <= pair[1].0,
+                "transport targets are disjoint and ordered"
+            );
+        }
+        // The mini seek bar sits in the strip and its thumb travels a positive distance.
+        const {
+            assert!(
+                SHADE_POSBAR_Y + SHADE_POSBAR_H <= MAIN_SHADE_H,
+                "seek bar inside the strip"
+            )
+        };
+        const {
+            assert!(
+                SHADE_POSBAR_W - SHADE_POSBAR_THUMB_W > 0,
+                "the mini thumb travels a positive distance"
+            )
+        };
+        // The mini clock digits sit in the strip, clear of both the seek bar and the transport row.
+        assert_eq!(SHADE_TIME_DIGITS_X.len(), 4);
+        for &x in &SHADE_TIME_DIGITS_X {
+            assert!(
+                x + 5 <= SHADE_TRANSPORT[0].0,
+                "clock is left of the transport glyphs"
+            );
+        }
+    }
+
+    #[test]
+    fn playlist_windowshade_cells_and_dynamic_controls_fit_the_strip() {
+        assert_eq!(PLEDIT_SHADE_H, 14);
+        assert_eq!(PLEDIT_SHADE_TILE, Rect::new(72, 57, 25, 14));
+        assert_eq!(PLEDIT_SHADE_LEFT, Rect::new(72, 42, 25, 14));
+        assert_eq!(PLEDIT_SHADE_RIGHT, Rect::new(99, 42, 50, 14));
+        for cell in [
+            PLEDIT_CLOSE_PRESSED,
+            PLEDIT_COLLAPSE_PRESSED,
+            PLEDIT_EXPAND_PRESSED,
+        ] {
+            assert_eq!((cell.w, cell.h), (9, 9));
+            assert!(PLEDIT_TITLE_BUTTON_Y + cell.h <= PLEDIT_SHADE_H);
+        }
+        assert_eq!(PLEDIT_CLOSE_BUTTON_RIGHT, 2);
+        assert_eq!(PLEDIT_SHADE_BUTTON_RIGHT, 12);
+        assert_eq!(PLEDIT_SHADE_RESIZE_RIGHT, 20);
+    }
+
+    #[test]
     fn visualizer_region_sits_between_the_title_bar_and_transport() {
         // Inside the window, below the title-bar band, above the transport buttons (y 88).
-        const { assert!(VIS_X + VIS_W <= MAIN_W, "visualizer stays inside the window") };
+        const {
+            assert!(
+                VIS_X + VIS_W <= MAIN_W,
+                "visualizer stays inside the window"
+            )
+        };
         const { assert!(VIS_Y >= 14, "below the title-bar band") };
         const { assert!(VIS_Y + VIS_H <= 88, "above the transport button row") };
         // It does not overlap the volume slider's column (they share rows but not x).
@@ -358,16 +590,33 @@ mod tests {
     #[test]
     fn position_bar_geometry_matches_the_classic_layout() {
         // Sits inside the window with a groove wider than the thumb (a positive travel).
-        const { assert!(POSBAR_X + POSBAR_W <= MAIN_W, "position bar stays inside the window") };
-        const { assert!(POSBAR_W - POSBAR_THUMB_W > 0, "the thumb travels a positive distance") };
+        const {
+            assert!(
+                POSBAR_X + POSBAR_W <= MAIN_W,
+                "position bar stays inside the window"
+            )
+        };
+        const {
+            assert!(
+                POSBAR_W - POSBAR_THUMB_W > 0,
+                "the thumb travels a positive distance"
+            )
+        };
         assert_eq!(POSBAR_W - POSBAR_THUMB_W, 219, "classic travel");
         // The groove is the left edge of the sheet; the two thumb cells sit to its right, 30px
         // apart, distinct, and together imply the classic 307px sheet width.
         assert_eq!(POSBAR_BG, Rect::new(0, 0, 248, 10));
         assert_eq!(POSBAR_THUMB_NORMAL, Rect::new(248, 0, 29, 10));
         assert_eq!(POSBAR_THUMB_PRESSED, Rect::new(278, 0, 29, 10));
-        assert_ne!(POSBAR_THUMB_NORMAL.x, POSBAR_THUMB_PRESSED.x, "held thumb is a distinct cell");
-        assert_eq!(POSBAR_THUMB_PRESSED.x + POSBAR_THUMB_W, 307, "sheet is 307px wide");
+        assert_ne!(
+            POSBAR_THUMB_NORMAL.x, POSBAR_THUMB_PRESSED.x,
+            "held thumb is a distinct cell"
+        );
+        assert_eq!(
+            POSBAR_THUMB_PRESSED.x + POSBAR_THUMB_W,
+            307,
+            "sheet is 307px wide"
+        );
     }
 
     #[test]

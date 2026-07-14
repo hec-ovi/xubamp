@@ -14,6 +14,7 @@ use smithay_client_toolkit::reexports::calloop::{
     EventLoop,
 };
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
+use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
@@ -37,7 +38,6 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
-use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 use wayland_client::{
     globals::registry_queue_init,
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
@@ -101,6 +101,9 @@ struct PlaylistWin {
     height: i32,
     /// A title-bar press deferred into a compositor move (same threshold as the main window).
     armed_move: Option<(i32, i32, u32)>,
+    /// The last bare title-bar click, for double-click windowshade toggling. Button clicks and moves
+    /// do not participate.
+    title_last_click: Option<Instant>,
     /// Whether the pointer is currently over the bottom-right resize grip, so the resize cursor is
     /// set only on the hover transition rather than on every motion event.
     grip_hover: bool,
@@ -143,12 +146,50 @@ impl JumpWin {
     }
 }
 
-/// How many pixels in from the bottom-right corner count as the resize grip.
-const PLEDIT_GRIP: i32 = 20;
+/// Apply the playlist's mode-specific size contract. Expanded mode has the classic minimum and no
+/// maximum. Windowshade mode is fixed at 14px high while its width remains resizable.
+fn set_playlist_constraints(window: &Window, shaded: bool) {
+    if shaded {
+        window.set_min_size(Some((
+            xubamp_skin::sprites::PLEDIT_W as u32,
+            xubamp_skin::sprites::PLEDIT_SHADE_H as u32,
+        )));
+        // A zero width means "unspecified" in xdg_toplevel, so only height is capped.
+        window.set_max_size(Some((0, xubamp_skin::sprites::PLEDIT_SHADE_H as u32)));
+    } else {
+        window.set_min_size(Some((
+            xubamp_skin::sprites::PLEDIT_W as u32,
+            xubamp_skin::sprites::PLEDIT_H as u32,
+        )));
+        window.set_max_size(None);
+    }
+}
 
-/// Whether (`x`, `y`) (window-local) is over the playlist's bottom-right resize grip.
-fn over_resize_grip(pl: &PlaylistWin, x: i32, y: i32) -> bool {
-    x >= pl.width - PLEDIT_GRIP && y >= pl.height - PLEDIT_GRIP
+/// Resolve a compositor suggestion into the actual playlist buffer size and the remembered
+/// expanded size. While shaded, only width updates; restoring recovers the pre-shade height.
+fn playlist_configured_size(
+    shaded: bool,
+    expanded: (i32, i32),
+    suggested: (Option<i32>, Option<i32>),
+) -> ((i32, i32), (i32, i32)) {
+    let mut expanded = (
+        expanded.0.max(xubamp_skin::sprites::PLEDIT_W),
+        expanded.1.max(xubamp_skin::sprites::PLEDIT_H),
+    );
+    if shaded {
+        if let Some(w) = suggested.0 {
+            expanded.0 = w.max(xubamp_skin::sprites::PLEDIT_W);
+        }
+        ((expanded.0, xubamp_skin::sprites::PLEDIT_SHADE_H), expanded)
+    } else {
+        if let Some(w) = suggested.0 {
+            expanded.0 = w.max(xubamp_skin::sprites::PLEDIT_W);
+        }
+        if let Some(h) = suggested.1 {
+            expanded.1 = h.max(xubamp_skin::sprites::PLEDIT_H);
+        }
+        (expanded, expanded)
+    }
 }
 
 /// Open the main window for `skin` and run until the user closes it. `title` is the song title
@@ -225,13 +266,17 @@ pub fn run(
         sample_source: Box::new(sample_source),
         playlist: None,
         playlist_state: pledit::PlState::default(),
-        pl_size: (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H),
+        pl_size: (
+            xubamp_skin::sprites::PLEDIT_W,
+            xubamp_skin::sprites::PLEDIT_H,
+        ),
         jump_win: None,
         jump_state: jump::JumpState::default(),
         playlist_source: Box::new(playlist_source),
         mod_ctrl: false,
         mod_shift: false,
         last_click: None,
+        title_last_click: None,
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
         qh: qh.clone(),
@@ -357,6 +402,9 @@ struct App {
     mod_shift: bool,
     /// The last playlist row clicked and when, to detect a double-click (which plays the row).
     last_click: Option<(usize, Instant)>,
+    /// When the main title bar was last clicked, to detect a double-click (which toggles windowshade,
+    /// like the classic title-bar double-click). Cleared once a click becomes a window drag.
+    title_last_click: Option<Instant>,
     /// Polled each tick for the current track rows + playing index, to keep the playlist in sync.
     playlist_source: PlaylistSource,
     /// Set once the main window has had its first `configure`, so the timer never attaches a buffer
@@ -386,9 +434,9 @@ impl App {
             match action {
                 hit::TitleButton::Close => self.exit = true,
                 hit::TitleButton::Minimize => self.window.set_minimized(),
-                // Windowshade mode and the main menu are later phases; the button still shows its
-                // pressed feedback, but the action is a no-op for now.
-                hit::TitleButton::Shade => eprintln!("xubamp: windowshade mode not implemented yet"),
+                hit::TitleButton::Shade => self.toggle_shade(),
+                // The main menu is a later phase; the button still shows its pressed feedback, but
+                // the action is a no-op for now.
                 hit::TitleButton::Options => eprintln!("xubamp: main menu not implemented yet"),
             }
         }
@@ -402,11 +450,32 @@ impl App {
         }
     }
 
-    /// Whether the visualizer should be animating from live audio right now: configured, a palette
-    /// present, a mode other than Off, and audio playing. While this holds the visualizer renders
-    /// off frame callbacks; otherwise the timer settles it to baseline.
+    /// Toggle windowshade (collapsed) mode: flip the flag, pin the toplevel to the new fixed size,
+    /// and immediately attach a matching buffer. Size hints do not require the compositor to send a
+    /// new configure, so waiting for one can leave the old-size surface visible indefinitely.
+    fn toggle_shade(&mut self) {
+        self.state.shade = !self.state.shade;
+        let w = xubamp_skin::sprites::MAIN_W as u32;
+        let h = if self.state.shade {
+            xubamp_skin::sprites::MAIN_SHADE_H
+        } else {
+            xubamp_skin::sprites::MAIN_H
+        } as u32;
+        self.window.set_min_size(Some((w, h)));
+        self.window.set_max_size(Some((w, h)));
+        self.window.commit();
+        if self.configured {
+            self.redraw();
+        }
+    }
+
+    /// Whether the visualizer should be animating from live audio right now: configured, expanded (no
+    /// visualizer shows in the collapsed strip), a palette present, a mode other than Off, and audio
+    /// playing. While this holds the visualizer renders off frame callbacks; otherwise the timer
+    /// settles it to baseline.
     fn animating(&self) -> bool {
         self.configured
+            && !self.state.shade
             && self.playing
             && self.skin.viscolor.is_some()
             && self.state.vis.mode != VisMode::Off
@@ -422,8 +491,9 @@ impl App {
         let mut changed = hit::on_tick(&mut self.state, pb);
         // The marquee steps on its OWN 100 ms clock, not once per redraw: the frame-callback loop
         // redraws at the display rate, and stepping the title every frame would scroll it far too
-        // fast. Only skins with text.bmp render a marquee.
-        if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
+        // fast. Only skins with text.bmp render a marquee, and the collapsed strip shows none.
+        if !self.state.shade && self.skin.text.is_some() && marquee::is_scrolling(&self.state.title)
+        {
             let elapsed = self.last_marquee.elapsed();
             if elapsed >= MARQUEE_TICK {
                 changed |= marquee::advance(&mut self.state);
@@ -442,7 +512,8 @@ impl App {
     /// STOPPED it advances with silence so it decays to the baseline (a reset); while merely PAUSED
     /// it does nothing, freezing on its last frame.
     fn step_vis(&mut self) -> bool {
-        if self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off {
+        // No visualizer shows in the collapsed strip, so there is nothing to step while shaded.
+        if self.state.shade || self.skin.viscolor.is_none() || self.state.vis.mode == VisMode::Off {
             return false;
         }
         if self.playing {
@@ -506,7 +577,10 @@ impl App {
             }
             if vis_changed {
                 VIS_SETTLE_TICK
-            } else if self.skin.text.is_some() && marquee::is_scrolling(&self.state.title) {
+            } else if !self.state.shade
+                && self.skin.text.is_some()
+                && marquee::is_scrolling(&self.state.title)
+            {
                 MARQUEE_TICK
             } else {
                 Duration::from_secs(1)
@@ -550,8 +624,14 @@ impl App {
     #[cfg(feature = "keyboard")]
     fn is_our_surface(&self, surface: &wl_surface::WlSurface) -> bool {
         surface == self.window.wl_surface()
-            || self.playlist.as_ref().is_some_and(|pl| surface == pl.window.wl_surface())
-            || self.jump_win.as_ref().is_some_and(|j| surface == j.window.wl_surface())
+            || self
+                .playlist
+                .as_ref()
+                .is_some_and(|pl| surface == pl.window.wl_surface())
+            || self
+                .jump_win
+                .as_ref()
+                .is_some_and(|j| surface == j.window.wl_surface())
     }
 
     /// Open the playlist window (a second toplevel) if it is not already open, and light the PL
@@ -560,20 +640,18 @@ impl App {
         if self.playlist.is_some() {
             return;
         }
-        // Reopen at the last size (position cannot be restored on Wayland). The minimum stays the
-        // default so it can still be shrunk back down.
-        let (w, h) = self.pl_size;
-        let (min_w, min_h) = (xubamp_skin::sprites::PLEDIT_W, xubamp_skin::sprites::PLEDIT_H);
+        // Reopen at the remembered expanded width; a shaded playlist keeps that width but maps only
+        // its 14px strip. Position cannot be restored on Wayland.
+        let ((w, h), _) =
+            playlist_configured_size(self.playlist_state.shade, self.pl_size, (None, None));
         let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
         let surface = self.compositor.create_surface(&self.qh);
-        let window = self
-            .xdg_shell
-            .create_window(surface, WindowDecorations::RequestClient, &self.qh);
+        let window =
+            self.xdg_shell
+                .create_window(surface, WindowDecorations::RequestClient, &self.qh);
         window.set_title("xubamp playlist");
         window.set_app_id("xubamp");
-        // Resizable: a minimum (the default size) but no maximum, so the compositor lets it grow when
-        // the user drags the bottom-right grip. The pool auto-grows as larger buffers are requested.
-        window.set_min_size(Some((min_w as u32, min_h as u32)));
+        set_playlist_constraints(&window, self.playlist_state.shade);
         window.commit();
         let pool = SlotPool::new(w as usize * h as usize * 4, &self.shm).expect("playlist pool");
         self.playlist = Some(PlaylistWin {
@@ -584,6 +662,7 @@ impl App {
             width: w,
             height: h,
             armed_move: None,
+            title_last_click: None,
             grip_hover: false,
         });
         self.state.pl_open = true;
@@ -593,6 +672,7 @@ impl App {
     /// Close the playlist window (drops it, destroying the toplevel) and dim the PL button.
     fn close_playlist(&mut self) {
         self.playlist = None;
+        self.playlist_state.pressed_title = None;
         self.state.pl_open = false;
         self.redraw();
     }
@@ -605,9 +685,37 @@ impl App {
         }
     }
 
+    /// Toggle the playlist's own windowshade without losing its expanded resize. The compositor is
+    /// given matching constraints, then a matching buffer immediately, because changing hints alone
+    /// does not guarantee another configure event.
+    fn toggle_playlist_shade(&mut self) {
+        if self.playlist.is_none() {
+            return;
+        }
+        self.playlist_state.shade = !self.playlist_state.shade;
+        self.playlist_state.pressed_title = None;
+        let ((w, h), expanded) =
+            playlist_configured_size(self.playlist_state.shade, self.pl_size, (None, None));
+        self.pl_size = expanded;
+        if let Some(pl) = &mut self.playlist {
+            pl.width = w;
+            pl.height = h;
+            pl.armed_move = None;
+            pl.title_last_click = None;
+            pl.grip_hover = false;
+            set_playlist_constraints(&pl.window, self.playlist_state.shade);
+            pl.window.commit();
+        }
+        self.redraw_playlist();
+    }
+
     /// Recompose and present the playlist window from `playlist_state`, if it is open and mapped.
     fn redraw_playlist(&mut self) {
-        let Some((w, h)) = self.playlist.as_ref().filter(|pl| pl.configured).map(|pl| (pl.width, pl.height))
+        let Some((w, h)) = self
+            .playlist
+            .as_ref()
+            .filter(|pl| pl.configured)
+            .map(|pl| (pl.width, pl.height))
         else {
             return;
         };
@@ -617,9 +725,8 @@ impl App {
         pl.present();
     }
 
-    /// Pointer handling for the playlist window: the title-bar drag (to move it), the bottom-right
-    /// grip (to resize it), and cursor feedback. List selection, double-click-play and scrolling
-    /// arrive with the playlist interactions sub-unit.
+    /// Pointer handling for the playlist window: title buttons, title-bar drag/double-click shade,
+    /// expanded and shaded resize grips, list interaction, and cursor feedback.
     fn playlist_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
         match kind {
             PointerEventKind::Enter { .. } => {
@@ -628,28 +735,60 @@ impl App {
                 }
             }
             PointerEventKind::Press { button, serial, .. } if *button == BTN_LEFT => {
-                // A press on the bottom-right grip hands off to the compositor for an interactive
-                // resize; it then drives the new size back through `configure`.
-                if let Some(pl) = &self.playlist {
-                    if over_resize_grip(pl, x, y) {
-                        if let Some(seat) = &self.seat {
-                            pl.window.resize(seat, *serial, ResizeEdge::BottomRight);
-                        }
-                        return;
-                    }
-                }
-                // The title-bar band is the top 20px; a press there arms a compositor move.
-                if y < xubamp_skin::sprites::PLEDIT_TITLE_H {
-                    if let Some(pl) = &mut self.playlist {
-                        pl.armed_move = Some((x, y, *serial));
-                    }
+                let Some((width, height)) = self.playlist.as_ref().map(|pl| (pl.width, pl.height))
+                else {
                     return;
+                };
+                match pledit::region_at(&self.playlist_state, width, height, x, y) {
+                    pledit::Region::TitleButton(button) => {
+                        self.playlist_state.pressed_title = Some(button);
+                        if let Some(pl) = &mut self.playlist {
+                            pl.armed_move = None;
+                            pl.title_last_click = None;
+                        }
+                        self.redraw_playlist();
+                    }
+                    pledit::Region::Resize => {
+                        // Windowshade remains width-resizable; expanded mode uses the bottom-right
+                        // grip. The compositor reports the result through configure.
+                        if let Some(pl) = &self.playlist {
+                            let edge = if self.playlist_state.shade {
+                                ResizeEdge::Right
+                            } else {
+                                ResizeEdge::BottomRight
+                            };
+                            if let Some(seat) = &self.seat {
+                                pl.window.resize(seat, *serial, edge);
+                            }
+                        }
+                    }
+                    pledit::Region::TitleBar => {
+                        let now = Instant::now();
+                        let double = self
+                            .playlist
+                            .as_ref()
+                            .and_then(|pl| pl.title_last_click)
+                            .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                        if double {
+                            if let Some(pl) = &mut self.playlist {
+                                pl.title_last_click = None;
+                                pl.armed_move = None;
+                            }
+                            self.toggle_playlist_shade();
+                        } else if let Some(pl) = &mut self.playlist {
+                            pl.title_last_click = Some(now);
+                            pl.armed_move = Some((x, y, *serial));
+                        }
+                    }
+                    pledit::Region::Body => self.playlist_press_row(x, y),
+                    pledit::Region::None => {}
                 }
-                // Otherwise it is a click in the list body: select the row (or clear), play on a
-                // double-click.
-                self.playlist_press_row(x, y);
             }
             PointerEventKind::Axis { vertical, .. } => {
+                // The 14px strip has no list to scroll.
+                if self.playlist_state.shade {
+                    return;
+                }
                 // Mouse wheel (or trackpad) over the list scrolls it. A mouse reports discrete
                 // notches; a trackpad a continuous pixel delta. Positive scrolls toward the end.
                 let Some(ph) = self.playlist.as_ref().map(|pl| pl.height) else {
@@ -666,12 +805,25 @@ impl App {
                 }
             }
             PointerEventKind::Motion { .. } => {
-                // Cursor feedback: the grip shows a diagonal resize cursor, the rest an arrow. Only
-                // set it on the hover transition so we do not spam the compositor every motion.
-                let over_grip = self.playlist.as_ref().is_some_and(|pl| over_resize_grip(pl, x, y));
-                if self.playlist.as_ref().is_some_and(|pl| pl.grip_hover != over_grip) {
+                let over_grip = self.playlist.as_ref().is_some_and(|pl| {
+                    pledit::region_at(&self.playlist_state, pl.width, pl.height, x, y)
+                        == pledit::Region::Resize
+                });
+                if self
+                    .playlist
+                    .as_ref()
+                    .is_some_and(|pl| pl.grip_hover != over_grip)
+                {
                     if let Some(pointer) = &self.pointer {
-                        let icon = if over_grip { CursorIcon::SeResize } else { CursorIcon::Default };
+                        let icon = if over_grip {
+                            if self.playlist_state.shade {
+                                CursorIcon::EwResize
+                            } else {
+                                CursorIcon::SeResize
+                            }
+                        } else {
+                            CursorIcon::Default
+                        };
                         let _ = pointer.set_cursor(conn, icon);
                     }
                     if let Some(pl) = &mut self.playlist {
@@ -687,6 +839,7 @@ impl App {
                     if let (Some(seat), Some(pl)) = (self.seat.clone(), self.playlist.as_mut()) {
                         pl.window.move_(&seat, serial);
                         pl.armed_move = None;
+                        pl.title_last_click = None;
                     }
                 }
             }
@@ -694,11 +847,31 @@ impl App {
                 if let Some(pl) = &mut self.playlist {
                     pl.armed_move = None;
                 }
+                let Some(pressed) = self.playlist_state.pressed_title.take() else {
+                    return;
+                };
+                let fired = self.playlist.as_ref().is_some_and(|pl| {
+                    pledit::region_at(&self.playlist_state, pl.width, pl.height, x, y)
+                        == pledit::Region::TitleButton(pressed)
+                });
+                if !fired {
+                    self.redraw_playlist();
+                    return;
+                }
+                match pressed {
+                    pledit::TitleButton::Shade => self.toggle_playlist_shade(),
+                    pledit::TitleButton::Close => self.close_playlist(),
+                }
             }
             PointerEventKind::Leave { .. } => {
+                let redraw = self.playlist_state.pressed_title.take().is_some();
                 if let Some(pl) = &mut self.playlist {
                     pl.armed_move = None;
+                    pl.title_last_click = None;
                     pl.grip_hover = false;
+                }
+                if redraw {
+                    self.redraw_playlist();
                 }
             }
             _ => {}
@@ -758,13 +931,18 @@ impl App {
             return;
         }
         let (rows, _current) = (self.playlist_source)();
-        self.jump_state = jump::JumpState { rows, query: String::new(), selected: 0, scroll: 0 };
+        self.jump_state = jump::JumpState {
+            rows,
+            query: String::new(),
+            selected: 0,
+            scroll: 0,
+        };
         let (w, h) = (jump::JUMP_W, jump::JUMP_H);
         let fb = jump::compose(&self.jump_state, w, h);
         let surface = self.compositor.create_surface(&self.qh);
-        let window = self
-            .xdg_shell
-            .create_window(surface, WindowDecorations::RequestClient, &self.qh);
+        let window =
+            self.xdg_shell
+                .create_window(surface, WindowDecorations::RequestClient, &self.qh);
         window.set_title("xubamp jump to file");
         window.set_app_id("xubamp");
         // Fixed size for now (the classic dialog is resizable; that can follow).
@@ -807,7 +985,11 @@ impl App {
 
     /// Recompose and present the jump dialog from `jump_state`, if open and mapped.
     fn redraw_jump(&mut self) {
-        let Some((w, h)) = self.jump_win.as_ref().filter(|j| j.configured).map(|j| (j.width, j.height))
+        let Some((w, h)) = self
+            .jump_win
+            .as_ref()
+            .filter(|j| j.configured)
+            .map(|j| (j.width, j.height))
         else {
             return;
         };
@@ -932,7 +1114,13 @@ impl CompositorHandler for App {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
+    fn frame(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _: u32,
+    ) {
         // Only the main window drives the frame-callback (visualizer) loop; the playlist is static.
         if surface == self.window.wl_surface() {
             self.on_frame();
@@ -977,23 +1165,27 @@ impl WindowHandler for App {
     ) {
         if *window == self.window {
             self.configured = true;
-            self.draw();
-        } else if self.playlist.as_ref().is_some_and(|pl| *window == pl.window) {
-            // Render exactly the size the compositor asks for (clamped to the minimum), so the
-            // buffer always matches the configured geometry, and remember it so a reopen restores
-            // the size. A (None, None) suggestion (the initial map, or an un-minimize that keeps the
-            // size) leaves the current size. Snapping to a coarser grid here made the window drift
-            // on minimize/restore, so we do not.
-            if let (Some(w), Some(h)) = configure.new_size {
-                let w = (w.get() as i32).max(xubamp_skin::sprites::PLEDIT_W);
-                let h = (h.get() as i32).max(xubamp_skin::sprites::PLEDIT_H);
-                self.pl_size = (w, h);
-                if let Some(pl) = &mut self.playlist {
-                    pl.width = w;
-                    pl.height = h;
-                }
-            }
+            // Initial configure maps the surface. Later configures reassert the framebuffer that
+            // matches current shade state; toggles already attach it immediately.
+            self.redraw();
+        } else if self
+            .playlist
+            .as_ref()
+            .is_some_and(|pl| *window == pl.window)
+        {
+            // A shaded playlist accepts only the suggested width and stays exactly 14px tall; its
+            // remembered expanded height is untouched. Expanded mode accepts both dimensions and
+            // clamps them to the classic minimum.
+            let suggested = (
+                configure.new_size.0.map(|w| w.get() as i32),
+                configure.new_size.1.map(|h| h.get() as i32),
+            );
+            let ((w, h), expanded) =
+                playlist_configured_size(self.playlist_state.shade, self.pl_size, suggested);
+            self.pl_size = expanded;
             if let Some(pl) = &mut self.playlist {
+                pl.width = w;
+                pl.height = h;
                 pl.configured = true;
             }
             self.redraw_playlist();
@@ -1052,9 +1244,11 @@ impl SeatHandler for App {
                     &seat,
                     None,
                     loop_handle,
-                    Box::new(|app: &mut App, _kbd: &wl_keyboard::WlKeyboard, event: KeyEvent| {
-                        app.on_key(&event, true);
-                    }),
+                    Box::new(
+                        |app: &mut App, _kbd: &wl_keyboard::WlKeyboard, event: KeyEvent| {
+                            app.on_key(&event, true);
+                        },
+                    ),
                 )
                 .expect("failed to create keyboard");
             self.keyboard = Some(keyboard);
@@ -1126,15 +1320,25 @@ impl PointerHandler for App {
                         let _ = pointer.set_cursor(conn, CursorIcon::Default);
                     }
                 }
-                PointerEventKind::Press {
-                    button, serial, ..
-                } if button == BTN_LEFT => {
+                PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
                     let outcome = hit::on_press(&mut self.state, x, y);
                     // A title-bar press arms a window drag, but does NOT start it yet: the compositor
                     // move is deferred until the pointer moves past a threshold, so a click (or a
-                    // near-miss on a small title-bar button) does not jump the window.
+                    // near-miss on a small title-bar button) does not jump the window. A second quick
+                    // title-bar click toggles windowshade instead (the classic double-click), same as
+                    // the shade button.
                     if outcome.start_move {
-                        self.armed_move = Some((x, y, serial));
+                        let now = Instant::now();
+                        let double = self
+                            .title_last_click
+                            .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                        if double {
+                            self.title_last_click = None;
+                            self.toggle_shade();
+                        } else {
+                            self.title_last_click = Some(now);
+                            self.armed_move = Some((x, y, serial));
+                        }
                     }
                     self.apply(outcome);
                 }
@@ -1149,6 +1353,9 @@ impl PointerHandler for App {
                                 self.window.move_(seat, serial);
                             }
                             self.armed_move = None;
+                            // A drag is not the first half of a double-click, so it must not arm a
+                            // windowshade toggle on the next title-bar press.
+                            self.title_last_click = None;
                         }
                     }
                     // Drives slider dragging; inert otherwise. Wayland keeps delivering motion
@@ -1362,3 +1569,51 @@ delegate_shm!(App);
 delegate_xdg_shell!(App);
 delegate_xdg_window!(App);
 delegate_registry!(App);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn playlist_shade_preserves_expanded_height_and_accepts_only_width() {
+        let expanded = (350, 203);
+        let (shown, remembered) = playlist_configured_size(true, expanded, (Some(425), Some(999)));
+        assert_eq!(
+            shown,
+            (425, xubamp_skin::sprites::PLEDIT_SHADE_H),
+            "mapped buffer is completely collapsed"
+        );
+        assert_eq!(
+            remembered,
+            (425, 203),
+            "shade resize updates width without destroying expanded height"
+        );
+
+        let (restored, remembered) = playlist_configured_size(false, remembered, (None, None));
+        assert_eq!(restored, (425, 203));
+        assert_eq!(remembered, restored);
+    }
+
+    #[test]
+    fn playlist_configure_clamps_each_expanded_dimension_to_the_classic_minimum() {
+        let (shown, remembered) = playlist_configured_size(false, (400, 200), (Some(10), Some(20)));
+        assert_eq!(
+            shown,
+            (
+                xubamp_skin::sprites::PLEDIT_W,
+                xubamp_skin::sprites::PLEDIT_H
+            )
+        );
+        assert_eq!(remembered, shown);
+
+        let (shade, remembered) = playlist_configured_size(true, shown, (Some(10), None));
+        assert_eq!(
+            shade,
+            (
+                xubamp_skin::sprites::PLEDIT_W,
+                xubamp_skin::sprites::PLEDIT_SHADE_H
+            )
+        );
+        assert_eq!(remembered.1, xubamp_skin::sprites::PLEDIT_H);
+    }
+}

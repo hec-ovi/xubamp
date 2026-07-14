@@ -47,7 +47,8 @@ use wayland_client::{
 };
 use xubamp_render::vis::{VisMode, FFT_N};
 use xubamp_render::{
-    compose_main_window, equalizer, hit, jump, marquee, menu, pledit, preferences, Framebuffer,
+    adwaita, compose_main_window, equalizer, hit, jump, marquee, menu, pledit, preferences,
+    Framebuffer,
 };
 use xubamp_skin::{default_skin, Skin};
 
@@ -222,6 +223,9 @@ pub struct UiOptions {
     pub scroll_title: bool,
     pub visualization_mode: VisMode,
     pub visualization_show_peaks: bool,
+    /// Whether the desktop prefers a dark color scheme, so the native (non-skin) menus and dialogs
+    /// use the Adwaita dark palette. Read from the settings portal by the application at startup.
+    pub dark: bool,
 }
 
 impl Default for UiOptions {
@@ -231,6 +235,7 @@ impl Default for UiOptions {
             scroll_title: true,
             visualization_mode: VisMode::Bars,
             visualization_show_peaks: true,
+            dark: false,
         }
     }
 }
@@ -558,6 +563,12 @@ pub fn run(
         jump_state: jump::JumpState::default(),
         preferences_win: None,
         preferences_state: preferences::PreferencesState::new(runtime.preferences_model),
+        ui_font: adwaita::UiFont::load_system(),
+        ui_palette: if runtime.ui_options.dark {
+            adwaita::Palette::dark()
+        } else {
+            adwaita::Palette::light()
+        },
         playlist_source: runtime.playlist_source,
         external_source: runtime.external_source,
         mod_ctrl: false,
@@ -719,6 +730,12 @@ struct App {
     /// Singleton native Preferences window and its pure interaction model.
     preferences_win: Option<PreferencesWin>,
     preferences_state: preferences::PreferencesState,
+    /// System UI font (Adwaita Sans / Cantarell / DejaVu) loaded once, used to paint the non-skin
+    /// menus and dialogs natively. `None` on a host with no usable font, where they fall back to the
+    /// classic bitmap chrome.
+    ui_font: Option<adwaita::UiFont>,
+    /// The Adwaita palette (light or dark) chosen from the desktop color scheme at startup.
+    ui_palette: adwaita::Palette,
     /// Latest Ctrl/Shift state, mirrored from `update_modifiers`. Always present (unlike the
     /// keyboard-gated `modifiers`) so the pointer handler can read them for ctrl/shift-click
     /// selection; they simply stay false in a build without the keyboard feature.
@@ -1272,6 +1289,15 @@ impl App {
         }
     }
 
+    /// The theme for the classic popup menus: a native Adwaita popover when a system UI font loaded,
+    /// otherwise the bitmap chrome. Borrows the loaded font for the duration of one compose call.
+    fn menu_theme(&self) -> menu::MenuTheme<'_> {
+        match &self.ui_font {
+            Some(font) => menu::MenuTheme::adwaita(self.ui_palette, font),
+            None => menu::MenuTheme::classic(),
+        }
+    }
+
     fn open_equalizer_presets_menu(&mut self) {
         let names = self
             .equalizer_presets
@@ -1286,7 +1312,7 @@ impl App {
         };
         let mut interaction = menu::MenuInteraction::default();
         interaction.open(&model);
-        let fb = menu::compose(&model, &interaction);
+        let fb = menu::compose(&model, &interaction, &self.menu_theme());
         let button = xubamp_skin::sprites::EQ_PRESETS;
         let position = panes::Point {
             x: self.equalizer_position.x + button.dst_x + button.src.w - fb.width as i32,
@@ -1316,7 +1342,7 @@ impl App {
         });
         let mut interaction = menu::MenuInteraction::default();
         interaction.open(&model);
-        let fb = menu::compose(&model, &interaction);
+        let fb = menu::compose(&model, &interaction, &self.menu_theme());
         self.open_popup_menu(PopupOwner::Main, model, interaction, fb, position);
     }
 
@@ -1333,7 +1359,7 @@ impl App {
         };
         let mut interaction = menu::MenuInteraction::default();
         interaction.open(&model);
-        let fb = menu::compose(&model, &interaction);
+        let fb = menu::compose(&model, &interaction, &self.menu_theme());
         let Some(playlist) = self.playlist.as_ref() else {
             return;
         };
@@ -1411,10 +1437,16 @@ impl App {
     }
 
     fn redraw_popup_menu(&mut self) {
+        // Build the theme from the font/palette fields before borrowing popup_menu mutably, so the
+        // immutable font borrow and the mutable popup borrow stay on disjoint fields.
+        let theme = match &self.ui_font {
+            Some(font) => menu::MenuTheme::adwaita(self.ui_palette, font),
+            None => menu::MenuTheme::classic(),
+        };
         let Some(popup) = &mut self.popup_menu else {
             return;
         };
-        popup.fb = menu::compose(&popup.model, &popup.interaction);
+        popup.fb = menu::compose(&popup.model, &popup.interaction, &theme);
         popup.present();
     }
 

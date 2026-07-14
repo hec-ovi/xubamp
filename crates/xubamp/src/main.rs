@@ -486,6 +486,12 @@ fn main() {
             xubamp_config::VisualizationMode::Off => xubamp_render::vis::VisMode::Off,
         },
         visualization_show_peaks: settings.visualization.show_peaks,
+        // Native (non-skin) menus and dialogs follow the desktop's light/dark preference, read once
+        // at startup from the settings portal. Unreachable portal falls back to light.
+        dark: matches!(
+            xubamp_portal::read_color_scheme_blocking(),
+            xubamp_portal::ColorScheme::Dark
+        ),
     };
     let equalizer_presets = classic_equalizer_presets();
 

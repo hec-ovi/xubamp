@@ -8,6 +8,7 @@ use std::fmt;
 
 use xubamp_skin::font;
 
+use crate::adwaita::{self, Palette, UiFont};
 use crate::Framebuffer;
 
 /// Height of an ordinary menu row in pixels.
@@ -907,9 +908,45 @@ fn hit_with_pane<A>(
         })
 }
 
+/// How a popup menu is painted. `classic()` is the original bitmap chrome (also used by tests and
+/// any headless build with no system font); `adwaita(...)` paints a native GNOME popover with the
+/// system UI font. Layout and hit-testing are identical either way, so only the pixels change and a
+/// menu stays clickable in exactly the same places.
+pub struct MenuTheme<'a> {
+    palette: Palette,
+    font: Option<&'a UiFont>,
+    font_px: f32,
+}
+
+impl Default for MenuTheme<'_> {
+    fn default() -> Self {
+        Self::classic()
+    }
+}
+
+impl<'a> MenuTheme<'a> {
+    /// The classic bitmap-font menu chrome.
+    pub fn classic() -> Self {
+        Self {
+            palette: Palette::light(),
+            font: None,
+            font_px: 0.0,
+        }
+    }
+
+    /// A native Adwaita popover in `palette`, drawn with the system UI `font`.
+    pub fn adwaita(palette: Palette, font: &'a UiFont) -> Self {
+        Self {
+            palette,
+            font: Some(font),
+            font_px: 12.5,
+        }
+    }
+}
+
 /// Render every open pane into one RGBA framebuffer. Pixels belonging to each popup are opaque;
 /// unused corners of the combined bounding rectangle remain transparent for later popup splitting.
-pub fn compose<A>(menu: &Menu<A>, state: &MenuInteraction) -> Framebuffer {
+pub fn compose<A>(menu: &Menu<A>, state: &MenuInteraction, theme: &MenuTheme) -> Framebuffer {
     let panes = layout_stack(menu, state);
     let width = panes
         .iter()
@@ -925,15 +962,25 @@ pub fn compose<A>(menu: &Menu<A>, state: &MenuInteraction) -> Framebuffer {
         .max(0) as u32;
     let mut fb = Framebuffer::new(width, height);
     for pane in &panes {
-        draw_pane(&mut fb, menu, state, pane);
+        draw_pane(&mut fb, menu, state, pane, theme);
     }
     fb
 }
 
-fn draw_pane<A>(fb: &mut Framebuffer, root: &Menu<A>, state: &MenuInteraction, pane: &PaneLayout) {
+fn draw_pane<A>(
+    fb: &mut Framebuffer,
+    root: &Menu<A>,
+    state: &MenuInteraction,
+    pane: &PaneLayout,
+    theme: &MenuTheme,
+) {
     let Some(menu) = menu_at_path(root, &pane.path) else {
         return;
     };
+    if let Some(font) = theme.font {
+        draw_pane_adwaita(fb, menu, state, pane, &theme.palette, font, theme.font_px);
+        return;
+    }
     fill(fb, pane.rect, FACE);
     line_h(fb, pane.rect.x, pane.rect.y, pane.rect.width, LIGHT);
     line_v(fb, pane.rect.x, pane.rect.y, pane.rect.height, LIGHT);
@@ -1023,6 +1070,82 @@ fn draw_pane<A>(fb: &mut Framebuffer, root: &Menu<A>, state: &MenuInteraction, p
                 row.y + row.height / 2,
                 color,
             );
+        }
+    }
+}
+
+/// Paint one popup pane as a native GNOME popover: a rounded, bordered background, an inset accent
+/// pill on the focused row, system-font labels, dimmed right-aligned shortcuts, and a chevron for
+/// submenus. Layout (row rects) is shared with the classic path, so hit-testing is unchanged.
+fn draw_pane_adwaita<A>(
+    fb: &mut Framebuffer,
+    menu: &Menu<A>,
+    state: &MenuInteraction,
+    pane: &PaneLayout,
+    p: &Palette,
+    font: &UiFont,
+    px: f32,
+) {
+    let r = pane.rect;
+    adwaita::fill_rounded_rect(fb, r.x, r.y, r.width, r.height, adwaita::POPOVER_RADIUS, p.popover_bg);
+    adwaita::stroke_rounded_rect(
+        fb,
+        r.x,
+        r.y,
+        r.width,
+        r.height,
+        adwaita::POPOVER_RADIUS,
+        1,
+        p.border,
+    );
+
+    let selected = state.selection.get(pane.depth).copied();
+    for (index, (item, row)) in menu.items.iter().zip(&pane.rows).enumerate() {
+        if matches!(item.kind, MenuItemKind::Separator) {
+            adwaita::draw_separator(fb, row.x + 8, row.y + row.height / 2, row.width - 16, p);
+            continue;
+        }
+        let is_selected = selected == Some(index);
+        if is_selected {
+            // libadwaita highlights the focused row as an inset rounded pill.
+            adwaita::fill_rounded_rect(
+                fb,
+                row.x + 4,
+                row.y + 2,
+                row.width - 8,
+                row.height - 4,
+                6,
+                p.selected_row,
+            );
+        }
+        let text_color = if !item.state.enabled {
+            p.dim_fg
+        } else if is_selected {
+            p.selected_fg
+        } else {
+            p.fg
+        };
+        let rgb = [text_color[0], text_color[1], text_color[2]];
+        draw_mark(fb, row.x + LEFT_PAD, row.y + row.height / 2, item.state.mark, rgb);
+        // Baseline centered in the row for the system font (which positions glyphs by their baseline,
+        // unlike the top-left bitmap font).
+        let baseline = row.y + row.height / 2 + (px * 0.34) as i32;
+        font.draw_text(
+            fb,
+            row.x + LEFT_PAD + MARK_WIDTH,
+            baseline,
+            &item.label,
+            px,
+            text_color,
+        );
+        if let Some(shortcut) = &item.shortcut {
+            let sc = if is_selected { text_color } else { p.dim_fg };
+            let width = font.text_width(shortcut, px).ceil() as i32;
+            let x = row.x + row.width - RIGHT_PAD - ARROW_WIDTH - width;
+            font.draw_text(fb, x, baseline, shortcut, px, sc);
+        }
+        if matches!(item.kind, MenuItemKind::Submenu(_)) {
+            draw_arrow(fb, row.x + row.width - RIGHT_PAD - 5, row.y + row.height / 2, rgb);
         }
     }
 }
@@ -1463,7 +1586,7 @@ mod tests {
         state.open(&menu);
         state.key(&menu, MenuKey::Character('o'));
         let panes = layout_stack(&menu, &state);
-        let fb = compose(&menu, &state);
+        let fb = compose(&menu, &state, &MenuTheme::classic());
         assert!(fb.width > panes[0].rect.width as u32);
         assert!(fb.height >= panes[0].rect.height as u32);
         for pane in panes {
@@ -1481,13 +1604,41 @@ mod tests {
     fn closed_and_empty_menus_are_safe() {
         let menu: Menu<TestAction> = Menu::default();
         let mut state = MenuInteraction::default();
-        let fb = compose(&menu, &state);
+        let fb = compose(&menu, &state, &MenuTheme::classic());
         assert_eq!((fb.width, fb.height), (0, 0));
         state.open(&menu);
         assert!(state.selected_path().is_empty());
         assert_eq!(state.key(&menu, MenuKey::Down), MenuOutcome::Unchanged);
-        let fb = compose(&menu, &state);
+        let fb = compose(&menu, &state, &MenuTheme::classic());
         assert_eq!(fb.width, MIN_WIDTH as u32);
         assert_eq!(fb.height, (2 * BORDER) as u32);
+    }
+
+    #[test]
+    fn adwaita_theme_paints_a_rounded_popover_that_differs_by_palette() {
+        // Skip on a host with no system UI font; the classic path still covers rendering there.
+        let Some(font) = crate::adwaita::UiFont::load_system() else {
+            return;
+        };
+        let menu = interaction_menu();
+        let mut state = MenuInteraction::default();
+        state.open(&menu);
+        let light = compose(&menu, &state, &MenuTheme::adwaita(Palette::light(), &font));
+        let dark = compose(&menu, &state, &MenuTheme::adwaita(Palette::dark(), &font));
+
+        // The theme only repaints; layout is shared, so the surface size is identical.
+        assert_eq!((light.width, light.height), (dark.width, dark.height));
+        // Rounded corners leave the extreme corner transparent.
+        assert_eq!(light.rgba[3], 0, "rounded top-left corner is transparent");
+        // A popover-background pixel above the first row's selection pill is opaque and its color
+        // differs between the light and dark palettes.
+        let cx = (light.width / 2) as usize;
+        let offset = (3 * light.width as usize + cx) * 4;
+        assert_eq!(light.rgba[offset + 3], 255, "popover interior is opaque");
+        assert_ne!(
+            &light.rgba[offset..offset + 3],
+            &dark.rgba[offset..offset + 3],
+            "light and dark popovers use different backgrounds"
+        );
     }
 }

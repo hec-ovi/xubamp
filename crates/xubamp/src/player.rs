@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use xubamp_audio::engine::AudioEngine;
 use xubamp_audio::playlist::{Playlist, ShuffleCycle, TrackId};
 use xubamp_audio::EqSettings;
+use xubamp_library::is_audio_path;
 use xubamp_render::hit::{ModeButton, Playback, Transport};
 use xubamp_render::pledit;
 
@@ -45,19 +46,19 @@ impl Player {
     /// Construct a player with the classic defaults. Kept for callers and tests that do not restore
     /// persisted settings.
     pub fn new(tracks: Vec<PathBuf>) -> Self {
-        let playlist = Playlist::new(tracks);
-        let mut shuffle_cycle = ShuffleCycle::from_entropy();
-        shuffle_cycle.anchor(&playlist);
-        Self {
-            playlist,
+        let mut player = Self {
+            playlist: Playlist::default(),
             engine: None,
             volume: 100,
             balance: 0,
             stopped: false,
             shuffle: false,
-            shuffle_cycle,
+            shuffle_cycle: ShuffleCycle::from_entropy(),
             equalizer: EqSettings::default(),
-        }
+        };
+        player.append_paths(tracks);
+        player.shuffle_cycle.anchor(&player.playlist);
+        player
     }
 
     /// Construct a player from persisted playback and equalizer settings without starting audio.
@@ -76,6 +77,18 @@ impl Player {
             player.shuffle_cycle.anchor(&player.playlist);
         }
         player
+    }
+
+    /// Append supported local audio paths in the user's input order without changing transport
+    /// state or starting a decoder. Duplicate paths remain distinct playlist entries, matching a
+    /// classic playlist. When the playlist was empty, its first accepted entry becomes current; the
+    /// stopped, paused, or active transport state is otherwise left exactly as it was.
+    ///
+    /// The returned stable IDs correspond one-for-one with accepted MP3/WAV paths. Unsupported
+    /// extensions are ignored as a final audio-only guard after file or directory selection.
+    pub fn append_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Vec<TrackId> {
+        self.playlist
+            .extend(paths.into_iter().filter(|path| is_audio_path(path)))
     }
 
     /// Start playing the current track (called once at startup). No-op on an empty playlist.
@@ -646,7 +659,7 @@ mod tests {
                 .collect()
         }
 
-        let mut player = Player::new(["a", "b", "c"].map(PathBuf::from).to_vec());
+        let mut player = Player::new(["a.mp3", "b.mp3", "c.mp3"].map(PathBuf::from).to_vec());
         player.playlist.select(1);
 
         assert_eq!(
@@ -654,14 +667,14 @@ mod tests {
                 &player,
                 player.linear_candidates(1, Direction::Forward, false),
             ),
-            ["c"].map(PathBuf::from)
+            ["c.mp3"].map(PathBuf::from)
         );
         assert_eq!(
             paths(
                 &player,
                 player.linear_candidates(1, Direction::Backward, false),
             ),
-            ["a"].map(PathBuf::from)
+            ["a.mp3"].map(PathBuf::from)
         );
 
         player.playlist.set_repeat(true);
@@ -670,7 +683,7 @@ mod tests {
                 &player,
                 player.linear_candidates(1, Direction::Forward, false),
             ),
-            ["c", "a", "b"].map(PathBuf::from),
+            ["c.mp3", "a.mp3", "b.mp3"].map(PathBuf::from),
             "repeat visits one full cycle and restarts current last"
         );
         assert_eq!(
@@ -678,7 +691,7 @@ mod tests {
                 &player,
                 player.linear_candidates(1, Direction::Backward, false),
             ),
-            ["a", "c", "b"].map(PathBuf::from)
+            ["a.mp3", "c.mp3", "b.mp3"].map(PathBuf::from)
         );
     }
 
@@ -705,6 +718,82 @@ mod tests {
         player.transport(Transport::Play);
         assert!(player.engine.is_none());
         assert!(player.playback().stopped);
+    }
+
+    #[test]
+    fn append_paths_populates_an_empty_stopped_playlist_without_autoplay() {
+        let mut player = Player::new(Vec::new());
+        player.start();
+        assert!(player.stopped);
+
+        let added = player.append_paths([
+            PathBuf::from("first.mp3"),
+            PathBuf::from("movie.mp4"),
+            PathBuf::from("first.mp3"),
+            PathBuf::from("second.WAV"),
+        ]);
+
+        assert_eq!(added.len(), 3, "video is rejected and duplicates are kept");
+        assert_eq!(player.playlist.current_id(), Some(added[0]));
+        assert_eq!(player.playlist_view().1, Some(0));
+        assert_eq!(
+            player.playlist.tracks().collect::<Vec<_>>(),
+            ["first.mp3", "first.mp3", "second.WAV"].map(Path::new)
+        );
+        assert!(
+            player.engine.is_none(),
+            "append does not construct a decoder"
+        );
+        assert!(
+            player.stopped,
+            "append preserves the stopped transport state"
+        );
+        assert!(!player.playback().playing);
+    }
+
+    #[test]
+    fn append_paths_preserves_current_history_and_joins_the_shuffle_cycle() {
+        let mut player = Player::with_settings(
+            ["a.mp3", "b.wav", "c.mp3"].map(PathBuf::from).to_vec(),
+            true,
+            false,
+            EqSettings::default(),
+        );
+        player.shuffle_cycle = ShuffleCycle::with_seed(0xA11D);
+        player.shuffle_cycle.anchor(&player.playlist);
+        let shuffled = player.shuffle_cycle.next(&player.playlist, false).unwrap();
+        player.playlist.commit_forward(shuffled).unwrap();
+        let current = player.playlist.current_id();
+        let previous = player.playlist.back_candidate(None);
+        let was_stopped = player.stopped;
+
+        let added = player.append_paths([
+            PathBuf::from("d.wav"),
+            PathBuf::from("e.mp3"),
+            PathBuf::from("notes.txt"),
+        ]);
+
+        assert_eq!(added.len(), 2);
+        assert_eq!(player.playlist.current_id(), current);
+        assert_eq!(player.playlist.back_candidate(None), previous);
+        assert_eq!(player.stopped, was_stopped);
+        assert!(player.engine.is_none());
+
+        let mut pending = Vec::new();
+        while let Some(id) = player.shuffle_cycle.next(&player.playlist, false) {
+            pending.push(id);
+        }
+        for id in added {
+            assert!(
+                pending.contains(&id),
+                "every newly appended stable ID joins the pending shuffle cycle"
+            );
+        }
+        assert_eq!(
+            pending.iter().copied().collect::<HashSet<_>>().len(),
+            pending.len(),
+            "playlist edits do not duplicate a pending shuffle member"
+        );
     }
 
     /// Write a dependency-free 16-bit PCM stereo WAV of a 440 Hz sine, `seconds` long.

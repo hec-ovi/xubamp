@@ -260,11 +260,11 @@ impl Playlist {
         id
     }
 
-    /// Append entries in input order.
-    pub fn extend(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
-        for path in paths {
-            self.add(path);
-        }
+    /// Append entries in input order and return their stable identities in that same order.
+    /// Existing selection and Back/Forward history are left untouched; only an empty playlist
+    /// selects the first new entry.
+    pub fn extend(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Vec<TrackId> {
+        paths.into_iter().map(|path| self.add(path)).collect()
     }
 
     /// Insert an entry before `index`. `index == len` appends; larger indices are rejected.
@@ -846,6 +846,38 @@ mod tests {
             "clear does not recycle identities"
         );
         assert_eq!(p.current_id(), Some(after_clear));
+    }
+
+    #[test]
+    fn extending_preserves_order_selection_history_and_duplicate_entries() {
+        let mut p = pl(&["a.mp3", "b.wav", "c.mp3"]);
+        p.forward(Some(1)); // a -> b, history=[a]
+        p.forward(Some(2)); // b -> c, history=[a,b]
+        p.back(None); // c -> b, future=[c]
+        let current = p.current_id().unwrap();
+        let previous = p.back_candidate(None).unwrap();
+        let redo = p.forward_candidate(None).unwrap();
+
+        let added = p.extend([
+            PathBuf::from("d.wav"),
+            PathBuf::from("a.mp3"),
+            PathBuf::from("e.mp3"),
+        ]);
+
+        assert_eq!(added.len(), 3);
+        assert_eq!(added.iter().copied().collect::<HashSet<_>>().len(), 3);
+        assert_eq!(p.current_id(), Some(current));
+        assert_eq!(p.back_candidate(None), Some(previous));
+        assert_eq!(p.forward_candidate(None), Some(redo));
+        assert_eq!(
+            p.tracks().collect::<Vec<_>>(),
+            ["a.mp3", "b.wav", "c.mp3", "d.wav", "a.mp3", "e.mp3"].map(Path::new)
+        );
+        assert_ne!(
+            added[1],
+            p.track_id(0).unwrap(),
+            "a duplicate path is a distinct playlist entry"
+        );
     }
 
     #[test]

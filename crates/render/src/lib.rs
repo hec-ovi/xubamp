@@ -9,6 +9,7 @@ use xubamp_skin::bmp::Image;
 use xubamp_skin::sprites::{self, Placement, Rect};
 use xubamp_skin::{textfont, Skin};
 
+pub mod equalizer;
 pub mod hit;
 pub mod jump;
 pub mod marquee;

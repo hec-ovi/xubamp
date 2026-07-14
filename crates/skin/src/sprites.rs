@@ -219,6 +219,101 @@ pub const REPEAT_OFF_PRESSED: Placement = Placement::new(Rect::new(0, 15, 28, 15
 pub const REPEAT_ON: Placement = Placement::new(Rect::new(0, 30, 28, 15), 210, 89);
 pub const REPEAT_ON_PRESSED: Placement = Placement::new(Rect::new(0, 45, 28, 15), 210, 89);
 
+// --- The equalizer (EQMAIN / optional EQ_EX) window. ---
+//
+// The expanded equalizer has the same fixed dimensions as the main window. EQMAIN holds a complete
+// background followed by title/control sprites and a 2x14 grid of value-dependent slider frames.
+// EQ_EX is optional and supplies the compact title strip, its tiny volume/balance thumbs, and the
+// pressed shade/close buttons. Coordinates match the classic skin sheet layout.
+
+/// Expanded equalizer size and its fully collapsed height.
+pub const EQ_W: i32 = 275;
+pub const EQ_H: i32 = 116;
+pub const EQ_SHADE_H: i32 = 14;
+
+/// Expanded background and focused/unfocused title strips from EQMAIN.BMP.
+pub const EQ_BACKGROUND: Placement = Placement::new(Rect::new(0, 0, EQ_W, EQ_H), 0, 0);
+pub const EQ_TITLE_ACTIVE: Placement = Placement::new(Rect::new(0, 134, EQ_W, 14), 0, 0);
+pub const EQ_TITLE_INACTIVE: Placement = Placement::new(Rect::new(0, 149, EQ_W, 14), 0, 0);
+
+/// Expanded title-button hit/draw geometry. Released artwork is present in the title strip.
+pub const EQ_TITLE_BUTTON_Y: i32 = 3;
+pub const EQ_TITLE_BUTTON_W: i32 = 9;
+pub const EQ_SHADE_BUTTON_X: i32 = 254;
+pub const EQ_CLOSE_BUTTON_X: i32 = 264;
+pub const EQ_CLOSE: Rect = Rect::new(0, 116, 9, 9);
+pub const EQ_CLOSE_PRESSED: Rect = Rect::new(0, 125, 9, 9);
+/// Used when an expanded skin omits EQ_EX: this cell exposes the pressed-looking shade area from
+/// EQMAIN itself instead of borrowing unrelated default-skin art.
+pub const EQ_SHADE_PRESSED_FALLBACK: Rect = Rect::new(254, 152, 9, 9);
+
+/// Expanded ON and AUTO buttons. AUTO is drawn from its ordinary cell but intentionally has no
+/// action in xubamp; the renderer dims it so unsupported automatic presets are unambiguous.
+pub const EQMAIN_ON: Placement = Placement::new(Rect::new(10, 119, 26, 12), 14, 18);
+pub const EQMAIN_ON_PRESSED: Placement = Placement::new(Rect::new(128, 119, 26, 12), 14, 18);
+pub const EQMAIN_ON_SELECTED: Placement = Placement::new(Rect::new(69, 119, 26, 12), 14, 18);
+pub const EQMAIN_ON_SELECTED_PRESSED: Placement =
+    Placement::new(Rect::new(187, 119, 26, 12), 14, 18);
+pub const EQ_AUTO: Placement = Placement::new(Rect::new(36, 119, 32, 12), 40, 18);
+
+/// Presets button, which opens the native preset menu/dialog flow in the platform layer.
+pub const EQ_PRESETS: Placement = Placement::new(Rect::new(224, 164, 44, 12), 217, 18);
+pub const EQ_PRESETS_PRESSED: Placement = Placement::new(Rect::new(224, 176, 44, 12), 217, 18);
+
+/// The 113x19 response graph and its palette/one-pixel preamp line sources.
+pub const EQ_GRAPH: Placement = Placement::new(Rect::new(0, 294, 113, 19), 86, 17);
+pub const EQ_GRAPH_COLORS: Rect = Rect::new(115, 294, 1, 19);
+pub const EQ_PREAMP_LINE: Rect = Rect::new(0, 314, 113, 1);
+
+/// Slider containers: preamp followed by the ten frequency bands. Each is 14x63 on screen.
+pub const EQ_SLIDER_Y: i32 = 38;
+pub const EQ_PREAMP_X: i32 = 21;
+pub const EQ_BAND_X: [i32; 10] = [78, 96, 114, 132, 150, 168, 186, 204, 222, 240];
+pub const EQ_SLIDER_W: i32 = 14;
+pub const EQ_SLIDER_H: i32 = 63;
+pub const EQ_SLIDER_TRACK_H: i32 = 62;
+
+/// EQMAIN's 28 slider-background frames: 14 columns by 2 rows, spaced 15px horizontally and 65px
+/// vertically. A frame itself is 14x63. Frame zero is -12 dB; frame 27 is +12 dB.
+pub const EQ_SLIDER_GRID: Rect = Rect::new(13, 164, 209, 129);
+pub const EQ_SLIDER_FRAMES: i32 = 28;
+pub const EQ_SLIDER_COLUMNS: i32 = 14;
+pub const EQ_SLIDER_X_STRIDE: i32 = 15;
+pub const EQ_SLIDER_Y_STRIDE: i32 = 65;
+pub const EQ_SLIDER_THUMB: Rect = Rect::new(0, 164, 11, 11);
+pub const EQ_SLIDER_THUMB_PRESSED: Rect = Rect::new(0, 176, 11, 11);
+pub const EQ_SLIDER_THUMB_DX: i32 = 1;
+pub const EQ_SLIDER_THUMB_TRAVEL: i32 = EQ_SLIDER_TRACK_H - EQ_SLIDER_THUMB.h;
+
+/// Optional EQ_EX sheet: focused/unfocused compact backgrounds and value-segmented tiny thumbs.
+pub const EQ_EX_SHADE_ACTIVE: Placement = Placement::new(Rect::new(0, 0, EQ_W, 14), 0, 0);
+pub const EQ_EX_SHADE_INACTIVE: Placement = Placement::new(Rect::new(0, 15, EQ_W, 14), 0, 0);
+pub const EQ_EX_VOLUME_THUMBS: [Rect; 3] = [
+    Rect::new(1, 30, 3, 7),
+    Rect::new(4, 30, 3, 7),
+    Rect::new(7, 30, 3, 7),
+];
+pub const EQ_EX_BALANCE_THUMBS: [Rect; 3] = [
+    Rect::new(11, 30, 3, 7),
+    Rect::new(14, 30, 3, 7),
+    Rect::new(17, 30, 3, 7),
+];
+pub const EQ_EX_SHADE_PRESSED: Rect = Rect::new(1, 38, 9, 9);
+pub const EQ_EX_RESTORE_PRESSED: Rect = Rect::new(1, 47, 9, 9);
+pub const EQ_EX_CLOSE: Rect = Rect::new(11, 38, 9, 9);
+pub const EQ_EX_CLOSE_PRESSED: Rect = Rect::new(11, 47, 9, 9);
+
+/// Compact volume/balance tracks. Their background is baked into the EQ_EX shade strip; only a
+/// 3x7 thumb moves across each track.
+pub const EQ_SHADE_VOLUME_X: i32 = 61;
+pub const EQ_SHADE_VOLUME_Y: i32 = 4;
+pub const EQ_SHADE_VOLUME_W: i32 = 97;
+pub const EQ_SHADE_BALANCE_X: i32 = 164;
+pub const EQ_SHADE_BALANCE_Y: i32 = 4;
+pub const EQ_SHADE_BALANCE_W: i32 = 43;
+pub const EQ_SHADE_THUMB_W: i32 = 3;
+pub const EQ_SHADE_THUMB_H: i32 = 7;
+
 // --- The playlist editor (PLEDIT) window, from pledit.bmp. Built from tiles so it can resize.
 // Coordinates cross-checked against Webamp. ---
 
@@ -569,6 +664,44 @@ mod tests {
         assert_eq!(PLEDIT_CLOSE_BUTTON_RIGHT, 2);
         assert_eq!(PLEDIT_SHADE_BUTTON_RIGHT, 12);
         assert_eq!(PLEDIT_SHADE_RESIZE_RIGHT, 20);
+    }
+
+    #[test]
+    fn equalizer_geometry_matches_the_classic_sheets() {
+        assert_eq!((EQ_W, EQ_H, EQ_SHADE_H), (275, 116, 14));
+        assert_eq!(EQ_BACKGROUND.src, Rect::new(0, 0, 275, 116));
+        assert_eq!(EQ_TITLE_ACTIVE.src, Rect::new(0, 134, 275, 14));
+        assert_eq!((EQMAIN_ON.dst_x, EQMAIN_ON.dst_y), (14, 18));
+        assert_eq!((EQ_AUTO.dst_x, EQ_AUTO.dst_y), (40, 18));
+        assert_eq!((EQ_PRESETS.dst_x, EQ_PRESETS.dst_y), (217, 18));
+        assert_eq!((EQ_GRAPH.dst_x, EQ_GRAPH.dst_y), (86, 17));
+        assert_eq!(EQ_PREAMP_X, 21);
+        assert_eq!(EQ_BAND_X, [78, 96, 114, 132, 150, 168, 186, 204, 222, 240]);
+        assert_eq!(EQ_SLIDER_GRID, Rect::new(13, 164, 209, 129));
+        assert_eq!(EQ_SLIDER_THUMB_TRAVEL, 51);
+
+        for &x in EQ_BAND_X.iter().chain(core::iter::once(&EQ_PREAMP_X)) {
+            assert!(x >= 0 && x + EQ_SLIDER_W <= EQ_W);
+        }
+        const { assert!(EQ_SLIDER_Y + EQ_SLIDER_H <= EQ_H) };
+    }
+
+    #[test]
+    fn equalizer_extension_cells_fit_the_compact_strip() {
+        assert_eq!(EQ_EX_SHADE_ACTIVE.src, Rect::new(0, 0, 275, 14));
+        assert_eq!(EQ_EX_SHADE_INACTIVE.src, Rect::new(0, 15, 275, 14));
+        assert_eq!(EQ_EX_SHADE_PRESSED, Rect::new(1, 38, 9, 9));
+        assert_eq!(EQ_EX_RESTORE_PRESSED, Rect::new(1, 47, 9, 9));
+        assert_eq!(EQ_EX_CLOSE_PRESSED, Rect::new(11, 47, 9, 9));
+        for thumb in EQ_EX_VOLUME_THUMBS
+            .iter()
+            .chain(EQ_EX_BALANCE_THUMBS.iter())
+        {
+            assert_eq!((thumb.w, thumb.h), (EQ_SHADE_THUMB_W, EQ_SHADE_THUMB_H));
+        }
+        const { assert!(EQ_SHADE_VOLUME_Y + EQ_SHADE_THUMB_H <= EQ_SHADE_H) };
+        const { assert!(EQ_SHADE_BALANCE_Y + EQ_SHADE_THUMB_H <= EQ_SHADE_H) };
+        const { assert!(EQ_SHADE_BALANCE_X + EQ_SHADE_BALANCE_W < EQ_SHADE_BUTTON_X) };
     }
 
     #[test]

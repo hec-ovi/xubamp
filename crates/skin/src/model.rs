@@ -36,6 +36,12 @@ pub struct Skin {
     pub monoster: Option<Image>,
     /// The shuffle/repeat/EQ/PL toggle-button sheet (`shufrep.bmp`). `None` skips those buttons.
     pub shufrep: Option<Image>,
+    /// The equalizer window sheet (`eqmain.bmp`): expanded background, title bar, controls,
+    /// response graph, and the 28 slider frames. `None` selects the renderer's authored fallback.
+    pub eqmain: Option<Image>,
+    /// Optional equalizer-windowshade extensions (`eq_ex.bmp`). Classic skins may omit this even
+    /// when they provide `eqmain.bmp`; the renderer then draws its own opaque 14px shade strip.
+    pub eq_ex: Option<Image>,
     /// The playlist-editor window sheet (`pledit.bmp`): the tiled title bar, edges, and bottom bar.
     /// `None` when the skin omits it (the playlist window then cannot be drawn).
     pub pledit: Option<Image>,
@@ -66,6 +72,8 @@ impl Skin {
                 .map(|b| VisColor::parse(&String::from_utf8_lossy(b))),
             monoster: sheet("monoster.bmp"),
             shufrep: sheet("shufrep.bmp"),
+            eqmain: sheet("eqmain.bmp"),
+            eq_ex: sheet("eq_ex.bmp"),
             pledit: sheet("pledit.bmp"),
             pledit_colors: archive
                 .get("pledit.txt")
@@ -110,7 +118,11 @@ mod tests {
         let skin = Skin::from_archive(&archive);
         let vc = skin.viscolor.expect("viscolor parsed");
         assert_eq!(vc.background(), crate::color::Rgb::new(0, 0, 0));
-        assert_eq!(vc.analyzer()[0], crate::color::Rgb::new(255, 0, 0), "spectrum top from the file");
+        assert_eq!(
+            vc.analyzer()[0],
+            crate::color::Rgb::new(255, 0, 0),
+            "spectrum top from the file"
+        );
     }
 
     #[test]
@@ -160,6 +172,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_equalizer_sheets_independently() {
+        let eqmain = solid_bmp_24(275, 315, 11, 22, 33);
+        let eq_ex = solid_bmp_24(275, 56, 44, 55, 66);
+        let wsz = wsz_stored(&[("EQMAIN.BMP", &eqmain), ("eq_ex.bmp", &eq_ex)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        let main = skin.eqmain.expect("eqmain decoded");
+        assert_eq!((main.width, main.height), (275, 315));
+        assert_eq!(&main.rgba[0..4], &[11, 22, 33, 255]);
+        let shade = skin.eq_ex.expect("eq_ex decoded");
+        assert_eq!((shade.width, shade.height), (275, 56));
+        assert_eq!(&shade.rgba[0..4], &[44, 55, 66, 255]);
+    }
+
+    #[test]
+    fn equalizer_extension_is_optional() {
+        let eqmain = solid_bmp_24(275, 315, 7, 8, 9);
+        let wsz = wsz_stored(&[("EQMAIN.BMP", &eqmain)]);
+        let archive = SkinArchive::from_bytes(&wsz).unwrap();
+
+        let skin = Skin::from_archive(&archive);
+        assert!(skin.eqmain.is_some());
+        assert!(skin.eq_ex.is_none());
+    }
+
+    #[test]
     fn prefers_nums_ex_over_numbers() {
         // Both digit sheets present: nums_ex.bmp wins, its top-left pixel proves which loaded.
         let nums_ex = solid_bmp_24(108, 13, 1, 2, 3);
@@ -169,7 +208,11 @@ mod tests {
 
         let skin = Skin::from_archive(&archive);
         let img = skin.numbers.expect("a digit sheet decoded");
-        assert_eq!((img.width, img.height), (108, 13), "the 108-wide nums_ex sheet");
+        assert_eq!(
+            (img.width, img.height),
+            (108, 13),
+            "the 108-wide nums_ex sheet"
+        );
         assert_eq!(&img.rgba[0..4], &[1, 2, 3, 255]);
     }
 
@@ -181,7 +224,11 @@ mod tests {
 
         let skin = Skin::from_archive(&archive);
         let img = skin.numbers.expect("numbers sheet decoded");
-        assert_eq!((img.width, img.height), (99, 13), "the 99-wide classic sheet");
+        assert_eq!(
+            (img.width, img.height),
+            (99, 13),
+            "the 99-wide classic sheet"
+        );
         assert_eq!(&img.rgba[0..4], &[9, 8, 7, 255]);
     }
 }

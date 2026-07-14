@@ -13,6 +13,7 @@ pub mod equalizer;
 pub mod hit;
 pub mod jump;
 pub mod marquee;
+pub mod menu;
 pub mod pledit;
 pub mod posbar;
 pub mod shade;

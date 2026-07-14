@@ -1,0 +1,13 @@
+Source: xubamp
+Section: sound
+Priority: optional
+Maintainer: Hector Oviedo <hector.ernesto.oviedo@gmail.com>
+Standards-Version: 4.7.2
+Homepage: https://github.com/hec-ovi/xubamp
+
+Package: xubamp
+Architecture: any
+Depends: ${shlibs:Depends}
+Description: native Wayland audio player with classic skin support
+ xubamp decodes MP3 and WAV audio, sends it to PipeWire, and renders
+ classic Winamp skin archives on Wayland.

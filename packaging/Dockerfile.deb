@@ -1,0 +1,35 @@
+FROM ubuntu:26.04@sha256:b7f48194d4d8b763a478a621cdc81c27be222ba2206ca3ca6bc42b49685f3d9e
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        appstream \
+        build-essential \
+        ca-certificates \
+        curl \
+        desktop-file-utils \
+        dpkg-dev \
+        git \
+        groff-base \
+        libclang-dev \
+        libpipewire-0.3-dev \
+        libspa-0.2-dev \
+        libxkbcommon-dev \
+        pkg-config \
+        python3 \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG UID=1000
+RUN existing="$(getent passwd "$UID" | cut -d: -f1)"; \
+    if [ -n "$existing" ]; then userdel -r "$existing" 2>/dev/null || true; fi; \
+    useradd -m -u "$UID" builder
+USER builder
+
+ENV RUSTUP_HOME=/home/builder/.rustup \
+    CARGO_HOME=/home/builder/.cargo \
+    PATH=/home/builder/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y --profile minimal --default-toolchain 1.96.0
+
+WORKDIR /work
+CMD ["./packaging/build-deb.sh"]

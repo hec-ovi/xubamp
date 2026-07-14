@@ -1,0 +1,39 @@
+.TH XUBAMP 1 "2026-07-14" "xubamp 0.0.1" "User Commands"
+.SH NAME
+xubamp \- play MP3 and WAV files in a native Wayland player
+.SH SYNOPSIS
+.B xubamp
+.RI [ skin ]
+.RI [ audio-file ...]
+.SH DESCRIPTION
+.B xubamp
+is a native Wayland audio player that sends decoded audio to PipeWire and
+renders classic Winamp skin archives.
+.PP
+Arguments are classified by filename extension. The first
+.B .wsz
+or
+.B .zip
+argument selects the skin. Every
+.B .mp3
+and
+.B .wav
+argument is added to the playlist in command-line order. Unrecognized
+arguments are ignored. If no skin is selected, xubamp uses its built-in skin.
+.SH ENVIRONMENT
+.TP
+.B XUBAMP_SKIN
+Path to a skin archive. A skin argument on the command line takes priority.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for the settings file. If unset, xubamp uses
+.IR $HOME/.config .
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/xubamp/settings.conf
+Persistent settings. The fallback path is
+.IR $HOME/.config/xubamp/settings.conf .
+.SH SEE ALSO
+.UR https://github.com/hec-ovi/xubamp
+Project repository
+.UE

@@ -229,6 +229,13 @@ fn dispatch_portal_request(launcher: &portal_actions::Launcher, request: xubamp_
     }
 }
 
+/// Eject always invokes the replace-and-play chooser. Play does so only for an empty playlist;
+/// Pause stays inert there instead of becoming another chooser shortcut.
+fn transport_opens_media(t: xubamp_render::hit::Transport, playlist_empty: bool) -> bool {
+    matches!(t, xubamp_render::hit::Transport::Eject)
+        || (playlist_empty && matches!(t, xubamp_render::hit::Transport::Play))
+}
+
 /// A primitive engine operation. Transport commands (Play/Pause/Stop) map to a short sequence of
 /// these; keeping the mapping pure (independent of the live engine) lets the play/pause/stop policy
 /// be unit-tested on the host without PipeWire. Only compiled with `audio` (where it is used) or
@@ -377,13 +384,7 @@ fn main() {
                 let mut player = player.borrow_mut();
                 match command {
                     Command::Transport(t) => {
-                        let opens_media = matches!(t, xubamp_render::hit::Transport::Eject)
-                            || (player.is_empty()
-                                && matches!(
-                                    t,
-                                    xubamp_render::hit::Transport::Play
-                                        | xubamp_render::hit::Transport::Pause
-                                ));
+                        let opens_media = transport_opens_media(t, player.is_empty());
                         if opens_media {
                             drop(player);
                             dispatch_portal_request(
@@ -562,11 +563,8 @@ fn main() {
         let on_command = {
             let portal_launcher = portal_launcher.clone();
             move |command: xubamp_render::hit::Command| {
-                use xubamp_render::hit::{Command, Transport};
-                if matches!(
-                    command,
-                    Command::Transport(Transport::Play | Transport::Pause | Transport::Eject)
-                ) {
+                use xubamp_render::hit::Command;
+                if matches!(command, Command::Transport(t) if transport_opens_media(t, true)) {
                     dispatch_portal_request(&portal_launcher, xubamp_wl::MenuRequest::OpenMedia);
                 } else {
                     eprintln!("xubamp: command {command:?}");
@@ -650,12 +648,24 @@ fn main() {
 mod tests {
     use super::{
         apply_ui_session, classic_equalizer_presets, classify, persist_playback_modes,
-        preferred_skin_path, track_title, transport_ops, EngineOp, TransportState, DEV_SKIN,
+        preferred_skin_path, track_title, transport_opens_media, transport_ops, EngineOp,
+        TransportState, DEV_SKIN,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use xubamp_render::hit::Transport;
+
+    #[test]
+    fn only_eject_and_empty_play_open_the_media_picker() {
+        assert!(transport_opens_media(Transport::Eject, false));
+        assert!(transport_opens_media(Transport::Eject, true));
+        assert!(transport_opens_media(Transport::Play, true));
+        assert!(!transport_opens_media(Transport::Play, false));
+        assert!(!transport_opens_media(Transport::Pause, true));
+        assert!(!transport_opens_media(Transport::Stop, true));
+        assert!(!transport_opens_media(Transport::Next, true));
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

@@ -2221,7 +2221,7 @@ fn draw_text_clipped(
     max_width: i32,
     color: [u8; 3],
 ) {
-    let max_chars = (max_width / font::ADVANCE as i32).max(0) as usize;
+    let max_chars = font::chars_fitting(text, max_width.max(0) as u32);
     let clipped: String = text.chars().take(max_chars).collect();
     draw_text(fb, x, y, &clipped, color);
 }

@@ -1,3 +1,11 @@
+xubamp (0.2.5-1) resolute; urgency=medium
+
+  * The built-in playlist font is proportional now, so "Artist - Title"
+    reads with normal single spaces instead of wide monospace cells.
+  * Playlist scrollbar nudged 1px left onto the skin's track groove.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Thu, 16 Jul 2026 11:30:00 +0000
+
 xubamp (0.2.4-1) resolute; urgency=medium
 
   * Playlist mini clock now uses the skin's small text font and aligns its

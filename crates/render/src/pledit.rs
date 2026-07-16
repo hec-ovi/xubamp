@@ -129,8 +129,9 @@ pub enum Region {
 }
 
 /// The scrollbar sits `SCROLLBAR_RIGHT` px in from the right edge and is `SCROLLBAR_W` px wide,
-/// running down the list area between the title and bottom bars.
-const SCROLLBAR_RIGHT: i32 = 15;
+/// running down the list area between the title and bottom bars (measured against the skin's
+/// baked track groove).
+const SCROLLBAR_RIGHT: i32 = 16;
 const SCROLLBAR_W: i32 = 8;
 const SCROLLBAR_MIN_THUMB: i32 = 8;
 /// The classic thumb is a fixed 8x18 cap (the skin ships exactly that sprite), not proportional.
@@ -960,7 +961,7 @@ fn draw_shade_track(
         );
     }
     let available = (width - 5 - 35 - duration_w).max(0) as u32;
-    let max_chars = (available / font::ADVANCE.max(1)) as usize;
+    let max_chars = font::chars_fitting(&row.title, available);
     let title: String = row.title.chars().take(max_chars).collect();
     font::draw_text(&mut fb.rgba, fb.width, fb.height, 5, 4, &title, c);
 }
@@ -1006,7 +1007,7 @@ fn draw_rows(
         };
         // Title, truncated to the remaining width so it never runs into the duration.
         let avail = (list_w - 2 - dur_w).max(0) as u32;
-        let max_chars = (avail / font::ADVANCE.max(1)) as usize;
+        let max_chars = font::chars_fitting(&row.title, avail);
         let title: String = row.title.chars().take(max_chars).collect();
         font::draw_text(
             &mut fb.rgba,

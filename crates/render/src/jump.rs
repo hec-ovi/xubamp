@@ -310,7 +310,7 @@ fn compose_classic(state: &JumpState, width: i32, height: i32) -> Framebuffer {
         if row == state.selected {
             fill(&mut fb, PAD - 1, y - 1, list_w, ROW_H, SEL_BG);
         }
-        let max_chars = ((list_w - 4) / font::ADVANCE as i32).max(0) as usize;
+        let max_chars = font::chars_fitting(title, (list_w - 4).max(0) as u32);
         let clipped: String = title.chars().take(max_chars).collect();
         text(&mut fb, PAD + 1, y, &clipped, FG);
     }

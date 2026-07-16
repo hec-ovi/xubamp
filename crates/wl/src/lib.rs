@@ -3009,9 +3009,7 @@ impl App {
         let (rows, _current) = (self.playlist_source)();
         self.jump_state = jump::JumpState {
             rows,
-            query: String::new(),
-            selected: 0,
-            scroll: 0,
+            ..Default::default()
         };
         let (w, h) = (jump::JUMP_W, jump::JUMP_H);
         let fb = jump::compose(&self.jump_state, w, h, &self.jump_theme());
@@ -3138,6 +3136,22 @@ impl App {
             PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
                 if let Some(j) = &mut self.jump_win {
                     j.armed_move = None;
+                }
+            }
+            PointerEventKind::Axis { vertical, .. } => {
+                // Wheel or trackpad over the dialog scrolls the result list, selection
+                // untouched, like the playlist. Positive scrolls toward the end.
+                let Some(h) = self.jump_win.as_ref().map(|j| j.height) else {
+                    return;
+                };
+                let rows = if vertical.discrete != 0 {
+                    vertical.discrete as f32 * WHEEL_TRACKS_PER_NOTCH
+                } else {
+                    vertical.absolute as f32 / jump::ROW_H as f32
+                };
+                if rows != 0.0 {
+                    self.jump_state.scroll_by_rows(rows, h);
+                    self.redraw_jump();
                 }
             }
             PointerEventKind::Leave { .. } => {

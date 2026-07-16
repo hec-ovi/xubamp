@@ -19,7 +19,8 @@ const TITLE_H: i32 = 18;
 pub const JUMP_TITLE_H: i32 = TITLE_H;
 const SEARCH_H: i32 = 16;
 const BUTTON_H: i32 = 22;
-const ROW_H: i32 = 12;
+/// Result-row height, shared with the platform layer's wheel-delta conversion.
+pub const ROW_H: i32 = 12;
 /// Y at which the results list begins.
 const LIST_TOP: i32 = TITLE_H + SEARCH_H + 3;
 const PAD: i32 = 6;
@@ -54,6 +55,9 @@ pub struct JumpState {
     pub selected: usize,
     /// First visible match position (list scroll).
     pub scroll: usize,
+    /// Fractional wheel rows carried between events, so trackpad deltas smaller than one
+    /// row still add up to scrolling. Transient input state, never persisted.
+    wheel_rem: f32,
 }
 
 impl JumpState {
@@ -129,6 +133,34 @@ impl JumpState {
         } else {
             None
         }
+    }
+
+    /// Wheel scroll: move the view by `rows` (positive toward the end) without touching the
+    /// selection, like a native list box. Fractional deltas accumulate across events so a
+    /// trackpad's sub-row notches still scroll.
+    pub fn scroll_by_rows(&mut self, rows: f32, window_h: i32) {
+        self.wheel_rem += rows;
+        let whole = self.wheel_rem.trunc();
+        if whole == 0.0 {
+            return;
+        }
+        self.wheel_rem -= whole;
+        let max = self.matches().len().saturating_sub(Self::visible_rows(window_h));
+        self.scroll = (self.scroll as i64 + whole as i64).clamp(0, max as i64) as usize;
+    }
+
+    /// The scrollbar thumb as (offset, height) within a `track_h`-tall gutter, or `None`
+    /// when everything fits and no scrollbar should be drawn.
+    fn scrollbar_thumb(&self, window_h: i32, track_h: i32) -> Option<(i32, i32)> {
+        let n = self.matches().len();
+        let vis = Self::visible_rows(window_h);
+        if n <= vis || track_h <= 0 {
+            return None;
+        }
+        let thumb_h = (track_h * vis as i32 / n as i32).max(16).min(track_h);
+        let span = track_h - thumb_h;
+        let offset = (span as i64 * self.scroll as i64 / (n - vis) as i64) as i32;
+        Some((offset.clamp(0, span), thumb_h))
     }
 
     /// Clamp the selection into range and scroll the minimum needed to keep it visible.
@@ -261,6 +293,12 @@ fn compose_adwaita(
         jtext_clipped(&mut fb, font, PAD + 4, y - 2, title, list_w - 8, 11.0, color);
     }
 
+    // Overlay-style scrollbar in the right gutter when the matches overflow the list.
+    let track_h = h - BUTTON_H - LIST_TOP;
+    if let Some((offset, thumb_h)) = state.scrollbar_thumb(h, track_h) {
+        adwaita::fill_rounded_rect(&mut fb, w - 5, LIST_TOP + offset, 3, thumb_h, 1, p.dim_fg);
+    }
+
     // Bottom bar with rounded buttons (Jump is the suggested/primary action).
     let by = h - BUTTON_H;
     adwaita::draw_separator(&mut fb, 0, by, w, p);
@@ -313,6 +351,12 @@ fn compose_classic(state: &JumpState, width: i32, height: i32) -> Framebuffer {
         let max_chars = font::chars_fitting(title, (list_w - 4).max(0) as u32);
         let clipped: String = title.chars().take(max_chars).collect();
         text(&mut fb, PAD + 1, y, &clipped, FG);
+    }
+
+    // Scrollbar in the right gutter when the matches overflow the list.
+    let track_h = h - BUTTON_H - LIST_TOP;
+    if let Some((offset, thumb_h)) = state.scrollbar_thumb(h, track_h) {
+        fill(&mut fb, w - 4, LIST_TOP + offset, 3, thumb_h, DIM);
     }
 
     // Bottom buttons.
@@ -394,6 +438,68 @@ mod tests {
     fn empty_query_matches_everything() {
         let s = state(&["a", "b", "c"]);
         assert_eq!(s.matches(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn wheel_scrolls_the_view_without_moving_the_selection() {
+        let titles: Vec<String> = (0..60).map(|i| format!("track {i}")).collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let mut s = state(&refs);
+        let vis = JumpState::visible_rows(JUMP_H);
+        assert!(vis < 60, "the fixture must overflow the dialog");
+
+        s.scroll_by_rows(3.0, JUMP_H);
+        assert_eq!(s.scroll, 3);
+        assert_eq!(s.selected, 0, "wheel leaves the selection alone");
+
+        // Fractional trackpad deltas add up across events instead of truncating to zero.
+        for _ in 0..4 {
+            s.scroll_by_rows(0.3, JUMP_H);
+        }
+        assert_eq!(s.scroll, 4, "4 x 0.3 rows accumulates to one whole row");
+
+        // Clamped at both ends.
+        s.scroll_by_rows(1000.0, JUMP_H);
+        assert_eq!(s.scroll, 60 - vis, "stops at the last full page");
+        s.scroll_by_rows(-1000.0, JUMP_H);
+        assert_eq!(s.scroll, 0);
+
+        // A list that fits never scrolls.
+        let mut small = state(&["a", "b"]);
+        small.scroll_by_rows(5.0, JUMP_H);
+        assert_eq!(small.scroll, 0);
+    }
+
+    #[test]
+    fn scrollbar_thumb_appears_on_overflow_and_tracks_the_scroll() {
+        let titles: Vec<String> = (0..60).map(|i| format!("track {i}")).collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let mut s = state(&refs);
+        let track_h = JUMP_H - BUTTON_H - LIST_TOP;
+
+        let (top_off, h0) = s.scrollbar_thumb(JUMP_H, track_h).expect("overflow draws a thumb");
+        assert_eq!(top_off, 0);
+        assert!(h0 >= 16 && h0 < track_h);
+        s.scroll_by_rows(1000.0, JUMP_H);
+        let (end_off, h1) = s.scrollbar_thumb(JUMP_H, track_h).expect("still overflowing");
+        assert_eq!(h0, h1);
+        assert_eq!(end_off, track_h - h1, "thumb bottoms out at max scroll");
+
+        // The thumb paints into the gutter in both themes only when overflowing.
+        let fits = state(&["a", "b"]);
+        let painted = compose(&s, JUMP_W, JUMP_H, &JumpTheme::classic());
+        let clean = compose(&fits, JUMP_W, JUMP_H, &JumpTheme::classic());
+        let gutter = |fb: &Framebuffer| {
+            (LIST_TOP..JUMP_H - BUTTON_H)
+                .flat_map(|y| (JUMP_W - 4..JUMP_W - 1).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let o = ((y as u32 * fb.width + x as u32) * 4) as usize;
+                    fb.rgba[o..o + 3] != BG
+                })
+                .count()
+        };
+        assert!(gutter(&painted) > 0, "overflowing list paints a thumb");
+        assert_eq!(gutter(&clean), 0, "fitting list leaves the gutter clean");
     }
 
     #[test]

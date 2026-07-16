@@ -131,7 +131,7 @@ pub enum Region {
 /// The scrollbar sits `SCROLLBAR_RIGHT` px in from the right edge and is `SCROLLBAR_W` px wide,
 /// running down the list area between the title and bottom bars (measured against the skin's
 /// baked track groove).
-const SCROLLBAR_RIGHT: i32 = 16;
+const SCROLLBAR_RIGHT: i32 = 15;
 const SCROLLBAR_W: i32 = 8;
 const SCROLLBAR_MIN_THUMB: i32 = 8;
 /// The classic thumb is a fixed 8x18 cap (the skin ships exactly that sprite), not proportional.

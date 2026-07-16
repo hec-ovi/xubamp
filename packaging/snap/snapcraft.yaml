@@ -16,7 +16,7 @@
 #   snapcraft upload --release=stable xubamp_*.snap
 name: xubamp
 base: core26
-version: '0.2.5'
+version: '0.2.6'
 summary: Classic Winamp 2.9x-style player, native Wayland, in Rust
 description: |
   A from-scratch reimplementation of the classic Winamp 2.9x player for

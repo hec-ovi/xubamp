@@ -1,3 +1,11 @@
+xubamp (0.2.6-1) resolute; urgency=medium
+
+  * Jump-to-file results scroll with the mouse wheel and show a scrollbar
+    when they overflow the dialog.
+  * Playlist scrollbar back 1px right, onto its original track position.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Thu, 16 Jul 2026 12:30:00 +0000
+
 xubamp (0.2.5-1) resolute; urgency=medium
 
   * The built-in playlist font is proportional now, so "Artist - Title"

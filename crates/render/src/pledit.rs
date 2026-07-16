@@ -101,6 +101,9 @@ pub enum Region {
     BottomMenu(BottomButton),
     /// The scrollbar track down the right edge: a press or drag here sets the scroll position.
     Scrollbar,
+    /// The live mini clock in the bottom bar; clicking it toggles elapsed/remaining, like the
+    /// main window's clock.
+    MiniTime,
     /// The list area proper (rows, and the empty space under the last row).
     Body,
     /// Dead window chrome (the side frames and the bottom bar between its controls). Pressing
@@ -128,6 +131,25 @@ fn in_scrollbar_track(width: i32, height: i32, x: i32, y: i32) -> bool {
     let (sx, sy, sw, sh) = scrollbar_track(width, height);
     x >= sx && x < sx + sw && y >= sy && y < sy + sh
 }
+
+/// The live mini clock's rectangle (x, y, w, h) in the bottom bar: the classic slot left of the
+/// LIST cluster, anchored to the bottom-right like the rest of the bar. Sized for `-MM:SS` in the
+/// built-in 5x7 font.
+pub fn mini_time_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    (width - MINI_TIME_RIGHT, height - MINI_TIME_BOTTOM, 36, 8)
+}
+
+/// Is a window-local point inside the mini clock's click target?
+fn in_mini_time(width: i32, height: i32, x: i32, y: i32) -> bool {
+    let (mx, my, mw, mh) = mini_time_rect(width, height);
+    x >= mx && x < mx + mw && y >= my && y < my + mh
+}
+
+/// The mini clock's distance in from the right edge and up from the bottom, from the classic
+/// playlist bottom-right layout (Webamp: `.mini-time` at (66,23) of the right-anchored 150px
+/// section).
+const MINI_TIME_RIGHT: i32 = 84;
+const MINI_TIME_BOTTOM: i32 = 15;
 
 /// The scrollbar thumb rectangle, or `None` when the list fits and there is nothing to scroll.
 pub fn scrollbar_thumb_rect(state: &PlState, width: i32, height: i32) -> Option<(i32, i32, i32, i32)> {
@@ -190,6 +212,12 @@ pub struct PlState {
     pub pressed_title: Option<TitleButton>,
     /// Whichever bottom cluster button stays depressed while its popup menu is open.
     pub pressed_menu: Option<BottomButton>,
+    /// The live playback clock for the bottom-bar mini time, in whole seconds, already in the
+    /// main window's selected elapsed/remaining representation. `None` draws nothing (nothing
+    /// loaded, or the paused blink's hidden beat). Fed by the platform layer each tick.
+    pub clock: Option<u32>,
+    /// Whether the mini clock leads with the remaining-time minus sign.
+    pub clock_negative: bool,
 }
 
 /// The x coordinate of a 9px playlist title button at `right` pixels from the window's right edge.
@@ -241,6 +269,8 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
         Region::BottomMenu(button)
     } else if in_scrollbar_track(width, height, x, y) {
         Region::Scrollbar
+    } else if in_mini_time(width, height, x, y) {
+        Region::MiniTime
     } else if y < sprites::PLEDIT_TITLE_H {
         Region::TitleBar
     } else if x >= sprites::PLEDIT_LIST_X
@@ -511,6 +541,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
     }
 
     draw_running_time(&mut fb, state, &colors, w, h);
+    draw_mini_time(&mut fb, state, &colors, w, h);
     draw_rows(&mut fb, state, &colors, h, list_w);
     draw_scrollbar(&mut fb, state, &colors, w, h);
     fb
@@ -550,6 +581,33 @@ fn draw_running_time(
         y,
         &text,
         [colors.normal.r, colors.normal.g, colors.normal.b],
+    );
+}
+
+/// Draw the live mini clock in its classic bottom-bar slot: `MM:SS` of the current track (a
+/// leading minus in remaining mode), in the playlist's current-track colour. Blank when nothing
+/// is loaded or during the paused blink's hidden beat (`state.clock` is `None` then).
+fn draw_mini_time(
+    fb: &mut Framebuffer,
+    state: &PlState,
+    colors: &xubamp_skin::pledit::PlEdit,
+    width: i32,
+    height: i32,
+) {
+    let Some(secs) = state.clock else {
+        return;
+    };
+    let sign = if state.clock_negative { "-" } else { "" };
+    let text = format!("{}{:02}:{:02}", sign, secs / 60, secs % 60);
+    let (x, y, _, _) = mini_time_rect(width, height);
+    font::draw_text(
+        &mut fb.rgba,
+        fb.width,
+        fb.height,
+        x,
+        y,
+        &text,
+        [colors.current.r, colors.current.g, colors.current.b],
     );
 }
 
@@ -639,6 +697,7 @@ fn draw_fallback_expanded(
     draw_fallback_title_buttons(fb, state, w);
     draw_fallback_bottom_buttons(fb, state, w, h, colors);
     draw_running_time(fb, state, colors, w, h);
+    draw_mini_time(fb, state, colors, w, h);
     draw_rows(fb, state, colors, h, list_w);
     draw_scrollbar(fb, state, colors, w, h);
 }
@@ -1032,6 +1091,51 @@ mod tests {
         assert_eq!(
             region_at(&shaded, w, sprites::PLEDIT_SHADE_H, -1, 7),
             Region::None
+        );
+    }
+
+    #[test]
+    fn mini_time_draws_the_live_clock_in_the_current_color_and_has_a_click_target() {
+        let colors = PlEdit {
+            normal_bg: Rgb::new(0, 0, 0),
+            current: Rgb::new(250, 250, 250),
+            ..PlEdit::default()
+        };
+        let skin = Skin {
+            pledit_colors: Some(colors),
+            ..Default::default()
+        };
+        let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
+        let (mx, my, mw, mh) = mini_time_rect(w, h);
+
+        // With a clock value, some pixel of the "00:07" glyphs is the Current colour.
+        let state = PlState {
+            clock: Some(7),
+            ..Default::default()
+        };
+        let fb = compose(&skin, &state, w, h);
+        let lit = (my..my + mh).any(|y| {
+            (mx..mx + mw).any(|x| {
+                let o = ((y as u32 * fb.width + x as u32) * 4) as usize;
+                fb.rgba[o..o + 3] == [250, 250, 250]
+            })
+        });
+        assert!(lit, "mini clock glyphs drawn in the Current colour");
+
+        // No clock (nothing loaded, or the blink's hidden beat): nothing lit there.
+        let blank = compose(&skin, &PlState::default(), w, h);
+        let lit = (my..my + mh).any(|y| {
+            (mx..mx + mw).any(|x| {
+                let o = ((y as u32 * blank.width + x as u32) * 4) as usize;
+                blank.rgba[o..o + 3] == [250, 250, 250]
+            })
+        });
+        assert!(!lit, "no clock draws nothing");
+
+        // The slot is its own click target (it toggles the time mode in the platform layer).
+        assert_eq!(
+            region_at(&PlState::default(), w, h, mx + mw / 2, my + mh / 2),
+            Region::MiniTime
         );
     }
 

@@ -1101,6 +1101,7 @@ impl App {
                 self.playlist_state.current = current;
                 self.redraw_playlist();
             }
+            self.sync_playlist_clock();
         }
         let delay = if self.animating() {
             // The frame-callback loop renders the visualizer. Kick it off (or restart it if it
@@ -1124,6 +1125,10 @@ impl App {
             let blink_changed = self.step_blink();
             if changed || vis_changed || blink_changed {
                 self.redraw();
+            }
+            if blink_changed {
+                // The playlist's mini clock shares the paused blink beat.
+                self.sync_playlist_clock();
             }
             if vis_changed {
                 VIS_SETTLE_TICK
@@ -1722,7 +1727,28 @@ impl App {
         if self.state.time_display != display {
             self.state.time_display = display;
             self.redraw();
+            self.sync_playlist_clock();
             self.sync_preferences_from_ui();
+        }
+    }
+
+    /// Keep the playlist window's live mini clock in step with the main clock (same
+    /// elapsed/remaining representation, same paused blink); redraws the playlist only when the
+    /// shown value changes.
+    fn sync_playlist_clock(&mut self) {
+        if self.playlist.is_none() {
+            return;
+        }
+        let clock = if self.state.blink_hides() {
+            None
+        } else {
+            self.state.displayed_time()
+        };
+        let negative = self.state.time_display == hit::TimeDisplay::Remaining;
+        if self.playlist_state.clock != clock || self.playlist_state.clock_negative != negative {
+            self.playlist_state.clock = clock;
+            self.playlist_state.clock_negative = negative;
+            self.redraw_playlist();
         }
     }
 
@@ -2108,6 +2134,11 @@ impl App {
                         }
                         self.playlist_state.set_scroll_from_y(y, width, height);
                         self.redraw_playlist();
+                    }
+                    pledit::Region::MiniTime => {
+                        // The playlist's mini clock toggles elapsed/remaining, like the main one.
+                        let display = self.state.time_display.toggled();
+                        self.set_time_display(display);
                     }
                     pledit::Region::Body => self.playlist_press_row(x, y),
                     pledit::Region::None => {}

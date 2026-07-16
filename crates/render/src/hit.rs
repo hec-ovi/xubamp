@@ -57,7 +57,7 @@ pub enum TimeDisplay {
 }
 
 impl TimeDisplay {
-    fn toggled(self) -> Self {
+    pub fn toggled(self) -> Self {
         match self {
             Self::Elapsed => Self::Remaining,
             Self::Remaining => Self::Elapsed,

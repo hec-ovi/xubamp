@@ -96,9 +96,6 @@ pub enum Command {
     Balance(i8),
     /// Seek to `fraction` (0..=1) of the track, emitted once when the seek-bar drag is released.
     Seek(f32),
-    /// Force the current track to restart from the top: the `x` hotkey, which (unlike the Play
-    /// button) restarts even while already playing.
-    Restart,
     /// Toggle the shuffle or repeat playback mode (the main-window mode buttons).
     ToggleMode(ModeButton),
     /// Play the playlist track at this index (a double-click on a playlist row, or the J
@@ -894,10 +891,11 @@ const SEEK_SETTLE_SECS: f32 = 2.0;
 /// [`on_press`]: same command vocabulary, no pointer geometry.
 pub fn on_key(state: &mut UiState, key: KeyPress, is_repeat: bool) -> Outcome {
     match key {
-        // Transport: one action per press, never on auto-repeat. `x` restarts from the top (a
-        // distinct command from the Play button, which does nothing while already playing).
+        // Transport: one action per press, never on auto-repeat. `x` is the Play button (classic
+        // ZXCVB row): restart from the top, resume when paused, and from a cold start it loads
+        // the armed playlist row like the button does.
         KeyPress::Char('z') => transport_key(is_repeat, Transport::Prev),
-        KeyPress::Char('x') => restart_key(is_repeat),
+        KeyPress::Char('x') => transport_key(is_repeat, Transport::Play),
         KeyPress::Char('c') => transport_key(is_repeat, Transport::Pause),
         KeyPress::Char('v') => transport_key(is_repeat, Transport::Stop),
         KeyPress::Char('b') => transport_key(is_repeat, Transport::Next),
@@ -965,18 +963,6 @@ fn transport_key(is_repeat: bool, t: Transport) -> Outcome {
     }
     Outcome {
         command: Some(Command::Transport(t)),
-        ..Default::default()
-    }
-}
-
-/// The restart hotkey (`x`): force the track from the top, once per press (auto-repeat swallowed).
-/// Unlike the Play button it restarts even while already playing.
-fn restart_key(is_repeat: bool) -> Outcome {
-    if is_repeat {
-        return Outcome::default();
-    }
-    Outcome {
-        command: Some(Command::Restart),
         ..Default::default()
     }
 }
@@ -2173,9 +2159,10 @@ mod tests {
 
     #[test]
     fn transport_keys_emit_the_command_once_and_swallow_repeat() {
-        // The transport letters (x is the restart key, tested separately), matched on their char.
+        // The classic ZXCVB transport row, matched on their char.
         let keys = [
             ('z', Transport::Prev),
+            ('x', Transport::Play),
             ('c', Transport::Pause),
             ('v', Transport::Stop),
             ('b', Transport::Next),
@@ -2240,21 +2227,6 @@ mod tests {
                 "{ch} held: no repeat"
             );
         }
-    }
-
-    #[test]
-    fn x_key_restarts_and_is_distinct_from_the_play_button() {
-        // `x` emits Restart (force from the top), not Transport(Play): it is the restart hotkey,
-        // distinct from the Play button. Fires once per press, swallowed on auto-repeat.
-        let mut s = UiState::default();
-        let out = on_key(&mut s, KeyPress::Char('x'), false);
-        assert_eq!(out.command, Some(Command::Restart), "x restarts");
-        assert!(!out.redraw);
-        assert_eq!(
-            on_key(&mut s, KeyPress::Char('x'), true),
-            Outcome::default(),
-            "x held: no repeat"
-        );
     }
 
     #[test]

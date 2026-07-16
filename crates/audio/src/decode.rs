@@ -168,6 +168,27 @@ pub fn probe_tags(path: &Path) -> Option<TrackTags> {
     if let Some(revision) = probed.format.metadata().current() {
         collect_tags(revision.tags(), &mut tags);
     }
+    // Symphonia surfaces ID3v2 and container metadata but never the trailing 128-byte ID3v1
+    // block, which is all that many older MP3s carry and all this player's own tag editor
+    // writes. Fill whatever is still missing from it so those tags name playlist rows too.
+    if tags.title.is_none() || tags.artist.is_none() {
+        if let Ok(Some(v1)) = crate::id3v1::read(path) {
+            for (slot, value) in [(&mut tags.title, &v1.title), (&mut tags.artist, &v1.artist)] {
+                if slot.is_none() && !value.is_empty() {
+                    *slot = Some(value.clone());
+                }
+            }
+            for value in [&v1.title, &v1.artist, &v1.album, &v1.year, &v1.comment] {
+                if value.is_empty() || tags.all_text.len() + value.len() >= ALL_TEXT_CAP {
+                    continue;
+                }
+                if !tags.all_text.is_empty() {
+                    tags.all_text.push(' ');
+                }
+                tags.all_text.push_str(value);
+            }
+        }
+    }
     Some(tags)
 }
 

@@ -840,16 +840,6 @@ impl Player {
         false
     }
 
-    /// The `x` hotkey: force the current track from the top regardless of play state.
-    pub fn restart(&mut self) {
-        self.stopped = false;
-        if let Some(engine) = &self.engine {
-            let h = engine.handle();
-            h.seek_to_start();
-            h.set_active(true);
-        }
-    }
-
     pub fn set_volume(&mut self, volume: u8) {
         self.volume = volume;
         if let Some(engine) = &self.engine {
@@ -1284,6 +1274,35 @@ mod tests {
         assert_eq!(
             rows[1].title, "2. plain stem",
             "tagless file falls back to its stem"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_a_tag_and_refreshing_updates_the_playlist_row() {
+        let dir = std::env::temp_dir().join(format!("xubamp-tagsave-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cruel summer.wav");
+        write_wav(&path, 48_000, 2);
+        let mut player = Player::new(vec![path.clone()]);
+        let (rows, _) = player.playlist_view();
+        assert_eq!(rows[0].title, "1. cruel summer", "untagged file shows its stem");
+
+        // What the file-info box does on save: write the ID3v1 tag, then refresh the caches.
+        xubamp_audio::id3v1::write(
+            &path,
+            &xubamp_audio::id3v1::Id3v1 {
+                title: "Cruel Summer".to_owned(),
+                artist: "Ace of Base".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        player.refresh_metadata(&path);
+        let (rows, _) = player.playlist_view();
+        assert_eq!(
+            rows[0].title, "1. Ace of Base - Cruel Summer",
+            "the row shows the freshly saved tag"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

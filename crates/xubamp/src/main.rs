@@ -796,7 +796,6 @@ fn main() {
                     Command::Volume(v) => player.set_volume(v),
                     Command::Balance(b) => player.set_balance(b),
                     Command::Seek(fraction) => player.seek_fraction(fraction),
-                    Command::Restart => player.restart(),
                     Command::ToggleMode(mode) => {
                         player.toggle_mode(mode);
                         let result = persist_playback_modes(

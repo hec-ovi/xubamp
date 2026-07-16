@@ -155,6 +155,19 @@ impl FileInfoState {
         self.status = Some(status.into());
     }
 
+    /// Digest a save attempt: success dismisses the box (like Winamp's info box, whose save
+    /// button is also its close), failure keeps it open with the error on the status line.
+    /// Returns whether the caller should close the window.
+    pub fn save_result(&mut self, result: Result<(), String>) -> bool {
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.set_status(error);
+                false
+            }
+        }
+    }
+
     fn focus_field(&mut self, index: usize) {
         self.focus = Some(index);
         self.cursor = self.data.fields[index].chars().count();
@@ -482,6 +495,25 @@ mod tests {
         assert_eq!(lines[2], "Average bitrate: 128 kbit/s");
         assert_eq!(lines[3], "44100 Hz stereo");
         assert_eq!(lines[4], "MP3");
+    }
+
+    #[test]
+    fn save_result_closes_on_success_and_shows_the_error_otherwise() {
+        let mut s = state();
+        assert!(
+            s.save_result(Ok(())),
+            "a successful save dismisses the box"
+        );
+        assert_eq!(s.status, None, "no status line needed on the way out");
+        assert!(
+            !s.save_result(Err("Cannot write the tag: read-only".to_owned())),
+            "a failed save keeps the box open"
+        );
+        assert_eq!(
+            s.status.as_deref(),
+            Some("Cannot write the tag: read-only"),
+            "the failure lands on the status line"
+        );
     }
 
     #[test]

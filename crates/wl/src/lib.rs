@@ -2727,16 +2727,17 @@ impl App {
         window.present();
     }
 
-    /// Carry out a file-info interaction outcome: redraw, close, or write the tag (the save
-    /// result lands in the status line).
+    /// Carry out a file-info interaction outcome: redraw, close, or write the tag. A successful
+    /// save dismisses the box (the playlist rows and marquee re-probe the file on the next tick);
+    /// a failed one stays open with the error on the status line.
     fn apply_file_info(&mut self, outcome: fileinfo::Outcome) {
         if outcome.save {
             let request = self.file_info_state.save_request();
-            let status = match (self.on_file_info_save)(&request) {
-                Ok(()) => "Saved.".to_owned(),
-                Err(error) => error,
-            };
-            self.file_info_state.set_status(status);
+            let result = (self.on_file_info_save)(&request);
+            if self.file_info_state.save_result(result) {
+                self.close_file_info();
+                return;
+            }
         }
         if outcome.close {
             self.close_file_info();

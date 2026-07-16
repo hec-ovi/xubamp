@@ -1,3 +1,11 @@
+xubamp (0.2.1-1) resolute; urgency=medium
+
+  * Jump-to-file (J) searches every piece of metadata (artist, album,
+    composer, genre, year, comment, file name, ...), not just the shown
+    "artist - title" line.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Wed, 16 Jul 2026 23:00:00 +0000
+
 xubamp (0.2.0-1) resolute; urgency=medium
 
   * Visualization preferences match the original Winamp 2.9x dialog

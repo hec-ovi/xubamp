@@ -130,6 +130,9 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Outcome {
     pub start_move: bool,
+    /// Whether the press landed on the title-bar band proper (only those presses count toward
+    /// the double-click shade toggle; a body drag never toggles shade).
+    pub title_band: bool,
     pub command: Option<Command>,
     pub action: Option<Action>,
     pub redraw: bool,
@@ -353,6 +356,7 @@ pub fn on_press(state: &mut EqState, x: i32, y: i32) -> Outcome {
     match region_at(state, x, y) {
         Region::TitleBar => Outcome {
             start_move: true,
+            title_band: true,
             ..Default::default()
         },
         Region::Button(button) => {
@@ -385,8 +389,13 @@ pub fn on_press(state: &mut EqState, x: i32, y: i32) -> Outcome {
                 ..Default::default()
             }
         }
-        // AUTO is deliberately inert. It neither arms nor starts a window move.
-        Region::Auto | Region::Body | Region::None => Outcome::default(),
+        // A dead-area press drags the pane, so the whole body is a grab surface; it stays out of
+        // the double-click shade toggle. AUTO is deliberately inert: it neither arms nor moves.
+        Region::Body => Outcome {
+            start_move: true,
+            ..Default::default()
+        },
+        Region::Auto | Region::None => Outcome::default(),
     }
 }
 
@@ -1146,6 +1155,18 @@ mod tests {
         assert_eq!(press, Outcome::default());
         assert_eq!(state.pressed_button, None);
         assert_eq!(on_release(&mut state, 45, 20), Outcome::default());
+    }
+
+    #[test]
+    fn body_press_drags_the_pane_but_stays_out_of_the_shade_double_click() {
+        let mut state = EqState::default();
+        // Bottom-right dead corner: below the sliders, right of every control.
+        assert_eq!(region_at(&state, 270, 110), Region::Body);
+        let body = on_press(&mut state, 270, 110);
+        assert!(body.start_move, "the dead surface drags the pane");
+        assert!(!body.title_band, "but it is not the title band");
+        let title = on_press(&mut state, 100, 5);
+        assert!(title.start_move && title.title_band, "the band is both");
     }
 
     #[test]

@@ -159,7 +159,11 @@ pub enum Region {
     Toggle(WindowToggle),
     /// The shuffle or repeat mode button.
     Mode(ModeButton),
-    /// Not over any interactive element (the window body).
+    /// Inside the window but not over any interactive element. Pressing here starts a window
+    /// move, like the title bar, so the whole dead surface drags; unlike the title bar it does
+    /// not participate in the double-click windowshade toggle.
+    Body,
+    /// Outside the window entirely.
     None,
 }
 
@@ -283,7 +287,7 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     if y < TITLEBAR_H {
         return Region::TitleBar;
     }
-    Region::None
+    Region::Body
 }
 
 /// Which region of the collapsed (windowshade) main window is at window-local (`x`, `y`)? The strip
@@ -510,8 +514,12 @@ pub struct Playback {
 /// carries an `f32`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Outcome {
-    /// Start an interactive window move (a title-bar press): hand the drag to the compositor.
+    /// Start an interactive window move (a title-bar or dead-area press): hand the drag to the
+    /// compositor.
     pub start_move: bool,
+    /// Whether the press landed on the title-bar band proper. Only such presses count toward the
+    /// double-click windowshade toggle; a body drag never toggles shade.
+    pub title_band: bool,
     /// A command to emit to the caller, if any.
     pub command: Option<Command>,
     /// A window action requested by a title-bar button (close, minimize, ...), for the platform
@@ -541,6 +549,7 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
     match region_at(state.shade, x, y) {
         Region::TitleBar => Outcome {
             start_move: true,
+            title_band: true,
             ..Default::default()
         },
         Region::TitleButton(b) => {
@@ -620,6 +629,12 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
                 ..Default::default()
             }
         }
+        // A dead-area press drags the window, so the whole body is a grab surface; it is not part
+        // of the title band, so it never arms the double-click shade toggle.
+        Region::Body => Outcome {
+            start_move: true,
+            ..Default::default()
+        },
         Region::None => Outcome::default(),
     }
 }
@@ -966,22 +981,32 @@ mod tests {
     }
 
     #[test]
-    fn below_the_band_is_not_draggable() {
+    fn below_the_band_is_the_draggable_body() {
         assert_eq!(
             hit_test(0, 14),
-            Region::None,
+            Region::Body,
             "first row under the title bar"
         );
         assert_eq!(
             hit_test(137, 45),
-            Region::None,
+            Region::Body,
             "window body above the sliders"
         );
         assert_eq!(
             hit_test(274, 115),
-            Region::None,
+            Region::Body,
             "bottom-right of the window"
         );
+    }
+
+    #[test]
+    fn a_body_press_starts_a_move_but_not_the_title_double_click() {
+        let mut s = UiState::default();
+        let out = on_press(&mut s, 137, 45);
+        assert!(out.start_move, "the dead surface drags the window");
+        assert!(!out.title_band, "but it is not the title band");
+        let out = on_press(&mut s, 137, 7);
+        assert!(out.start_move && out.title_band, "the band is both");
     }
 
     #[test]
@@ -1013,9 +1038,9 @@ mod tests {
         // One pixel left of Play (Play starts at x=39) is still Previous' right edge or gap.
         assert_eq!(hit_test(38, 97), Region::Transport(Transport::Prev));
         // Below the button row (buttons end at y=88+18=106) is the body.
-        assert_eq!(hit_test(50, 106), Region::None);
+        assert_eq!(hit_test(50, 106), Region::Body);
         // The gap between Next (ends x=130) and Eject (starts x=136) is not a button.
-        assert_eq!(hit_test(132, 97), Region::None);
+        assert_eq!(hit_test(132, 97), Region::Body);
     }
 
     #[test]
@@ -1042,12 +1067,12 @@ mod tests {
         // The gap between the two sliders belongs to neither.
         assert_eq!(
             hit_test(sprites::VOLUME_X + sprites::VOLUME_W, sprites::VOLUME_Y),
-            Region::None
+            Region::Body
         );
         // One row below the sliders is the body.
         assert_eq!(
             hit_test(sprites::VOLUME_X, sprites::VOLUME_Y + sprites::SLIDER_BG_H),
-            Region::None
+            Region::Body
         );
     }
 
@@ -1151,22 +1176,22 @@ mod tests {
         );
         assert_eq!(
             hit_test(TIME_X - 1, TIME_Y),
-            Region::None,
+            Region::Body,
             "left edge is out"
         );
         assert_eq!(
             hit_test(TIME_X + TIME_W, TIME_Y),
-            Region::None,
+            Region::Body,
             "right edge is out"
         );
         assert_eq!(
             hit_test(TIME_X, TIME_Y - 1),
-            Region::None,
+            Region::Body,
             "top edge is out"
         );
         assert_eq!(
             hit_test(TIME_X, TIME_Y + TIME_H),
-            Region::None,
+            Region::Body,
             "bottom edge is out"
         );
 
@@ -1685,7 +1710,7 @@ mod tests {
         // One row below the bar is the body.
         assert_eq!(
             hit_test(sprites::POSBAR_X, sprites::POSBAR_Y + sprites::POSBAR_H),
-            Region::None
+            Region::Body
         );
     }
 

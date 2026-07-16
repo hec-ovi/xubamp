@@ -344,6 +344,9 @@ struct PlaylistWin {
     /// The last bare title-bar click, for double-click windowshade toggling. Button clicks and moves
     /// do not participate.
     title_last_click: Option<Instant>,
+    /// A detected title-bar double-click waiting for its release; the toggle is deferred to the
+    /// release so a quick click-then-drag still drags.
+    shade_on_release: bool,
     /// Whether the pointer is currently over the bottom-right resize grip, so the resize cursor is
     /// set only on the hover transition rather than on every motion event.
     grip_hover: bool,
@@ -362,6 +365,9 @@ struct EqualizerWin {
     position: panes::Point,
     drag: Option<PaneDrag>,
     title_last_click: Option<Instant>,
+    /// A detected title-bar double-click waiting for its release; the toggle is deferred to the
+    /// release so a quick click-then-drag still drags.
+    shade_on_release: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -603,6 +609,7 @@ pub fn run(
         mod_shift: false,
         last_click: None,
         title_last_click: None,
+        main_shade_on_release: false,
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
         qh: qh.clone(),
@@ -774,6 +781,10 @@ struct App {
     /// When the main title bar was last clicked, to detect a double-click (which toggles windowshade,
     /// like the classic title-bar double-click). Cleared once a click becomes a window drag.
     title_last_click: Option<Instant>,
+    /// A detected title-bar double-click waiting for its release. The shade toggle is deferred to
+    /// the release so a quick click-then-drag still drags (the motion cancels this instead of the
+    /// press swallowing the drag).
+    main_shade_on_release: bool,
     /// Polled each tick for the current track rows + playing index, to keep the playlist in sync.
     playlist_source: PlaylistSource,
     /// Non-blocking application-owned worker poller. Results are applied only on this UI thread.
@@ -1211,6 +1222,7 @@ impl App {
             position: self.equalizer_position,
             drag: None,
             title_last_click: None,
+            shade_on_release: false,
         });
         self.state.eq_open = true;
         self.redraw();
@@ -1752,6 +1764,7 @@ impl App {
             drag: None,
             resize: None,
             title_last_click: None,
+            shade_on_release: false,
             grip_hover: false,
             scrollbar_drag: false,
         });
@@ -1858,21 +1871,11 @@ impl App {
             }
             PointerEventKind::Press { button, .. } if *button == BTN_LEFT => {
                 let outcome = equalizer::on_press(&mut self.equalizer_state, x, y);
+                // Title-bar and dead-area presses both arm a pane drag; only a title-bar press
+                // takes part in the double-click shade toggle, and that toggle is deferred to the
+                // release so a quick click-then-drag still drags.
                 if outcome.start_move {
-                    let now = Instant::now();
-                    let double = self
-                        .equalizer
-                        .as_ref()
-                        .and_then(|eq| eq.title_last_click)
-                        .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
-                    if double {
-                        if let Some(eq) = &mut self.equalizer {
-                            eq.title_last_click = None;
-                            eq.drag = None;
-                        }
-                        self.set_equalizer_shade(!self.equalizer_state.shade);
-                    } else if let Some(eq) = &mut self.equalizer {
-                        eq.title_last_click = Some(now);
+                    if let Some(eq) = &mut self.equalizer {
                         eq.drag = Some(PaneDrag {
                             press: panes::Point {
                                 x: eq.position.x + x,
@@ -1881,6 +1884,20 @@ impl App {
                             origin: eq.position,
                             moved: false,
                         });
+                        if outcome.title_band {
+                            let now = Instant::now();
+                            let double = eq
+                                .title_last_click
+                                .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                            if double {
+                                eq.title_last_click = None;
+                                eq.shade_on_release = true;
+                            } else {
+                                eq.title_last_click = Some(now);
+                            }
+                        } else {
+                            eq.title_last_click = None;
+                        }
                     }
                 }
                 self.apply_equalizer(outcome);
@@ -1933,6 +1950,7 @@ impl App {
                             eq.position = position;
                             eq.drag = Some(drag);
                             eq.title_last_click = None;
+                            eq.shade_on_release = false;
                             eq.subsurface.set_position(position.x, position.y);
                         }
                         self.window.wl_surface().commit();
@@ -1943,11 +1961,18 @@ impl App {
                 self.apply_equalizer(outcome);
             }
             PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
+                let mut toggle_shade = false;
                 if let Some(eq) = &mut self.equalizer {
                     eq.drag = None;
+                    // A release that completed a title-bar double-click (without becoming a drag)
+                    // toggles the compact strip now.
+                    toggle_shade = std::mem::take(&mut eq.shade_on_release);
                 }
                 let outcome = equalizer::on_release(&mut self.equalizer_state, x, y);
                 self.apply_equalizer(outcome);
+                if toggle_shade {
+                    self.set_equalizer_shade(!self.equalizer_state.shade);
+                }
             }
             PointerEventKind::Leave { .. } => {
                 let active_drag = self
@@ -1957,6 +1982,7 @@ impl App {
                 if !active_drag {
                     if let Some(eq) = &mut self.equalizer {
                         eq.title_last_click = None;
+                        eq.shade_on_release = false;
                     }
                 }
                 if equalizer::on_leave(&mut self.equalizer_state) {
@@ -2008,22 +2034,11 @@ impl App {
                             pl.title_last_click = None;
                         }
                     }
-                    pledit::Region::TitleBar => {
-                        let now = Instant::now();
-                        let double = self
-                            .playlist
-                            .as_ref()
-                            .and_then(|pl| pl.title_last_click)
-                            .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
-                        if double {
-                            if let Some(pl) = &mut self.playlist {
-                                pl.title_last_click = None;
-                                pl.drag = None;
-                                pl.resize = None;
-                            }
-                            self.toggle_playlist_shade();
-                        } else if let Some(pl) = &mut self.playlist {
-                            pl.title_last_click = Some(now);
+                    // Title-bar and dead-chrome presses both arm a pane drag; only the title bar
+                    // takes part in the double-click shade toggle, and the toggle is deferred to
+                    // the release so a quick click-then-drag still drags.
+                    region @ (pledit::Region::TitleBar | pledit::Region::Frame) => {
+                        if let Some(pl) = &mut self.playlist {
                             pl.drag = Some(PaneDrag {
                                 press: panes::Point {
                                     x: pl.position.x + x,
@@ -2033,6 +2048,20 @@ impl App {
                                 moved: false,
                             });
                             pl.resize = None;
+                            if region == pledit::Region::TitleBar {
+                                let now = Instant::now();
+                                let double = pl
+                                    .title_last_click
+                                    .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                                if double {
+                                    pl.title_last_click = None;
+                                    pl.shade_on_release = true;
+                                } else {
+                                    pl.title_last_click = Some(now);
+                                }
+                            } else {
+                                pl.title_last_click = None;
+                            }
                         }
                     }
                     pledit::Region::BottomMenu(button) => {
@@ -2137,6 +2166,7 @@ impl App {
                             pl.position = position;
                             pl.drag = Some(drag);
                             pl.title_last_click = None;
+                            pl.shade_on_release = false;
                             pl.subsurface.set_position(position.x, position.y);
                         }
                         // Subsurface positions are latched by a parent commit.
@@ -2197,10 +2227,18 @@ impl App {
                 }
             }
             PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
+                let mut toggle_shade = false;
                 if let Some(pl) = &mut self.playlist {
                     pl.drag = None;
                     pl.resize = None;
                     pl.scrollbar_drag = false;
+                    // A release that completed a title-bar double-click (without becoming a drag)
+                    // toggles the shade strip now.
+                    toggle_shade = std::mem::take(&mut pl.shade_on_release);
+                }
+                if toggle_shade {
+                    self.toggle_playlist_shade();
+                    return;
                 }
                 if let Some(pressed) = self.playlist_state.pressed_menu {
                     self.playlist_state.pressed_menu = None;
@@ -2245,6 +2283,7 @@ impl App {
                     // leave transition. Keep the active drag/resize alive until button release.
                     if pl.drag.is_none() && pl.resize.is_none() {
                         pl.title_last_click = None;
+                        pl.shade_on_release = false;
                     }
                 }
                 if redraw {
@@ -3019,40 +3058,47 @@ impl PointerHandler for App {
                 }
                 PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
                     let outcome = hit::on_press(&mut self.state, x, y);
-                    // A title-bar press arms a window drag, but does NOT start it yet: the compositor
-                    // move is deferred until the pointer moves past a threshold, so a click (or a
-                    // near-miss on a small title-bar button) does not jump the window. A second quick
-                    // title-bar click toggles windowshade instead (the classic double-click), same as
-                    // the shade button.
+                    // A press on the title bar or the window body arms a window drag, but does NOT
+                    // start it yet: the compositor move is deferred until the pointer moves past a
+                    // threshold, so a click (or a near-miss on a small title-bar button) does not
+                    // jump the window. A second quick title-bar click is the classic windowshade
+                    // double-click, but its toggle is deferred to the release: if the pointer drags
+                    // past the threshold first, the user wanted a move, not a shade flip.
                     if outcome.start_move {
-                        let now = Instant::now();
-                        let double = self
-                            .title_last_click
-                            .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
-                        if double {
-                            self.title_last_click = None;
-                            self.toggle_shade();
+                        self.armed_move = Some((x, y, serial));
+                        if outcome.title_band {
+                            let now = Instant::now();
+                            let double = self
+                                .title_last_click
+                                .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                            if double {
+                                self.title_last_click = None;
+                                self.main_shade_on_release = true;
+                            } else {
+                                self.title_last_click = Some(now);
+                            }
                         } else {
-                            self.title_last_click = Some(now);
-                            self.armed_move = Some((x, y, serial));
+                            // A body press is not part of a title double-click sequence.
+                            self.title_last_click = None;
                         }
                     }
                     self.apply(outcome);
                 }
                 PointerEventKind::Motion { .. } => {
-                    // A moved-far-enough armed title-bar press becomes a compositor window drag:
-                    // hand it off with the original press serial, then let the compositor move the
-                    // window until release. Wayland has no client-set absolute position, so this is
-                    // the classic title-bar drag.
+                    // A moved-far-enough armed press becomes a compositor window drag: hand it off
+                    // with the original press serial, then let the compositor move the window until
+                    // release. Wayland has no client-set absolute position, so this is the classic
+                    // title-bar drag (extended to the whole dead surface of the window).
                     if let Some((px, py, serial)) = self.armed_move {
                         if hit::exceeds_move_threshold(x - px, y - py) {
                             if let Some(seat) = &self.seat {
                                 self.window.move_(seat, serial);
                             }
                             self.armed_move = None;
-                            // A drag is not the first half of a double-click, so it must not arm a
-                            // windowshade toggle on the next title-bar press.
+                            // A drag is not a double-click: neither the first half of the next one,
+                            // nor a pending shade toggle waiting for release.
                             self.title_last_click = None;
+                            self.main_shade_on_release = false;
                         }
                     }
                     // Drives slider dragging; inert otherwise. Wayland keeps delivering motion
@@ -3061,13 +3107,19 @@ impl PointerHandler for App {
                     self.apply(outcome);
                 }
                 PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
-                    // A release without crossing the threshold was a click, not a drag.
+                    // A release without crossing the threshold was a click, not a drag. If it
+                    // completed a title-bar double-click, toggle windowshade now.
                     self.armed_move = None;
                     let outcome = hit::on_release(&mut self.state, x, y);
                     self.apply(outcome);
+                    if self.main_shade_on_release {
+                        self.main_shade_on_release = false;
+                        self.toggle_shade();
+                    }
                 }
                 PointerEventKind::Leave { .. } => {
                     self.armed_move = None;
+                    self.main_shade_on_release = false;
                     // Cancel any in-progress button press so a button never stays stuck down.
                     let needs_redraw = hit::on_leave(&mut self.state);
                     if needs_redraw {

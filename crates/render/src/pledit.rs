@@ -101,7 +101,11 @@ pub enum Region {
     BottomMenu(BottomButton),
     /// The scrollbar track down the right edge: a press or drag here sets the scroll position.
     Scrollbar,
+    /// The list area proper (rows, and the empty space under the last row).
     Body,
+    /// Dead window chrome (the side frames and the bottom bar between its controls). Pressing
+    /// here drags the pane, like the title bar, but never joins the double-click shade toggle.
+    Frame,
     None,
 }
 
@@ -117,6 +121,12 @@ fn scrollbar_track(width: i32, height: i32) -> (i32, i32, i32, i32) {
     let y = sprites::PLEDIT_TITLE_H;
     let h = (height - sprites::PLEDIT_TITLE_H - sprites::PLEDIT_BOTTOM_H).max(0);
     (x, y, SCROLLBAR_W, h)
+}
+
+/// Is a window-local point inside the scrollbar track?
+fn in_scrollbar_track(width: i32, height: i32, x: i32, y: i32) -> bool {
+    let (sx, sy, sw, sh) = scrollbar_track(width, height);
+    x >= sx && x < sx + sw && y >= sy && y < sy + sh
 }
 
 /// The scrollbar thumb rectangle, or `None` when the list fits and there is nothing to scroll.
@@ -229,15 +239,20 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
         Region::Resize
     } else if let Some(button) = bottom_button_at(width, height, x, y) {
         Region::BottomMenu(button)
-    } else if {
-        let (sx, sy, sw, sh) = scrollbar_track(width, height);
-        x >= sx && x < sx + sw && y >= sy && y < sy + sh
-    } {
+    } else if in_scrollbar_track(width, height, x, y) {
         Region::Scrollbar
     } else if y < sprites::PLEDIT_TITLE_H {
         Region::TitleBar
-    } else {
+    } else if x >= sprites::PLEDIT_LIST_X
+        && x < width - SCROLLBAR_RIGHT
+        && y >= sprites::PLEDIT_LIST_Y
+        && y < height - sprites::PLEDIT_BOTTOM_H
+    {
         Region::Body
+    } else {
+        // Side frames, the strip between the title and the first row, and the bottom bar's dead
+        // space: all draggable chrome.
+        Region::Frame
     }
 }
 
@@ -966,6 +981,29 @@ mod tests {
             );
         }
         assert_eq!(region_at(&expanded, w, h, w - 1, h - 1), Region::Resize);
+
+        // Dead chrome is the draggable frame: the side borders, the strip between the title bar
+        // and the first row, and the bottom bar between its controls.
+        assert_eq!(
+            region_at(&expanded, w, h, 5, 40),
+            Region::Frame,
+            "left border"
+        );
+        assert_eq!(
+            region_at(&expanded, w, h, w - 3, 40),
+            Region::Frame,
+            "right border, right of the scrollbar"
+        );
+        assert_eq!(
+            region_at(&expanded, w, h, 40, sprites::PLEDIT_TITLE_H + 1),
+            Region::Frame,
+            "the 3px strip above the first row"
+        );
+        assert_eq!(
+            region_at(&expanded, w, h, ADD_BUTTON_X + BOTTOM_BUTTON_W + 3, h - 4),
+            Region::Frame,
+            "bottom bar between the clusters"
+        );
 
         let shaded = PlState {
             shade: true,

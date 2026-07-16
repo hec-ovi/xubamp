@@ -11,6 +11,7 @@ use xubamp_skin::{font, textfont, Skin};
 
 pub mod adwaita;
 pub mod equalizer;
+pub mod fileinfo;
 pub mod hit;
 pub mod jump;
 pub mod marquee;

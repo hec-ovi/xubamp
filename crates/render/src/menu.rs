@@ -430,7 +430,8 @@ pub fn playlist_misc_menu() -> Menu<ClassicMenuAction> {
     ]);
     Menu::new(vec![
         MenuItem::submenu("Sort List", sort),
-        MenuItem::action("File Info", ClassicMenuAction::PlaylistFileInfo).with_enabled(false),
+        MenuItem::action("File Info", ClassicMenuAction::PlaylistFileInfo)
+            .with_shortcut("Alt+3"),
     ])
 }
 
@@ -1507,10 +1508,10 @@ mod tests {
                 "File Info",
             ]
         );
-        // File Info is present but disabled until per-track info exists.
+        // File Info opens the per-track info box.
         let misc = playlist_misc_menu();
         let file_info = misc.items.iter().find(|i| i.label == "File Info").unwrap();
-        assert!(!file_info.state.enabled);
+        assert!(file_info.state.enabled);
         assert_eq!(
             labels(&playlist_list_menu()),
             ["New List", "Save List", "Load List"]

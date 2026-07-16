@@ -7,6 +7,7 @@
 pub mod channels;
 pub mod command;
 pub mod decode;
+pub mod id3v1;
 #[cfg(any(feature = "output", test))]
 mod equalizer;
 pub mod playlist;

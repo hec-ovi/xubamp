@@ -61,6 +61,57 @@ pub fn probe_duration_secs(path: &Path) -> Option<u32> {
     (rate > 0).then(|| (frames / rate) as u32)
 }
 
+/// Header-level stream facts for the file-info box: rate and channel count straight off the
+/// container, the header duration, and the codec's short name from the decoder registry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamInfo {
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
+    pub duration_secs: Option<u32>,
+    pub codec: String,
+}
+
+/// Header-only probe of a track's stream facts. No decoding happens. `None` when the file
+/// cannot be opened or no audio track is found.
+pub fn probe_stream_info(path: &Path) -> Option<StreamInfo> {
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let track = probed
+        .format
+        .tracks()
+        .iter()
+        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)?;
+    let params = &track.codec_params;
+    let duration_secs = match (params.n_frames, params.sample_rate) {
+        (Some(frames), Some(rate)) if rate > 0 => Some((frames / u64::from(rate)) as u32),
+        _ => None,
+    };
+    let codec = symphonia::default::get_codecs()
+        .get_codec(params.codec)
+        .map(|descriptor| descriptor.long_name.to_owned())
+        .unwrap_or_default();
+    Some(StreamInfo {
+        sample_rate: params.sample_rate,
+        channels: params
+            .channels
+            .map(|c| c.count().min(u8::MAX as usize) as u8),
+        duration_secs,
+        codec,
+    })
+}
+
 /// Artist and title read from a file's embedded tags. Both fields are `None` when the file
 /// carries no usable tag, so the caller falls back to the file name, like classic Winamp.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

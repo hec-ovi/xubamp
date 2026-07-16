@@ -47,8 +47,8 @@ use wayland_client::{
 };
 use xubamp_render::vis::{AnalyzerStyle, BandWidth, OscStyle, VisMode, FFT_N};
 use xubamp_render::{
-    adwaita, compose_main_window, equalizer, hit, jump, marquee, menu, pledit, preferences,
-    Framebuffer,
+    adwaita, compose_main_window, equalizer, fileinfo, hit, jump, marquee, menu, pledit,
+    preferences, Framebuffer,
 };
 use xubamp_skin::{default_skin, Skin};
 
@@ -141,6 +141,22 @@ pub enum PlaylistSort {
 type MenuSink = Box<dyn FnMut(MenuRequest)>;
 type PreferencesSink = Box<dyn FnMut(preferences::Command)>;
 
+/// Which track the file-info box should describe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileInfoQuery {
+    /// The currently loaded track.
+    Current,
+    /// A playlist row by index.
+    Row(usize),
+}
+
+/// Fetches everything the file-info box shows for a query; `None` keeps the box closed (nothing
+/// loaded, or a build without the audio feature).
+type FileInfoSource = Box<dyn FnMut(FileInfoQuery) -> Option<fileinfo::FileInfoData>>;
+/// Writes the edited tag and refreshes the application's caches; the `Err` string shows in the
+/// dialog's status line.
+type FileInfoSaveSink = Box<dyn FnMut(&fileinfo::SaveRequest) -> Result<(), String>>;
+
 /// An event produced outside the Wayland thread and applied on the next event-loop tick.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExternalEvent {
@@ -173,6 +189,8 @@ pub struct Runtime {
     ui_options: UiOptions,
     preferences_model: preferences::PreferencesModel,
     on_preferences: PreferencesSink,
+    file_info_source: FileInfoSource,
+    on_file_info_save: FileInfoSaveSink,
 }
 
 impl Runtime {
@@ -197,6 +215,8 @@ impl Runtime {
             ui_options: UiOptions::default(),
             preferences_model: preferences::PreferencesModel::default(),
             on_preferences: Box::new(|_| {}),
+            file_info_source: Box::new(|_| None),
+            on_file_info_save: Box::new(|_| Err("tag editing is unavailable".to_owned())),
         }
     }
 
@@ -220,6 +240,17 @@ impl Runtime {
     ) -> Self {
         self.preferences_model = model;
         self.on_preferences = Box::new(sink);
+        self
+    }
+
+    /// Supply the file-info box's data source and tag-save sink.
+    pub fn with_file_info(
+        mut self,
+        source: impl FnMut(FileInfoQuery) -> Option<fileinfo::FileInfoData> + 'static,
+        save: impl FnMut(&fileinfo::SaveRequest) -> Result<(), String> + 'static,
+    ) -> Self {
+        self.file_info_source = Box::new(source);
+        self.on_file_info_save = Box::new(save);
         self
     }
 }
@@ -408,6 +439,37 @@ struct JumpWin {
     armed_move: Option<(i32, i32, u32)>,
     /// The last result row clicked and when, to detect a double-click (which plays it).
     last_click: Option<(usize, Instant)>,
+}
+
+/// The classic file-info box as a native-style toplevel. The pure renderer owns the form and
+/// editing; this wrapper owns only the Wayland toplevel and shm presentation resources.
+struct FileInfoWin {
+    window: Window,
+    pool: SlotPool,
+    fb: Framebuffer,
+    configured: bool,
+    armed_move: Option<(i32, i32, u32)>,
+}
+
+impl FileInfoWin {
+    fn present(&mut self) {
+        let (w, h) = (self.fb.width, self.fb.height);
+        let stride = w as i32 * 4;
+        let (buffer, canvas) = self
+            .pool
+            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+            .expect("create file-info wl_shm buffer");
+        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
+        let surface = self.window.wl_surface();
+        surface.damage_buffer(0, 0, w as i32, h as i32);
+        buffer.attach_to(surface).expect("attach file-info buffer");
+        surface.commit();
+    }
 }
 
 /// Native OS-style Preferences window. The pure renderer owns its controls and accessibility
@@ -608,6 +670,12 @@ pub fn run(
         jump_state: jump::JumpState::default(),
         preferences_win: None,
         preferences_state: preferences::PreferencesState::new(runtime.preferences_model),
+        file_info_win: None,
+        file_info_state: fileinfo::FileInfoState::default(),
+        file_info_source: runtime.file_info_source,
+        on_file_info_save: runtime.on_file_info_save,
+        #[cfg(feature = "keyboard")]
+        file_info_keyboard_focus: false,
         ui_font: adwaita::UiFont::load_system(),
         ui_palette: if runtime.ui_options.dark {
             adwaita::Palette::dark()
@@ -780,6 +848,16 @@ struct App {
     /// Singleton native Preferences window and its pure interaction model.
     preferences_win: Option<PreferencesWin>,
     preferences_state: preferences::PreferencesState,
+    /// The classic file-info box (a native-style toplevel) and its pure form state.
+    file_info_win: Option<FileInfoWin>,
+    file_info_state: fileinfo::FileInfoState,
+    /// Fetches the described track's facts and tags; a `None` keeps the box closed.
+    file_info_source: FileInfoSource,
+    /// Writes the edited ID3v1 tag and refreshes the application caches.
+    on_file_info_save: FileInfoSaveSink,
+    /// Whether the active keyboard surface is the file-info box.
+    #[cfg(feature = "keyboard")]
+    file_info_keyboard_focus: bool,
     /// System UI font (Adwaita Sans / Cantarell / DejaVu) loaded once, used to paint the non-skin
     /// menus and dialogs natively. `None` on a host with no usable font, where they fall back to the
     /// classic bitmap chrome.
@@ -1307,6 +1385,10 @@ impl App {
                 .preferences_win
                 .as_ref()
                 .is_some_and(|preferences| surface == preferences.window.wl_surface())
+            || self
+                .file_info_win
+                .as_ref()
+                .is_some_and(|info| surface == info.window.wl_surface())
     }
 
     fn open_equalizer(&mut self) {
@@ -1749,7 +1831,18 @@ impl App {
                     self.redraw_playlist();
                 }
             }
-            menu::ClassicMenuAction::PlaylistFileInfo => {}
+            menu::ClassicMenuAction::PlaylistFileInfo => {
+                // The first selected row, else the playing row, else the first row.
+                let target = self
+                    .playlist_state
+                    .selected
+                    .iter()
+                    .min()
+                    .copied()
+                    .or(self.playlist_state.current)
+                    .unwrap_or(0);
+                self.open_file_info(FileInfoQuery::Row(target));
+            }
             // Everything else mutates the player, so route it to the application layer with the
             // current selection (as display-row indices) attached.
             menu::ClassicMenuAction::PlaylistRemoveSelected => {
@@ -2447,6 +2540,144 @@ impl App {
         }
     }
 
+    /// Open (or retarget) the classic file-info box for a track. Reopening with another track
+    /// simply reloads the form.
+    fn open_file_info(&mut self, query: FileInfoQuery) {
+        let Some(data) = (self.file_info_source)(query) else {
+            return;
+        };
+        self.file_info_state = fileinfo::FileInfoState::new(data);
+        if self.file_info_win.is_some() {
+            self.redraw_file_info();
+            return;
+        }
+        let (width, height) = (fileinfo::FILEINFO_W, fileinfo::FILEINFO_H);
+        let fb = fileinfo::compose(
+            &self.file_info_state,
+            self.ui_font.as_ref(),
+            &self.ui_palette,
+            width,
+            height,
+        );
+        let surface = self.compositor.create_surface(&self.qh);
+        let window =
+            self.xdg_shell
+                .create_window(surface, WindowDecorations::RequestClient, &self.qh);
+        window.set_title("xubamp file info");
+        window.set_app_id("xubamp");
+        window.set_min_size(Some((width as u32, height as u32)));
+        window.set_max_size(Some((width as u32, height as u32)));
+        window.commit();
+        let pool = SlotPool::new(width as usize * height as usize * 4, &self.shm)
+            .expect("file-info pool");
+        self.file_info_win = Some(FileInfoWin {
+            window,
+            pool,
+            fb,
+            configured: false,
+            armed_move: None,
+        });
+    }
+
+    fn close_file_info(&mut self) {
+        self.file_info_win = None;
+        #[cfg(feature = "keyboard")]
+        {
+            self.file_info_keyboard_focus = false;
+        }
+    }
+
+    fn redraw_file_info(&mut self) {
+        let configured = self
+            .file_info_win
+            .as_ref()
+            .is_some_and(|window| window.configured);
+        if !configured {
+            return;
+        }
+        let fb = fileinfo::compose(
+            &self.file_info_state,
+            self.ui_font.as_ref(),
+            &self.ui_palette,
+            fileinfo::FILEINFO_W,
+            fileinfo::FILEINFO_H,
+        );
+        let window = self.file_info_win.as_mut().unwrap();
+        window.fb = fb;
+        window.present();
+    }
+
+    /// Carry out a file-info interaction outcome: redraw, close, or write the tag (the save
+    /// result lands in the status line).
+    fn apply_file_info(&mut self, outcome: fileinfo::Outcome) {
+        if outcome.save {
+            let request = self.file_info_state.save_request();
+            let status = match (self.on_file_info_save)(&request) {
+                Ok(()) => "Saved.".to_owned(),
+                Err(error) => error,
+            };
+            self.file_info_state.set_status(status);
+        }
+        if outcome.close {
+            self.close_file_info();
+            return;
+        }
+        if outcome.redraw || outcome.save {
+            self.redraw_file_info();
+        }
+    }
+
+    fn file_info_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        match *kind {
+            PointerEventKind::Enter { .. } => {
+                if let Some(pointer) = &self.pointer {
+                    let _ = pointer.set_cursor(conn, CursorIcon::Default);
+                }
+            }
+            PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
+                let outcome = self.file_info_state.press(
+                    x,
+                    y,
+                    fileinfo::FILEINFO_W,
+                    fileinfo::FILEINFO_H,
+                );
+                if outcome.start_move {
+                    if let Some(window) = &mut self.file_info_win {
+                        window.armed_move = Some((x, y, serial));
+                    }
+                }
+                self.apply_file_info(outcome);
+            }
+            PointerEventKind::Motion { .. } => {
+                let armed = self
+                    .file_info_win
+                    .as_ref()
+                    .and_then(|window| window.armed_move);
+                if let Some((press_x, press_y, serial)) = armed {
+                    if hit::exceeds_move_threshold(x - press_x, y - press_y) {
+                        if let (Some(seat), Some(window)) =
+                            (self.seat.as_ref(), self.file_info_win.as_mut())
+                        {
+                            window.window.move_(seat, serial);
+                            window.armed_move = None;
+                        }
+                    }
+                }
+            }
+            PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                if let Some(window) = &mut self.file_info_win {
+                    window.armed_move = None;
+                }
+            }
+            PointerEventKind::Leave { .. } => {
+                if let Some(window) = &mut self.file_info_win {
+                    window.armed_move = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn open_preferences(&mut self) {
         if self.preferences_win.is_some() {
             return;
@@ -2922,6 +3153,12 @@ impl WindowHandler for App {
             .is_some_and(|preferences| *window == preferences.window)
         {
             self.close_preferences();
+        } else if self
+            .file_info_win
+            .as_ref()
+            .is_some_and(|info| *window == info.window)
+        {
+            self.close_file_info();
         }
     }
     fn configure(
@@ -2972,6 +3209,15 @@ impl WindowHandler for App {
                 preferences.configured = true;
             }
             self.redraw_preferences();
+        } else if self
+            .file_info_win
+            .as_ref()
+            .is_some_and(|info| *window == info.window)
+        {
+            if let Some(info) = &mut self.file_info_win {
+                info.configured = true;
+            }
+            self.redraw_file_info();
         }
     }
 }
@@ -3154,6 +3400,15 @@ impl PointerHandler for App {
                 self.preferences_pointer(conn, &event.kind, x, y);
                 continue;
             }
+            let on_file_info = !on_main
+                && self
+                    .file_info_win
+                    .as_ref()
+                    .is_some_and(|info| event.surface == *info.window.wl_surface());
+            if on_file_info {
+                self.file_info_pointer(conn, &event.kind, x, y);
+                continue;
+            }
             if !on_main {
                 continue; // an event for some other surface (e.g. the cursor surface)
             }
@@ -3263,6 +3518,10 @@ impl KeyboardHandler for App {
                 .preferences_win
                 .as_ref()
                 .is_some_and(|preferences| surface == preferences.window.wl_surface());
+            self.file_info_keyboard_focus = self
+                .file_info_win
+                .as_ref()
+                .is_some_and(|info| surface == info.window.wl_surface());
         }
     }
     fn leave(
@@ -3276,6 +3535,7 @@ impl KeyboardHandler for App {
         if self.is_our_surface(surface) {
             self.keyboard_focus = false;
             self.preferences_keyboard_focus = false;
+            self.file_info_keyboard_focus = false;
         }
     }
     fn press_key(
@@ -3327,6 +3587,11 @@ impl App {
         }
         if self.preferences_keyboard_focus && self.preferences_win.is_some() {
             self.preferences_key(event);
+            return;
+        }
+        // The file-info box captures every key while it holds the focus (it edits text).
+        if self.file_info_keyboard_focus && self.file_info_win.is_some() {
+            self.file_info_key(event);
             return;
         }
         if self.popup_menu.is_some() {
@@ -3389,6 +3654,34 @@ impl App {
         }
         let outcome = hit::on_key(&mut self.state, key, is_repeat);
         self.apply(outcome);
+    }
+
+    fn file_info_key(&mut self, event: &KeyEvent) {
+        let key = match event.keysym {
+            Keysym::Escape => fileinfo::Key::Escape,
+            Keysym::Return | Keysym::KP_Enter => fileinfo::Key::Enter,
+            Keysym::Tab if self.modifiers.shift => fileinfo::Key::ShiftTab,
+            Keysym::Tab => fileinfo::Key::Tab,
+            Keysym::ISO_Left_Tab => fileinfo::Key::ShiftTab,
+            Keysym::BackSpace => fileinfo::Key::Backspace,
+            Keysym::Delete => fileinfo::Key::Delete,
+            Keysym::Left => fileinfo::Key::Left,
+            Keysym::Right => fileinfo::Key::Right,
+            Keysym::Home => fileinfo::Key::Home,
+            Keysym::End => fileinfo::Key::End,
+            _ => {
+                let Some(character) = event.utf8.as_deref().and_then(|text| text.chars().next())
+                else {
+                    return;
+                };
+                if character.is_control() {
+                    return;
+                }
+                fileinfo::Key::Char(character)
+            }
+        };
+        let outcome = self.file_info_state.key(key);
+        self.apply_file_info(outcome);
     }
 
     fn popup_menu_key(&mut self, event: &KeyEvent) {

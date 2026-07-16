@@ -446,6 +446,79 @@ fn write_playlist(
     std::fs::write(dest, text).map_err(|error| format!("cannot write {}: {error}", dest.display()))
 }
 
+/// Assemble everything the file-info box shows for a track: filesystem size, header-level stream
+/// facts, and the tag form prefilled from the ID3v1 tail (falling back to the embedded ID3v2 or
+/// Vorbis artist/title for display). Editable only for MP3, whose ID3v1 tail we can write.
+#[cfg(feature = "audio")]
+fn file_info_data(
+    player: &player::Player,
+    query: xubamp_wl::FileInfoQuery,
+) -> Option<xubamp_render::fileinfo::FileInfoData> {
+    use xubamp_render::fileinfo::{FileInfoData, TrackFacts};
+    let path = match query {
+        xubamp_wl::FileInfoQuery::Current => player.current_path()?,
+        xubamp_wl::FileInfoQuery::Row(index) => player.track_path(index)?,
+    };
+    let size_bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let stream = xubamp_audio::decode::probe_stream_info(&path).unwrap_or_default();
+    let bitrate_kbps = stream.duration_secs.and_then(|secs| {
+        (secs > 0).then(|| (size_bytes.saturating_mul(8) / 1000 / u64::from(secs)) as u32)
+    });
+    let v1 = xubamp_audio::id3v1::read(&path).ok().flatten().unwrap_or_default();
+    let embedded = xubamp_audio::decode::probe_tags(&path).unwrap_or_default();
+    let or_embedded = |v1_field: String, embedded_field: Option<String>| {
+        if v1_field.is_empty() {
+            embedded_field.unwrap_or_default()
+        } else {
+            v1_field
+        }
+    };
+    let fields = [
+        or_embedded(v1.title.clone(), embedded.title),
+        or_embedded(v1.artist.clone(), embedded.artist),
+        v1.album.clone(),
+        v1.year.clone(),
+        v1.comment.clone(),
+        v1.genre_name(),
+        v1.track.map(|t| t.to_string()).unwrap_or_default(),
+    ];
+    let editable = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
+    Some(FileInfoData {
+        facts: TrackFacts {
+            path: path.display().to_string(),
+            size_bytes,
+            duration_secs: stream.duration_secs,
+            bitrate_kbps,
+            sample_rate_hz: stream.sample_rate,
+            channels: stream.channels,
+            codec: stream.codec,
+        },
+        path,
+        fields,
+        editable,
+    })
+}
+
+/// Write the file-info box's edited fields as the track's ID3v1 tail.
+#[cfg(feature = "audio")]
+fn write_file_info(request: &xubamp_render::fileinfo::SaveRequest) -> Result<(), String> {
+    use xubamp_audio::id3v1::{self, Id3v1};
+    let fields = &request.fields;
+    let tag = Id3v1 {
+        title: fields[0].clone(),
+        artist: fields[1].clone(),
+        album: fields[2].clone(),
+        year: fields[3].clone(),
+        comment: fields[4].clone(),
+        genre: Id3v1::genre_from_name(&fields[5]),
+        track: fields[6].trim().parse::<u8>().ok().filter(|&t| t != 0),
+    };
+    id3v1::write(&request.path, &tag).map_err(|error| format!("Cannot write the tag: {error}"))
+}
+
 /// Eject always invokes the replace-and-play chooser. Play does so only for an empty playlist;
 /// Pause stays inert there instead of becoming another chooser shortcut.
 fn transport_opens_media(t: xubamp_render::hit::Transport, playlist_empty: bool) -> bool {
@@ -744,6 +817,19 @@ fn main() {
             let player = Rc::clone(&player);
             move || player.borrow().playlist_view()
         };
+        let file_info_source = {
+            let player = Rc::clone(&player);
+            move |query| file_info_data(&player.borrow(), query)
+        };
+        let on_file_info_save = {
+            let player = Rc::clone(&player);
+            move |request: &xubamp_render::fileinfo::SaveRequest| {
+                write_file_info(request)?;
+                // The file changed under the caches: re-probe so rows and marquee update.
+                player.borrow_mut().refresh_metadata(&request.path);
+                Ok(())
+            }
+        };
         let external_source = {
             let player = Rc::clone(&player);
             let settings = Rc::clone(&settings);
@@ -872,6 +958,7 @@ fn main() {
             )
             .with_ui_options(ui_options)
             .with_preferences(preferences_model, on_preferences)
+            .with_file_info(file_info_source, on_file_info_save)
             .with_external_source(external_source),
         );
         if let Ok(session) = result.as_ref() {

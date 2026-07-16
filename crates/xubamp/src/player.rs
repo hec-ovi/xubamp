@@ -143,6 +143,24 @@ impl Player {
             .unwrap_or_else(|| track_title(&path.to_string_lossy()))
     }
 
+    /// The currently loaded track's path, if any.
+    pub fn current_path(&self) -> Option<PathBuf> {
+        self.playlist.current().map(Path::to_path_buf)
+    }
+
+    /// The path of playlist row `index`, if it exists.
+    pub fn track_path(&self, index: usize) -> Option<PathBuf> {
+        self.playlist.tracks().nth(index).map(Path::to_path_buf)
+    }
+
+    /// Drop and re-probe one track's cached duration and tag name (its file just changed, e.g.
+    /// the file-info box wrote a tag), so the playlist rows and marquee pick up the new values.
+    pub fn refresh_metadata(&mut self, path: &Path) {
+        self.durations.remove(path);
+        self.names.remove(path);
+        self.probe_durations(std::slice::from_ref(&path.to_path_buf()));
+    }
+
     /// Replace the playlist with supported local audio paths, preserving player-wide modes,
     /// volume, balance, and equalizer settings. The accepted first entry becomes current but is not
     /// decoded until [`Self::start`], allowing a cancelled or invalid picker result to leave the

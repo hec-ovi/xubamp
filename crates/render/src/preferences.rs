@@ -527,9 +527,13 @@ impl PreferencesState {
                     ControlRole::RadioButton,
                 ));
                 let y0 = content.y + 126;
+                let refresh_label = format!(
+                    "Refresh rate ({} fps)",
+                    crate::vis::refresh_fps(self.model.visualization_refresh_rate)
+                );
                 controls.push(slider(
                     ControlId::VisualizationRefreshRate,
-                    "Refresh rate",
+                    &refresh_label,
                     y0,
                     36,
                     self.model.visualization_refresh_rate,
@@ -578,14 +582,14 @@ impl PreferencesState {
                 ));
                 controls.push(slider(
                     ControlId::VisualizationBarFalloff,
-                    "Analyzer falloff",
+                    "Analyzer falloff (slow to fast)",
                     y0 + 192,
                     36,
                     self.model.visualization_bar_falloff,
                 ));
                 controls.push(slider(
                     ControlId::VisualizationPeakFalloff,
-                    "Peaks falloff",
+                    "Peaks falloff (slow to fast)",
                     y0 + 234,
                     36,
                     self.model.visualization_peak_falloff,

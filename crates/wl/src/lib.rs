@@ -76,11 +76,9 @@ const BLINK_TICK: Duration = Duration::from_millis(600);
 const NOTICE_DURATION: Duration = Duration::from_secs(2);
 
 /// The visualizer's animation period while playing: the redraw timer steps and repaints it at
-/// the user's refresh-rate setting. Rate 1..=10 maps to roughly 100 ms (10 fps) down to 16 ms
-/// (~60 fps).
+/// the user's refresh-rate setting, on the classic scale (10 fps up to the original's ~70 fps).
 fn frame_fallback(refresh_rate: u8) -> Duration {
-    let ms = (100u64 / u64::from(refresh_rate.clamp(1, 10))).clamp(16, 100);
-    Duration::from_millis(ms)
+    Duration::from_millis(xubamp_render::vis::refresh_period_ms(refresh_rate))
 }
 
 /// Redraw cadence while the visualizer settles to baseline after a Stop (~30 fps): a few frames of
@@ -711,6 +709,8 @@ pub fn run(
         last_marquee: Instant::now(),
         last_blink: Instant::now(),
         notice_until: None,
+        fps_frames: 0,
+        fps_since: Instant::now(),
         qh: qh.clone(),
         playing: false,
         stopped: false,
@@ -796,6 +796,9 @@ struct App {
     last_blink: Instant,
     /// When the current marquee notice expires and the title takes the strip back.
     notice_until: Option<Instant>,
+    /// `XUBAMP_DEBUG_FPS` counters: animated frames since `fps_since`.
+    fps_frames: u32,
+    fps_since: Instant,
     /// The compositor, kept so a cursor surface can be created when the pointer is set up.
     compositor: CompositorState,
     /// Positions the playlist and equalizer as child panes of the main toplevel.
@@ -1311,6 +1314,16 @@ impl App {
             // focus), which stalled the animation to a crawl.
             self.step_vis();
             self.redraw();
+            // `XUBAMP_DEBUG_FPS=1` prints the achieved visualizer rate once a second, the ground
+            // truth when animation pacing looks wrong on some compositor.
+            if std::env::var_os("XUBAMP_DEBUG_FPS").is_some() {
+                self.fps_frames += 1;
+                if self.fps_since.elapsed() >= Duration::from_secs(1) {
+                    eprintln!("xubamp: vis {} fps", self.fps_frames);
+                    self.fps_frames = 0;
+                    self.fps_since = Instant::now();
+                }
+            }
             frame_fallback(self.state.vis.refresh_rate)
         } else {
             // Not playing. When STOPPED the visualizer settles to baseline (step_vis advances

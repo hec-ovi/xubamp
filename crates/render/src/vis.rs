@@ -127,6 +127,26 @@ pub struct VisState {
     scope: [u8; VIS_COLS],
 }
 
+/// The classic refresh-rate scale: speed 1..=10 maps onto periods stepping up to the original's
+/// ~70fps ceiling (the fps number the Preferences slider shows).
+///
+/// ```
+/// use xubamp_render::vis::{refresh_fps, refresh_period_ms};
+/// assert_eq!(refresh_period_ms(10), 14); // ~70 fps at the top
+/// assert_eq!(refresh_period_ms(1), 100); // 10 fps at the bottom
+/// assert_eq!(refresh_fps(10), 71);
+/// assert_eq!(refresh_fps(0), 10, "out-of-range clamps");
+/// ```
+pub fn refresh_period_ms(rate: u8) -> u64 {
+    const PERIOD_MS: [u64; 10] = [100, 71, 59, 43, 33, 29, 25, 20, 17, 14];
+    PERIOD_MS[(rate.clamp(1, 10) - 1) as usize]
+}
+
+/// The frame rate the Preferences slider displays for a refresh speed.
+pub fn refresh_fps(rate: u8) -> u32 {
+    (1000 / refresh_period_ms(rate)) as u32
+}
+
 impl Default for VisState {
     fn default() -> Self {
         VisState {

@@ -1,3 +1,22 @@
+xubamp (0.1.1-1) resolute; urgency=medium
+
+  * The playlist persists across close and reopen (session.m3u8 plus the
+    remembered current row); reopening never autoplays.
+  * Visualization pacing fixed: the analyzer/scope is timer-paced at the
+    chosen refresh rate instead of stalling on throttled compositor
+    frame callbacks.
+  * Mouse wheel adjusts volume anywhere on the main window, pans over
+    the balance slider, and seeks over the position bar.
+  * The playlist scrollbar uses the skin's classic handle sprite.
+  * Right-clicking a playlist row pops a per-track menu (Play, File
+    Info, Remove Selected, Crop).
+  * Shuffle Previous with no history jumps to a random track, like the
+    original.
+  * A stopped deck shows a blank clock instead of 0:00; popup menus
+    open without a pre-highlighted row.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Wed, 16 Jul 2026 16:00:00 +0000
+
 xubamp (0.1.0-1) resolute; urgency=medium
 
   * Tag-aware display: ID3v2/Vorbis/RIFF tags feed the classic

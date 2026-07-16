@@ -1,3 +1,14 @@
+xubamp (0.1.2-1) resolute; urgency=medium
+
+  * Visualization refresh slider uses the classic fps scale (10 fps up
+    to ~70 fps) and shows the resulting fps in Preferences; falloff
+    sliders read slow-to-fast.
+  * XUBAMP_DEBUG_FPS=1 prints the achieved visualizer frame rate for
+    diagnostics.
+  * Stale development branch removed; main carries every release.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Wed, 16 Jul 2026 18:00:00 +0000
+
 xubamp (0.1.1-1) resolute; urgency=medium
 
   * The playlist persists across close and reopen (session.m3u8 plus the

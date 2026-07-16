@@ -97,6 +97,10 @@ pub struct PlaybackSettings {
     /// The current track's playlist position when the last session ended, so reopening restores
     /// the same selection from the session playlist file.
     pub session_track: u32,
+    /// Whether the deck was actively playing when the last session ended, so reopening resumes
+    /// the restored track instead of sitting armed and silent. A paused or stopped close stays
+    /// quiet on reopen.
+    pub session_playing: bool,
 }
 
 impl Default for PlaybackSettings {
@@ -109,6 +113,7 @@ impl Default for PlaybackSettings {
             sort_on_load: false,
             manual_advance: false,
             session_track: 0,
+            session_playing: false,
         }
     }
 }
@@ -415,6 +420,13 @@ impl Settings {
                     Ok(v) => settings.playback.session_track = v,
                     Err(_) => bad("expected an unsigned integer", &mut warnings),
                 },
+                "playback.session_playing" => set_bool(
+                    value,
+                    &mut settings.playback.session_playing,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
                 "visualization.mode" => match value {
                     "spectrum" => settings.visualization.mode = VisualizationMode::Spectrum,
                     "oscilloscope" => settings.visualization.mode = VisualizationMode::Oscilloscope,
@@ -615,6 +627,11 @@ impl Settings {
             &mut out,
             "playback.session_track",
             self.playback.session_track,
+        );
+        line(
+            &mut out,
+            "playback.session_playing",
+            self.playback.session_playing,
         );
         line(
             &mut out,
@@ -1012,6 +1029,7 @@ mod tests {
         s.playback.sort_on_load = true;
         s.playback.manual_advance = true;
         s.playback.session_track = 7;
+        s.playback.session_playing = true;
         s.visualization.mode = VisualizationMode::Oscilloscope;
         s.visualization.show_peaks = false;
         s.visualization.analyzer_style = AnalyzerStyle::Fire;

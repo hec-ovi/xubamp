@@ -253,8 +253,23 @@ impl Player {
         self.playlist.current_index()
     }
 
+    /// Load a saved session's playlist exactly as it was left. The sidecar file records the order
+    /// the user arranged (sorted or not), so sort-on-load must not reorder it here: that would
+    /// silently shift which track the saved current-row index points at. Titles and durations
+    /// still probe per the read-titles option.
+    pub fn restore_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        let accepted: Vec<PathBuf> =
+            paths.into_iter().filter(|path| is_audio_path(path)).collect();
+        if self.options.read_titles_on_load {
+            self.probe_durations(&accepted);
+        }
+        self.playlist.extend(accepted);
+        self.shuffle_cycle.anchor(&self.playlist);
+    }
+
     /// Select playlist row `index` without touching playback: the session-restore path, so the
-    /// remembered track is highlighted and armed but nothing autoplays on login.
+    /// remembered track is highlighted and armed. Whether playback then resumes is the caller's
+    /// call (it does when the previous session ended while playing).
     pub fn restore_selection(&mut self, index: usize) {
         let Some((id, _)) = self.playlist.entries().nth(index).map(|(id, p)| (id, p.to_owned()))
         else {
@@ -1063,6 +1078,91 @@ mod tests {
         assert_eq!(
             player.playlist.current_index().and_then(|i| player.playlist.track_id(i)),
             Some(fresh)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_paths_keeps_the_sidecar_order_despite_sort_on_load() {
+        let dir = std::env::temp_dir().join(format!("xubamp-restore-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = ["zebra.wav", "alpha.wav", "middle.wav"];
+        let paths: Vec<PathBuf> = names
+            .iter()
+            .map(|n| {
+                let p = dir.join(n);
+                write_wav(&p, 48_000, 1);
+                p
+            })
+            .collect();
+        let mut player = Player::with_settings_and_options(
+            Vec::new(),
+            false,
+            false,
+            50,
+            EqSettings::default(),
+            PlayerOptions {
+                sort_on_load: true,
+                ..PlayerOptions::default()
+            },
+        );
+        player.restore_paths(paths.clone());
+        for (i, expected) in paths.iter().enumerate() {
+            assert_eq!(
+                player.track_path(i).as_ref(),
+                Some(expected),
+                "row {i} keeps the saved order, not the alphabetical one"
+            );
+        }
+        // The saved index therefore still points at the same song, and resume plays it.
+        player.restore_selection(0);
+        player.start();
+        assert_eq!(player.current_path(), Some(paths[0].clone()));
+        assert!(!player.playback().stopped, "session resume leaves the stopped state");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn play_after_restore_starts_the_armed_track() {
+        let dir = std::env::temp_dir().join(format!("xubamp-restore-play-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..6)
+            .map(|i| {
+                let p = dir.join(format!("t{i}.wav"));
+                write_wav(&p, 48_000, 1);
+                p
+            })
+            .collect();
+        let mut player = Player::new(paths.clone());
+        player.restore_selection(1);
+        player.transport(Transport::Play);
+        // `playing` is published by the PipeWire thread, absent in the test container, so the
+        // deck state and the loaded path are what this can assert.
+        let pb = player.playback();
+        assert!(!pb.stopped, "play after restore leaves the stopped state");
+        assert_eq!(
+            player.current_path(),
+            Some(paths[1].clone()),
+            "the armed row is what plays, not the first row"
+        );
+
+        // The same restore with shuffle and repeat active (a real session's settings): the armed
+        // row must still be what the first Play starts, not a shuffle pick.
+        let mut player = Player::with_settings_and_options(
+            paths.clone(),
+            true,
+            true,
+            50,
+            EqSettings::default(),
+            PlayerOptions::default(),
+        );
+        player.restore_selection(4);
+        player.transport(Transport::Play);
+        assert!(!player.playback().stopped);
+        assert_eq!(
+            player.current_path(),
+            Some(paths[4].clone()),
+            "shuffle does not steal the first Play from the armed row"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

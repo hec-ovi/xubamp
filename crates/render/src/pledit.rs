@@ -1105,13 +1105,13 @@ fn draw_row_vector(fb: &mut Framebuffer, ui: &UiFont, row: &Row, y: i32, list_w:
     } else {
         let dw = ui.text_width(&row.duration, PL_FONT_PX).ceil() as i32;
         let dx = sprites::PLEDIT_LIST_X + list_w - dw - 3;
-        ui.draw_text(fb, dx, baseline, &row.duration, PL_FONT_PX, rgba);
+        ui.draw_text_linear(fb, dx, baseline, &row.duration, PL_FONT_PX, rgba);
         dw + 4
     };
     let avail = (list_w - 2 - dur_w).max(0) as f32;
     let max_chars = chars_fitting_vector(ui, &row.title, avail);
     let title: String = row.title.chars().take(max_chars).collect();
-    ui.draw_text(
+    ui.draw_text_linear(
         fb,
         sprites::PLEDIT_LIST_X + 1,
         baseline,

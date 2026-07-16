@@ -121,6 +121,46 @@ fn blend_pixel(fb: &mut Framebuffer, x: i32, y: i32, rgba: [u8; 4], coverage: f3
     dst[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
+/// sRGB channel (0..=255) to linear light (0.0..=1.0).
+fn srgb_to_linear(c: u8) -> f32 {
+    let s = c as f32 / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light (0.0..=1.0) back to an sRGB channel (0..=255).
+fn linear_to_srgb(l: f32) -> u8 {
+    let s = if l <= 0.003_130_8 {
+        l * 12.92
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Glyph-coverage blend in linear light: each channel is linearized, mixed by coverage, and
+/// re-encoded. Assumes an opaque destination (every surface here composes over an opaque base).
+fn blend_glyph_linear(fb: &mut Framebuffer, x: i32, y: i32, rgba: [u8; 4], coverage: f32) {
+    if x < 0 || y < 0 || x >= fb.width as i32 || y >= fb.height as i32 {
+        return;
+    }
+    let cov = (coverage * rgba[3] as f32 / 255.0).clamp(0.0, 1.0);
+    if cov <= 0.0 {
+        return;
+    }
+    let offset = ((y as u32 * fb.width + x as u32) * 4) as usize;
+    let dst = &mut fb.rgba[offset..offset + 4];
+    for c in 0..3 {
+        let s = srgb_to_linear(rgba[c]);
+        let d = srgb_to_linear(dst[c]);
+        dst[c] = linear_to_srgb(s * cov + d * (1.0 - cov));
+    }
+    dst[3] = 255;
+}
+
 /// Fill an axis-aligned rectangle, alpha-blended and clipped to the framebuffer.
 pub fn fill_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32, rgba: [u8; 4]) {
     for yy in y..y + h.max(0) {
@@ -351,6 +391,29 @@ impl UiFont {
             pen += metrics.advance_width;
         }
     }
+
+    /// Like [`draw_text`](Self::draw_text), but compositing the glyph coverage in linear light
+    /// instead of sRGB space. Blending in sRGB darkens every partially-covered edge pixel, which
+    /// reads as a muddy fringe around small light-on-dark text (the classic green-on-black
+    /// playlist); linear blending keeps those edges at their true brightness. Menu/dialog text
+    /// keeps the sRGB blend, matching how GTK renders its dark-on-light labels.
+    pub fn draw_text_linear(&self, fb: &mut Framebuffer, x: i32, baseline_y: i32, text: &str, px: f32, rgba: [u8; 4]) {
+        let mut pen = x as f32;
+        for ch in text.chars() {
+            let (metrics, bitmap) = self.font.rasterize(ch, px);
+            let gx = pen.round() as i32 + metrics.xmin;
+            let gy = baseline_y - metrics.ymin - metrics.height as i32;
+            for row in 0..metrics.height {
+                for col in 0..metrics.width {
+                    let coverage = bitmap[row * metrics.width + col] as f32 / 255.0;
+                    if coverage > 0.0 {
+                        blend_glyph_linear(fb, gx + col as i32, gy + row as i32, rgba, coverage);
+                    }
+                }
+            }
+            pen += metrics.advance_width;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +427,45 @@ mod tests {
 
     const WHITE: [u8; 4] = [255, 255, 255, 255];
     const ACCENT: [u8; 4] = [0x35, 0x84, 0xe4, 255];
+
+    #[test]
+    fn srgb_linear_round_trips_every_channel_value() {
+        for v in 0..=255u8 {
+            assert_eq!(linear_to_srgb(srgb_to_linear(v)), v);
+        }
+    }
+
+    #[test]
+    fn linear_glyph_blend_keeps_half_coverage_at_true_half_brightness() {
+        let mut fb = Framebuffer::new(1, 1);
+        fill_rect(&mut fb, 0, 0, 1, 1, [0, 0, 0, 255]);
+        blend_glyph_linear(&mut fb, 0, 0, WHITE, 0.5);
+        // Half linear light re-encodes near sRGB 188; the old sRGB-space blend gave 128,
+        // which is only ~21% of white's light and read as a dark fringe.
+        assert_eq!(px(&fb, 0, 0)[0], 188);
+    }
+
+    #[test]
+    fn linear_text_is_never_darker_than_srgb_text_on_black() {
+        let Some(font) = UiFont::load_system() else {
+            return;
+        };
+        let mut srgb = Framebuffer::new(80, 16);
+        let mut linear = Framebuffer::new(80, 16);
+        for fb in [&mut srgb, &mut linear] {
+            fill_rect(fb, 0, 0, 80, 16, [0, 0, 0, 255]);
+        }
+        font.draw_text(&mut srgb, 2, 12, "legible", 10.0, WHITE);
+        font.draw_text_linear(&mut linear, 2, 12, "legible", 10.0, WHITE);
+        let sum = |fb: &Framebuffer| fb.rgba.iter().map(|&v| v as u64).sum::<u64>();
+        assert!(
+            sum(&linear) > sum(&srgb),
+            "linear blending brightens antialiased edges on a dark background"
+        );
+        for (l, s) in linear.rgba.iter().zip(srgb.rgba.iter()) {
+            assert!(l >= s, "no pixel gets darker");
+        }
+    }
 
     #[test]
     fn load_named_mirrors_what_fontconfig_matches() {

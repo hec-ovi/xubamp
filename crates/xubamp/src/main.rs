@@ -749,8 +749,9 @@ fn main() {
             bands_db: settings.equalizer.bands_db,
         };
         let session_track = settings.playback.session_track as usize;
+        let session_playing = settings.playback.session_playing;
         let player = Rc::new(RefCell::new(player::Player::with_settings_and_options(
-            tracks,
+            if restoring { Vec::new() } else { tracks.clone() },
             settings.playback.shuffle,
             settings.playback.repeat,
             settings.playback.shuffle_morph_rate,
@@ -759,7 +760,14 @@ fn main() {
         )));
         let settings = Rc::new(RefCell::new(settings));
         if restoring {
-            player.borrow_mut().restore_selection(session_track);
+            // The sidecar comes back verbatim (never re-sorted) so the saved row index still
+            // names the same track; if the session ended while playing, that track resumes.
+            let mut player = player.borrow_mut();
+            player.restore_paths(tracks);
+            player.restore_selection(session_track);
+            if session_playing {
+                player.start();
+            }
         } else {
             player.borrow_mut().start(); // begin the first track
         }
@@ -1065,8 +1073,15 @@ fn main() {
             apply_ui_session(&mut settings.borrow_mut(), *session);
         }
         // The playlist survives close/reopen: write it (and the current row) beside the settings.
-        settings.borrow_mut().playback.session_track =
-            player.borrow().current_index().unwrap_or(0) as u32;
+        // A session closed mid-song reopens playing that song; one closed paused or stopped
+        // reopens silent, so resume never blasts audio the user had already hushed.
+        {
+            let player = player.borrow();
+            let pb = player.playback();
+            let mut settings = settings.borrow_mut();
+            settings.playback.session_track = player.current_index().unwrap_or(0) as u32;
+            settings.playback.session_playing = pb.playing && !pb.stopped;
+        }
         if let Some(session_file) = session_playlist.as_deref() {
             let items: Vec<_> = player
                 .borrow()

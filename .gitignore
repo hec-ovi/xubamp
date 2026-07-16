@@ -10,3 +10,4 @@ Cargo.lock.bak
 .research/
 # Local agent resume state; never part of a source archive.
 /session
+/sessionCodexz

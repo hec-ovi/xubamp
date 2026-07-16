@@ -68,12 +68,13 @@ pub enum OscilloscopeStyle {
     Solid,
 }
 
-/// Visualization falloff/refresh sliders run 1 (slowest) to 10 (fastest).
+/// Visualization speed sliders: the refresh rate runs 1..=10; the classic falloffs have five
+/// speeds (values above 5 from older files clamp to the fastest at use).
 pub const VIS_SPEED_MAX: u8 = 10;
-/// Default bar-drop speed.
-pub const DEFAULT_BAR_FALLOFF: u8 = 7;
+/// Default bar-drop speed (the middle of the five classic speeds).
+pub const DEFAULT_BAR_FALLOFF: u8 = 3;
 /// Default peak-dot-drop speed.
-pub const DEFAULT_PEAK_FALLOFF: u8 = 6;
+pub const DEFAULT_PEAK_FALLOFF: u8 = 3;
 /// Default visualization refresh rate (snappy out of the box).
 pub const DEFAULT_VIS_REFRESH: u8 = 8;
 

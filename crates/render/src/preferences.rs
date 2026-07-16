@@ -155,8 +155,8 @@ impl Default for PreferencesModel {
             visualization_analyzer_style: AnalyzerStyle::Normal,
             visualization_band_width: BandWidth::Thick,
             visualization_osc_style: OscStyle::Lines,
-            visualization_bar_falloff: 7,
-            visualization_peak_falloff: 6,
+            visualization_bar_falloff: 3,
+            visualization_peak_falloff: 3,
             visualization_refresh_rate: 8,
             display_time: TimeDisplay::Elapsed,
             display_double_size: false,
@@ -2031,9 +2031,9 @@ fn slider_value_at_x(rect: Rect, x: i32, (minimum, maximum): (u8, u8)) -> u8 {
 fn slider_bounds(id: ControlId) -> Option<(u8, u8)> {
     match id {
         ControlId::ShuffleMorphRate => Some((SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX)),
-        ControlId::VisualizationRefreshRate
-        | ControlId::VisualizationBarFalloff
-        | ControlId::VisualizationPeakFalloff => Some((1, 10)),
+        ControlId::VisualizationRefreshRate => Some((1, 10)),
+        // The classic analyzer/peak falloffs have exactly five speeds.
+        ControlId::VisualizationBarFalloff | ControlId::VisualizationPeakFalloff => Some((1, 5)),
         ControlId::DisplaySnapPx => Some((0, 30)),
         _ => None,
     }
@@ -2360,10 +2360,10 @@ mod tests {
             Outcome::Command(Command::SetOscilloscopeStyle(OscStyle::Solid))
         );
         // The three speed sliders are accessible ranges with the 1..=10 bounds.
-        for (id, value) in [
-            (ControlId::VisualizationRefreshRate, 8),
-            (ControlId::VisualizationBarFalloff, 7),
-            (ControlId::VisualizationPeakFalloff, 6),
+        for (id, value, maximum) in [
+            (ControlId::VisualizationRefreshRate, 8, 10),
+            (ControlId::VisualizationBarFalloff, 3, 5),
+            (ControlId::VisualizationPeakFalloff, 3, 5),
         ] {
             let info = control(&state, id);
             assert_eq!(info.role, ControlRole::Slider);
@@ -2372,7 +2372,7 @@ mod tests {
                 Some(RangeInfo {
                     value,
                     minimum: 1,
-                    maximum: 10,
+                    maximum,
                     step: 1
                 })
             );

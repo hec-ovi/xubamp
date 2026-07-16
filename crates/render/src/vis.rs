@@ -1,10 +1,15 @@
 //! The main-window visualizer: a spectrum analyzer, an oscilloscope, or off, cycled by clicking
 //! the region. It reads the recent mono output samples (tapped from the RT), and for the spectrum
 //! runs a small hand-rolled radix-2 FFT (no external crate). Pure: samples plus the skin's
-//! `viscolor` palette in, pixels out; the per-frame decay state lives in [`VisState`]. Geometry
-//! and behaviour follow classic Winamp (cross-checked against Webamp): 75 columns in a 76x16
-//! region, "wide" 3px bars with 1px gaps over a fixed vertical gradient that bars reveal as they
-//! grow, and falling peak dots.
+//! `viscolor` palette in, pixels out; the per-frame decay state lives in [`VisState`].
+//!
+//! The analyzer pipeline is a faithful port of the XMMS/Audacious classic-skins visualizer (GPL,
+//! the reference the user pointed at for original-Winamp behaviour): a 512-sample `1-0.85cos`
+//! window into a 512-point FFT, 256 normalized magnitude bins integrated into 19 (thick) or 75
+//! (thin) logarithmic bands with the `bands/12` height fudge, a 40 dB range mapped onto the
+//! 16-row region, the five classic analyzer/peak falloff speeds, and the three coloring styles
+//! (normal by absolute row, fire from each bar's tip, line = the whole bar in its height's
+//! color). The oscilloscope mirrors the same source: 0..=16 rows, banded colors, dot/line/solid.
 
 use std::f32::consts::TAU;
 
@@ -16,29 +21,32 @@ use crate::Framebuffer;
 
 /// Drawn columns (the region is 76 wide; the 76th stays background).
 pub const VIS_COLS: usize = 75;
-/// FFT size over the recent samples, matching classic Winamp / Webamp (1024-point).
-pub const FFT_N: usize = 1024;
+/// FFT size over the recent samples: the classic analyzer works on 512-sample windows.
+pub const FFT_N: usize = 512;
+/// Usable magnitude bins (frequencies 1..=N/2).
+const BINS: usize = FFT_N / 2;
+/// Bar values run 0..=16 over the 16-row region (a value of 16 tops out the display).
+const BAR_MAX: i32 = sprites::VIS_H;
+/// The analyzer's dB range: the bottom of a bar is -40 dB, the top 0 dB.
+const DB_RANGE: f32 = 40.0;
+/// Oscilloscope centre row for a zero sample (`8 + round(sample*16)`).
+const OSC_CENTER: i32 = 8;
 
-/// Region height in pixels (also the max bar value: a full bar fills all 16 rows).
-const BAR_MAX: f32 = sprites::VIS_H as f32;
-/// Magnitude at or below this many dBFS reads as an empty bar; 0 dBFS fills the region.
-const FLOOR_DB: f32 = -66.0;
-/// Oscilloscope centre row for a zero sample (Winamp's `round(sample*16) + 7`).
-const OSC_CENTER: i32 = 7;
+/// The falloff sliders run 1 (slowest) to [`SPEED_MAX`] (fastest): the five classic speeds.
+pub const SPEED_MAX: u8 = 5;
 
-/// The falloff/refresh sliders run 1 (slowest) to [`SPEED_MAX`] (fastest), Winamp-style.
-pub const SPEED_MAX: u8 = 10;
+/// Bar drop per frame (in 0..=16 units) for each falloff speed: XMMS/Audacious
+/// `vis_afalloff_speeds`.
+const AFALLOFF: [f32; 5] = [0.34, 0.5, 1.0, 1.3, 1.6];
+/// Per-frame multiplier of the accelerating peak-drop speed: `vis_pfalloff_speeds`.
+const PFALLOFF: [f32; 5] = [1.2, 1.3, 1.4, 1.5, 1.6];
 
-/// Pixels per frame the bar top falls at falloff `speed` (1..=SPEED_MAX). Level 5 reproduces the
-/// old fixed 1.5 px/frame; higher drops faster.
-fn bar_fall_px(speed: u8) -> f32 {
-    0.3 * speed.clamp(1, SPEED_MAX) as f32
+fn afalloff(speed: u8) -> f32 {
+    AFALLOFF[(speed.clamp(1, SPEED_MAX) - 1) as usize]
 }
 
-/// Pixels per frame^2 the peak dot accelerates at peak-falloff `speed`. Level 5 reproduces the old
-/// fixed 0.03; higher drops the peak faster.
-fn peak_gravity(speed: u8) -> f32 {
-    0.006 * speed.clamp(1, SPEED_MAX) as f32
+fn pfalloff(speed: u8) -> f32 {
+    PFALLOFF[(speed.clamp(1, SPEED_MAX) - 1) as usize]
 }
 
 /// Which visualization is shown. Clicking the region cycles Bars -> Oscilloscope -> Off.
@@ -81,12 +89,11 @@ pub enum BandWidth {
 }
 
 impl BandWidth {
-    /// Column pitch: the bar occupies `pitch - 1` columns and the last column of each group is the
-    /// gap.
-    fn pitch(self) -> usize {
+    /// How many analyzer bands: the classic 19 wide bars (3px + 1px gap) or 75 thin 1px bars.
+    fn bands(self) -> usize {
         match self {
-            BandWidth::Thick => 4,
-            BandWidth::Thin => 2,
+            BandWidth::Thick => 19,
+            BandWidth::Thin => VIS_COLS,
         }
     }
 }
@@ -121,9 +128,11 @@ pub struct VisState {
     /// Redraw rate (1..=SPEED_MAX); not used by drawing, carried here so the window layer can pace
     /// the visualizer from one place.
     pub refresh_rate: u8,
-    bars: [f32; VIS_COLS],
+    /// Per-band bar values, 0..=16 (19 used in Thick mode, all 75 in Thin).
+    data: [f32; VIS_COLS],
     peaks: [f32; VIS_COLS],
-    peak_vel: [f32; VIS_COLS],
+    peak_speed: [f32; VIS_COLS],
+    /// Oscilloscope row per column, 0..=16.
     scope: [u8; VIS_COLS],
 }
 
@@ -155,13 +164,13 @@ impl Default for VisState {
             analyzer_style: AnalyzerStyle::default(),
             band_width: BandWidth::default(),
             osc_style: OscStyle::default(),
-            // Snappier than the old fixed feel out of the box; both are user adjustable.
-            bar_falloff: 7,
-            peak_falloff: 6,
+            // The middle of the five classic falloff speeds; user adjustable.
+            bar_falloff: 3,
+            peak_falloff: 3,
             refresh_rate: 8,
-            bars: [0.0; VIS_COLS],
+            data: [0.0; VIS_COLS],
             peaks: [0.0; VIS_COLS],
-            peak_vel: [0.0; VIS_COLS],
+            peak_speed: [0.0; VIS_COLS],
             scope: [OSC_CENTER as u8; VIS_COLS], // a flat centre line
         }
     }
@@ -183,29 +192,30 @@ impl VisState {
         match self.mode {
             VisMode::Off => false,
             VisMode::Bars => {
-                let mut target = [0.0f32; VIS_COLS];
-                spectrum(samples, &mut target);
-                group_wide(&mut target, self.band_width);
-                let bar_fall = bar_fall_px(self.bar_falloff);
-                let gravity = peak_gravity(self.peak_falloff);
+                let bands = self.band_width.bands();
+                let mut graph = [0.0f32; VIS_COLS];
+                make_log_graph(samples, &mut graph[..bands]);
+                let fall = afalloff(self.bar_falloff);
+                let mult = pfalloff(self.peak_falloff);
                 let mut changed = false;
-                for (x, &t) in target.iter().enumerate() {
-                    let (old_bar, old_peak) = (self.bars[x], self.peaks[x]);
-                    // Rise instantly to the new magnitude; fall gradually toward it otherwise.
-                    if t >= self.bars[x] {
-                        self.bars[x] = t;
+                for (i, &target) in graph.iter().enumerate().take(bands) {
+                    let (old_bar, old_peak) = (self.data[i], self.peaks[i]);
+                    if target > self.data[i] {
+                        // Rise instantly to the new magnitude.
+                        self.data[i] = target;
+                        if self.data[i] > self.peaks[i] {
+                            self.peaks[i] = self.data[i];
+                            self.peak_speed[i] = 0.01;
+                        } else {
+                            self.fall_peak(i, mult);
+                        }
                     } else {
-                        self.bars[x] = (self.bars[x] - bar_fall).max(t);
+                        if self.data[i] > 0.0 {
+                            self.data[i] = (self.data[i] - fall).max(0.0);
+                        }
+                        self.fall_peak(i, mult);
                     }
-                    // Peak: reset to the bar when it tops the peak, else accelerate down toward 0.
-                    if self.bars[x] >= self.peaks[x] {
-                        self.peaks[x] = self.bars[x];
-                        self.peak_vel[x] = 0.0;
-                    } else {
-                        self.peak_vel[x] += gravity;
-                        self.peaks[x] = (self.peaks[x] - self.peak_vel[x]).max(0.0);
-                    }
-                    if self.bars[x] != old_bar || self.peaks[x] != old_peak {
+                    if self.data[i] != old_bar || self.peaks[i] != old_peak {
                         changed = true;
                     }
                 }
@@ -217,6 +227,21 @@ impl VisState {
                 let changed = next != self.scope;
                 self.scope = next;
                 changed
+            }
+        }
+    }
+
+    /// One frame of the classic peak physics: the dot falls at an exponentially accelerating
+    /// speed but never below the live bar under it.
+    fn fall_peak(&mut self, i: usize, mult: f32) {
+        if self.peaks[i] > 0.0 {
+            self.peaks[i] -= self.peak_speed[i];
+            self.peak_speed[i] *= mult;
+            if self.peaks[i] < self.data[i] {
+                self.peaks[i] = self.data[i];
+            }
+            if self.peaks[i] < 0.0 {
+                self.peaks[i] = 0.0;
             }
         }
     }
@@ -232,36 +257,40 @@ pub fn draw(fb: &mut Framebuffer, vc: &VisColor, state: &VisState) {
         VisMode::Bars => {
             let grad = vc.analyzer(); // 16 colours: [0] = top (hottest) .. [15] = bottom
             let peak = vc.peak();
-            let pitch = state.band_width.pitch();
+            let thick = state.band_width == BandWidth::Thick;
             for x in 0..VIS_COLS {
-                if x % pitch == pitch - 1 {
-                    continue; // the gap column between bars
+                if thick && (x & 3) == 3 {
+                    continue; // the 1px gap between the classic wide bars
                 }
-                let bh = round_clamp(state.bars[x], h);
-                if bh > 0 {
-                    let top = h - bh;
+                let band = if thick { x >> 2 } else { x };
+                let bar = (state.data[band] as i32).clamp(0, BAR_MAX);
+                if bar > 0 {
+                    let top = h - bar; // screen row of the bar's tip (0 tops out)
                     match state.analyzer_style {
-                        // Plain vertical gradient: the row's absolute colour, hottest at the top.
+                        // Plain vertical gradient: each row's absolute colour.
                         AnalyzerStyle::Normal => {
                             for row in top..h {
-                                put(fb, x0 + x as i32, y0 + row, grad[row as usize]);
+                                put(fb, x0 + x as i32, y0 + row, grad[row.clamp(0, 15) as usize]);
                             }
                         }
                         // Flame: hottest at the bar's own tip, cooling toward its base.
                         AnalyzerStyle::Fire => {
-                            for row in top..h {
-                                let from_tip = (row - top).clamp(0, 15) as usize;
-                                put(fb, x0 + x as i32, y0 + row, grad[from_tip]);
+                            for (from_tip, row) in (top..h).enumerate() {
+                                put(fb, x0 + x as i32, y0 + row, grad[from_tip.min(15)]);
                             }
                         }
-                        // Just the top edge line of each bar (an envelope outline).
+                        // Line: the whole bar in one colour, picked by its height (taller =
+                        // hotter), the classic "vertical lines" style.
                         AnalyzerStyle::Line => {
-                            put(fb, x0 + x as i32, y0 + top, grad[top as usize]);
+                            let color = grad[top.clamp(0, 15) as usize];
+                            for row in top..h {
+                                put(fb, x0 + x as i32, y0 + row, color);
+                            }
                         }
                     }
                 }
                 if state.show_peaks {
-                    let pk = round_clamp(state.peaks[x], h);
+                    let pk = (state.peaks[band] as i32).clamp(0, BAR_MAX);
                     if pk > 0 {
                         put(fb, x0 + x as i32, y0 + (h - pk), peak);
                     }
@@ -270,38 +299,46 @@ pub fn draw(fb: &mut Framebuffer, vc: &VisColor, state: &VisState) {
         }
         VisMode::Oscilloscope => {
             let osc = vc.oscilloscope(); // 5 colours, centre-out
+            let color = |row: i32| osc[SCOPE_ROW_COLOR[row.clamp(0, 15) as usize]];
             match state.osc_style {
                 // Isolated dots: one pixel per column at the sample row.
                 OscStyle::Dots => {
                     for x in 0..VIS_COLS {
-                        let y = state.scope[x] as i32;
-                        put(fb, x0 + x as i32, y0 + y, osc[osc_color_index(y)]);
+                        let row = (state.scope[x] as i32).clamp(0, 15);
+                        put(fb, x0 + x as i32, y0 + row, color(row));
                     }
                 }
-                // Connected line: fill the vertical span between consecutive columns so the trace
-                // is continuous rather than a scatter of dots.
+                // Connected line: span each column toward the NEXT one so the trace is
+                // continuous, with the classic one-row trim so segments do not double up.
                 OscStyle::Lines => {
-                    let mut prev = state.scope[0] as i32;
-                    for x in 0..VIS_COLS {
-                        let y = state.scope[x] as i32;
-                        let (lo, hi) = if y < prev { (y, prev) } else { (prev, y) };
-                        for row in lo..=hi {
-                            put(fb, x0 + x as i32, y0 + row, osc[osc_color_index(row)]);
+                    for x in 0..VIS_COLS - 1 {
+                        let mut row = (state.scope[x] as i32).clamp(0, 15);
+                        let mut row2 = (state.scope[x + 1] as i32).clamp(0, 15);
+                        if row < row2 {
+                            row2 -= 1;
+                        } else if row > row2 {
+                            let tip = row;
+                            row = row2 + 1;
+                            row2 = tip;
                         }
-                        prev = y;
+                        for r in row..=row2 {
+                            put(fb, x0 + x as i32, y0 + r, color(r));
+                        }
                     }
+                    let last = (state.scope[VIS_COLS - 1] as i32).clamp(0, 15);
+                    put(fb, x0 + (VIS_COLS - 1) as i32, y0 + last, color(last));
                 }
-                // Solid: fill from the centre line out to the sample, a filled waveform.
+                // Solid: fill between the centre line and the sample, a filled waveform.
                 OscStyle::Solid => {
                     for x in 0..VIS_COLS {
-                        let y = state.scope[x] as i32;
-                        let (lo, hi) = if y < OSC_CENTER {
-                            (y, OSC_CENTER)
+                        let sample = (state.scope[x] as i32).clamp(0, 15);
+                        let (lo, hi) = if sample < OSC_CENTER {
+                            (sample, OSC_CENTER)
                         } else {
-                            (OSC_CENTER, y)
+                            (OSC_CENTER, sample)
                         };
-                        for row in lo..=hi {
-                            put(fb, x0 + x as i32, y0 + row, osc[osc_color_index(row)]);
+                        for r in lo..=hi {
+                            put(fb, x0 + x as i32, y0 + r, color(r));
                         }
                     }
                 }
@@ -310,89 +347,80 @@ pub fn draw(fb: &mut Framebuffer, vc: &VisColor, state: &VisState) {
     }
 }
 
-/// A magnitude spectrum of `samples` mapped to [`VIS_COLS`] bar heights in `0..=VIS_H`. Applies a
-/// Hann window, a radix-2 FFT, per-band peak magnitude on a log-frequency axis, and a dB amplitude
-/// scale so bass does not swamp the display.
-fn spectrum(samples: &[f32], out: &mut [f32; VIS_COLS]) {
+/// Which of the five oscilloscope palette entries colours each of the 16 rows, centre-out (the
+/// XMMS/Audacious `vis_scope_colors` table mapped onto the palette; its row-5 entry is a stray
+/// analyzer index upstream, replaced by the symmetric value).
+const SCOPE_ROW_COLOR: [usize; 16] = [4, 4, 3, 3, 2, 2, 1, 1, 0, 1, 1, 2, 2, 3, 3, 4];
+
+/// The classic log-frequency analyzer graph: window the newest [`FFT_N`] samples, take the
+/// magnitude spectrum, integrate the 256 bins into `out.len()` logarithmic bands (fractional
+/// edges included, with the `bands/12` height fudge so every band count peaks alike), and map
+/// each band's dB level onto the 0..=16 bar scale (-40 dB empty, 0 dB full).
+fn make_log_graph(samples: &[f32], out: &mut [f32]) {
     let mut re = [0.0f32; FFT_N];
     let mut im = [0.0f32; FFT_N];
     let n = samples.len().min(FFT_N);
     let off = samples.len() - n;
     for (i, r) in re.iter_mut().enumerate().take(n) {
-        // Hann window over the FFT length reduces spectral leakage.
-        let w = 0.5 - 0.5 * (TAU * i as f32 / (FFT_N as f32 - 1.0)).cos();
+        // The classic `1 - 0.85cos` window.
+        let w = 1.0 - 0.85 * (TAU * i as f32 / FFT_N as f32).cos();
         *r = samples[off + i] * w;
     }
     fft(&mut re, &mut im);
 
-    let bins = FFT_N / 2; // usable bins (1..bins); bin b is frequency b*rate/FFT_N
-    for (x, o) in out.iter_mut().enumerate() {
-        let b0 = log_bin(x, bins);
-        let b1 = log_bin(x + 1, bins).max(b0 + 1).min(bins);
-        // Loudest bin in this column's frequency band.
-        let mut m = 0.0f32;
-        for b in b0..b1 {
-            let mag = (re[b] * re[b] + im[b] * im[b]).sqrt();
-            if mag > m {
-                m = mag;
+    // Normalized magnitudes for frequencies 1..=N/2; all but the last are doubled.
+    let mut freq = [0.0f32; BINS];
+    for (k, f) in freq.iter_mut().enumerate() {
+        let bin = k + 1;
+        let mag = (re[bin] * re[bin] + im[bin] * im[bin]).sqrt() / FFT_N as f32;
+        *f = if bin < BINS { 2.0 * mag } else { mag };
+    }
+
+    let bands = out.len();
+    let xscale = |i: usize| 256.0f32.powf(i as f32 / bands as f32) - 0.5;
+    for (band, o) in out.iter_mut().enumerate() {
+        let lo = xscale(band);
+        let hi = xscale(band + 1);
+        let a = lo.ceil() as i32;
+        let b = hi.floor() as i32;
+        let mut n = 0.0f32;
+        if b < a {
+            n += freq[b.clamp(0, BINS as i32 - 1) as usize] * (hi - lo);
+        } else {
+            if a > 0 {
+                n += freq[(a - 1) as usize] * (a as f32 - lo);
+            }
+            for bin in a..b {
+                n += freq[bin as usize];
+            }
+            if (b as usize) < BINS {
+                n += freq[b as usize] * (hi - b as f32);
             }
         }
-        // Normalise the bin magnitude to ~amplitude, take dBFS, map [FLOOR_DB, 0] -> [0, VIS_H].
-        let norm = m * 2.0 / FFT_N as f32;
-        let db = 20.0 * norm.max(1e-9).log10();
-        *o = ((db - FLOOR_DB) / -FLOOR_DB * BAR_MAX).clamp(0.0, BAR_MAX);
+        // The same overall height no matter how many bands there are.
+        n *= bands as f32 / 12.0;
+        let db = 20.0 * n.max(1e-9).log10();
+        let val = (1.0 + db / DB_RANGE) * BAR_MAX as f32;
+        *o = (val as i32).clamp(0, BAR_MAX) as f32;
     }
 }
 
-/// The FFT bin for column `x` on a log-frequency axis spanning bins `1..bins` across the columns.
-fn log_bin(x: usize, bins: usize) -> usize {
-    let frac = x as f32 / VIS_COLS as f32; // 0 at column 0, 1 at column VIS_COLS
-    let bin = (bins as f32 - 1.0).powf(frac); // 1 .. bins-1
-    (bin.round() as usize).clamp(1, bins - 1)
-}
-
-/// Combine each group of `pitch` columns to the group's loudest value, so a narrow tone lights its
-/// whole bar rather than being averaged away. Thick groups four columns (3px bars); Thin groups two
-/// (1px bars).
-fn group_wide(v: &mut [f32; VIS_COLS], band: BandWidth) {
-    let pitch = band.pitch();
-    let mut x = 0;
-    while x < VIS_COLS {
-        let end = (x + pitch).min(VIS_COLS);
-        let peak = v[x..end].iter().cloned().fold(0.0f32, f32::max);
-        for c in &mut v[x..end] {
-            *c = peak;
-        }
-        x += pitch;
-    }
-}
-
-/// Map the waveform to [`VIS_COLS`] oscilloscope column rows (0..VIS_H). Spreads the WHOLE sample
-/// window across the columns (stride `n / VIS_COLS`), not just its first ~518 samples: the window
-/// advances by roughly its own width each audio quantum, so mapping the whole window makes
-/// consecutive frames contiguous (a continuous scroll) instead of disjoint snapshots with a ~10ms
-/// gap between them, which reads as a choppy, low-fps scope. A sample scales to a row with
-/// `round(sample*16) + centre`.
+/// Map the waveform to [`VIS_COLS`] oscilloscope rows. The whole sample window spreads across
+/// the columns (the window advances by roughly its own width each audio quantum, so consecutive
+/// frames read as a continuous scroll); each sample scales by the classic `8 + round(16 *
+/// sample)`, clamped to the 0..=16 value range (the draw clamps rows to 0..=15).
 fn oscilloscope(samples: &[f32], out: &mut [u8; VIS_COLS]) {
     let n = samples.len();
     for (x, o) in out.iter_mut().enumerate() {
-        let s = if n == 0 { 0.0 } else { samples[(x * n / VIS_COLS).min(n - 1)] };
+        let s = if n == 0 {
+            0.0
+        } else {
+            samples[(x * n / VIS_COLS).min(n - 1)]
+        };
         // `saturating_add` guards the +OSC_CENTER against overflow if a decoder ever hands us a
-        // huge/non-finite sample (`as i32` saturates such a value to i32::MAX). Clamped to range.
-        let y = ((s * 16.0).round() as i32).saturating_add(OSC_CENTER).clamp(0, sprites::VIS_H - 1);
-        *o = y as u8;
-    }
-}
-
-/// The oscilloscope colour index (0..5, into the 5-colour palette) for row `y`: brightest on the
-/// centre line, dimming toward the edges (centre-out, matching classic Winamp).
-fn osc_color_index(y: i32) -> usize {
-    match y {
-        6 | 7 => 0,
-        4 | 5 | 8 | 9 => 1,
-        2 | 3 | 10 | 11 => 2,
-        0 | 1 | 12 | 13 => 3,
-        _ => 4,
+        // huge/non-finite sample (`as i32` saturates such a value to i32::MAX).
+        let val = ((s * 16.0).round() as i32).saturating_add(OSC_CENTER).clamp(0, 16);
+        *o = val as u8;
     }
 }
 
@@ -439,11 +467,6 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
         }
         len <<= 1;
     }
-}
-
-/// Round a bar/peak value to an integer pixel height clamped to `0..=max`.
-fn round_clamp(v: f32, max: i32) -> i32 {
-    (v.round() as i32).clamp(0, max)
 }
 
 /// Set one opaque pixel, bounds-checked against the framebuffer.
@@ -510,24 +533,26 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_of_silence_is_flat_zero() {
-        let mut bars = [9.9f32; VIS_COLS];
-        spectrum(&[0.0f32; FFT_N], &mut bars);
-        assert!(bars.iter().all(|&b| b == 0.0), "silence yields empty bars");
+    fn log_graph_of_silence_is_flat_zero() {
+        let mut bands = [9.9f32; 19];
+        make_log_graph(&[0.0f32; FFT_N], &mut bands);
+        assert!(bands.iter().all(|&b| b == 0.0), "silence yields empty bands");
     }
 
     #[test]
-    fn spectrum_of_a_tone_lights_a_bar() {
-        // A loud mid tone lights at least one bar substantially, and not every bar (it is not noise).
-        let k = 60usize;
+    fn log_graph_of_a_tone_lights_a_band_on_both_widths() {
+        // A loud mid tone lights at least one band substantially, and not every band.
+        let k = 30usize;
         let samples: Vec<f32> =
             (0..FFT_N).map(|i| 0.8 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
-        let mut bars = [0.0f32; VIS_COLS];
-        spectrum(&samples, &mut bars);
-        let max = bars.iter().cloned().fold(0.0f32, f32::max);
-        assert!(max > 6.0, "the tone drives a tall bar (got {max})");
-        let lit = bars.iter().filter(|&&b| b > max * 0.5).count();
-        assert!(lit < VIS_COLS / 2, "energy is localized, not spread across every bar");
+        for bands in [19usize, 75] {
+            let mut graph = vec![0.0f32; bands];
+            make_log_graph(&samples, &mut graph);
+            let max = graph.iter().cloned().fold(0.0f32, f32::max);
+            assert!(max > 8.0, "the tone drives a tall band (got {max} of 16, {bands} bands)");
+            let lit = graph.iter().filter(|&&b| b > max * 0.5).count();
+            assert!(lit < bands / 2, "energy is localized, not spread across every band");
+        }
     }
 
     #[test]
@@ -536,11 +561,11 @@ mod tests {
         // Silence sits on the centre row.
         oscilloscope(&[0.0f32; FFT_N], &mut scope);
         assert!(scope.iter().all(|&y| y as i32 == OSC_CENTER), "silence is the centre line");
-        // A strong positive sample pushes below-centre rows (larger row index), clamped in range.
+        // A strong positive sample clamps to the classic 0..=16 value range's bottom.
         let mut up = [0u8; VIS_COLS];
         oscilloscope(&[1.0f32; FFT_N], &mut up);
-        assert!(up.iter().all(|&y| y == (sprites::VIS_H - 1) as u8), "full positive clamps to the bottom row");
-        // A strong negative sample (every real waveform has troughs) clamps to the top row 0.
+        assert!(up.iter().all(|&y| y == 16), "full positive clamps to value 16");
+        // A strong negative sample clamps to the top.
         let mut down = [0u8; VIS_COLS];
         oscilloscope(&[-1.0f32; FFT_N], &mut down);
         assert!(down.iter().all(|&y| y == 0), "full negative clamps to the top row");
@@ -553,14 +578,14 @@ mod tests {
         let loud: Vec<f32> =
             (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
         assert!(s.advance(&loud), "a tone animates the bars");
-        let peak_col = (0..VIS_COLS).max_by(|&a, &b| s.bars[a].total_cmp(&s.bars[b])).unwrap();
-        let high = s.bars[peak_col];
+        let peak_col = (0..VIS_COLS).max_by(|&a, &b| s.data[a].total_cmp(&s.data[b])).unwrap();
+        let high = s.data[peak_col];
         assert!(high > 5.0, "bar rose to the tone");
         // Now feed silence: the bar falls by at most one falloff step per frame (gradual release).
         s.advance(&[0.0f32; FFT_N]);
-        let after = s.bars[peak_col];
+        let after = s.data[peak_col];
         assert!(after < high, "bar falls toward silence");
-        let fall = bar_fall_px(s.bar_falloff);
+        let fall = afalloff(s.bar_falloff);
         assert!(high - after <= fall + 0.001, "it falls gradually, not instantly");
     }
 
@@ -572,7 +597,7 @@ mod tests {
         let loud: Vec<f32> =
             (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
         s.advance(&loud);
-        let col = (0..VIS_COLS).max_by(|&a, &b| s.bars[a].total_cmp(&s.bars[b])).unwrap();
+        let col = (0..VIS_COLS).max_by(|&a, &b| s.data[a].total_cmp(&s.data[b])).unwrap();
         let seeded = s.peaks[col];
         assert!(seeded > 5.0, "peak seeded to the tone");
         // First silent frame: the peak descends (gravity is nonzero and the sign is down).
@@ -585,7 +610,7 @@ mod tests {
         let drop2 = p1 - s.peaks[col];
         assert!(drop2 > drop1, "peak fall accelerates each frame");
         // Throughout, the peak stays at or above the (faster-)falling bar.
-        assert!(s.peaks[col] >= s.bars[col] - 0.001, "peak hangs above the bar");
+        assert!(s.peaks[col] >= s.data[col] - 0.001, "peak hangs above the bar");
     }
 
     /// A viscolor palette with a distinct colour per role so a draw can be read back.
@@ -603,7 +628,7 @@ mod tests {
         let vc = test_palette();
         // Default mode is Bars; force a full-height bar at column 0 (its wide group), rest at 0.
         let mut s = VisState::default();
-        s.bars[0] = BAR_MAX;
+        s.data[0] = BAR_MAX as f32;
         let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
         draw(&mut fb, &vc, &s);
         // The bottom pixel of column 0 is the bottom gradient colour (role 17).
@@ -618,14 +643,34 @@ mod tests {
     }
 
     #[test]
-    fn group_wide_spreads_each_group_max() {
-        // The wide bandwidth combines each group of 4 columns to the group MAX (so a narrow tone
-        // lights its whole bar), not the average and not per-column.
-        let mut v = [0.0f32; VIS_COLS];
-        v[1] = 10.0; // one tall value inside the first group (columns 0..4)
-        group_wide(&mut v, BandWidth::Thick);
-        assert_eq!(&v[0..4], &[10.0, 10.0, 10.0, 10.0], "the group takes the max, not the average");
-        assert_eq!(v[4], 0.0, "the next group is untouched");
+    fn thick_mode_draws_nineteen_wide_bars_from_their_bands() {
+        // Thick mode has 19 real bands; band b paints columns 4b..4b+3 with a gap at 4b+3.
+        let vc = test_palette();
+        let mut s = VisState::default();
+        s.data[1] = BAR_MAX as f32; // band 1 -> columns 4..=6 lit, column 7 gap
+        let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
+        draw(&mut fb, &vc, &s);
+        let base = sprites::VIS_Y + sprites::VIS_H - 1;
+        assert_eq!(px(&fb, sprites::VIS_X + 4, base), [17, 117, 200, 255], "band 1 first column");
+        assert_eq!(px(&fb, sprites::VIS_X + 6, base), [17, 117, 200, 255], "band 1 last column");
+        assert_eq!(px(&fb, sprites::VIS_X + 7, base), [0, 100, 200, 255], "gap column");
+        assert_eq!(px(&fb, sprites::VIS_X, base), [0, 100, 200, 255], "band 0 untouched");
+    }
+
+    #[test]
+    fn line_style_paints_the_whole_bar_in_its_height_color() {
+        let vc = test_palette();
+        let mut s = VisState {
+            analyzer_style: AnalyzerStyle::Line,
+            ..Default::default()
+        };
+        s.data[0] = 4.0; // a short bar: rows 12..=15, all in the color of row 12 (role 2+12)
+        let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
+        draw(&mut fb, &vc, &s);
+        let expect = [14, 114, 200, 255];
+        for row in 12..16 {
+            assert_eq!(px(&fb, sprites::VIS_X, sprites::VIS_Y + row), expect, "row {row} single color");
+        }
     }
 
     #[test]
@@ -633,7 +678,7 @@ mod tests {
         let vc = test_palette();
         // A short bar (3px) with a high peak (12): the peak dot floats above the bar.
         let mut s = VisState::default();
-        s.bars[0] = 3.0;
+        s.data[0] = 3.0;
         s.peaks[0] = 12.0;
         let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
         draw(&mut fb, &vc, &s);
@@ -655,7 +700,7 @@ mod tests {
             show_peaks: false,
             ..Default::default()
         };
-        s.bars[0] = 3.0;
+        s.data[0] = 3.0;
         s.peaks[0] = 12.0;
         let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
         draw(&mut fb, &vc, &s);
@@ -685,7 +730,7 @@ mod tests {
 
         assert!(s.advance(&loud), "a tone still advances the spectrum");
         assert!(
-            s.bars.iter().any(|&bar| bar > 5.0),
+            s.data.iter().any(|&bar| bar > 5.0),
             "hidden peaks do not suppress bar motion"
         );
     }
@@ -706,7 +751,7 @@ mod tests {
     fn draw_off_is_just_background() {
         let vc = test_palette();
         let mut s = VisState { mode: VisMode::Off, ..Default::default() };
-        s.bars[0] = BAR_MAX; // would draw a bar if the mode were Bars
+        s.data[0] = BAR_MAX as f32; // would draw a bar if the mode were Bars
         let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_H as u32);
         draw(&mut fb, &vc, &s);
         // Everything in the region is the background colour (role 0).
@@ -728,7 +773,7 @@ mod tests {
             show_peaks: false,
             ..Default::default()
         };
-        base.bars[0] = 12.0; // a tall bar in the first (drawn) column
+        base.data[0] = 12.0; // a tall bar in the first (drawn) column
         let render = |style: AnalyzerStyle| {
             let mut s = base.clone();
             s.analyzer_style = style;
@@ -742,8 +787,13 @@ mod tests {
         let fire = render(AnalyzerStyle::Fire);
         let line = render(AnalyzerStyle::Line);
         let painted = |v: &[[u8; 4]]| v.iter().filter(|&&p| p != BG).count();
-        assert_eq!(painted(&line), 1, "Line draws only the top edge of the bar");
-        assert!(painted(&normal) > 1, "Normal fills the whole bar");
+        assert_eq!(painted(&line), 12, "Line fills the whole bar");
+        let line_colors: std::collections::HashSet<[u8; 4]> =
+            line.iter().copied().filter(|&p| p != BG).collect();
+        assert_eq!(line_colors.len(), 1, "Line uses one colour for the whole bar");
+        let normal_colors: std::collections::HashSet<[u8; 4]> =
+            normal.iter().copied().filter(|&p| p != BG).collect();
+        assert!(normal_colors.len() > 1, "Normal is a gradient");
         assert_ne!(normal, fire, "Fire and Normal colour the bar differently");
     }
 
@@ -754,7 +804,7 @@ mod tests {
             show_peaks: false,
             ..Default::default()
         };
-        for b in base.bars.iter_mut() {
+        for b in base.data.iter_mut() {
             *b = 12.0;
         }
         let bottom_px = |band: BandWidth, x: i32| {
@@ -764,9 +814,10 @@ mod tests {
             draw(&mut fb, &vc, &s);
             px(&fb, sprites::VIS_X + x, sprites::VIS_Y + sprites::VIS_H - 1)
         };
-        // Column 1 is a bar under Thick (pitch 4) but a gap under Thin (pitch 2).
-        assert_ne!(bottom_px(BandWidth::Thick, 1), BG, "Thick draws column 1");
-        assert_eq!(bottom_px(BandWidth::Thin, 1), BG, "Thin leaves column 1 a gap");
+        // Column 3 is the classic gap under Thick (19 wide bars) but drawn under Thin (75
+        // 1px bands, no gaps).
+        assert_eq!(bottom_px(BandWidth::Thick, 3), BG, "Thick leaves column 3 a gap");
+        assert_ne!(bottom_px(BandWidth::Thin, 3), BG, "Thin draws every column");
     }
 
     #[test]
@@ -809,11 +860,11 @@ mod tests {
                 bar_falloff: falloff,
                 ..Default::default()
             };
-            for b in s.bars.iter_mut() {
+            for b in s.data.iter_mut() {
                 *b = 12.0;
             }
             s.advance(&[0.0f32; FFT_N]); // silence: bars fall one step
-            s.bars[0]
+            s.data[0]
         };
         assert!(
             after_one_silent_frame(9) < after_one_silent_frame(2),

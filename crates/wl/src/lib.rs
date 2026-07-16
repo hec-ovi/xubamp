@@ -298,8 +298,8 @@ impl Default for UiOptions {
             analyzer_style: AnalyzerStyle::Normal,
             band_width: BandWidth::Thick,
             oscilloscope_style: OscStyle::Lines,
-            bar_falloff: 7,
-            peak_falloff: 6,
+            bar_falloff: 3,
+            peak_falloff: 3,
             refresh_rate: 8,
             dark: false,
         }

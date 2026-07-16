@@ -1,3 +1,13 @@
+xubamp (0.2.7-1) resolute; urgency=medium
+
+  * Playlist running time drawn with the skin's 5x6 text.bmp glyphs, so it
+    no longer touches the recess border.
+  * Add directory accepts selecting multiple folders at once, for both the
+    playlist and the library.
+  * Playlist resizing snaps to the classic 25x29 pixel segment grid.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Thu, 16 Jul 2026 18:00:00 +0000
+
 xubamp (0.2.6-1) resolute; urgency=medium
 
   * Jump-to-file results scroll with the mouse wheel and show a scrollbar

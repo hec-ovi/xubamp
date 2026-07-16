@@ -13,7 +13,7 @@
 # cover display and PipeWire, home covers reading music and skins.
 name: xubamp
 base: core26
-version: '0.2.6'
+version: '0.2.7'
 summary: Classic Winamp 2.9x-style player, native Wayland, in Rust
 description: |
   A from-scratch reimplementation of the classic Winamp 2.9x player for

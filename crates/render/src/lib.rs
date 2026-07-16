@@ -404,17 +404,19 @@ fn fallback_thumb(fb: &mut Framebuffer, track_x: i32, track_y: i32, track_w: i32
 
 /// Convert the RGBA framebuffer to little-endian ARGB bytes (BGRA order) into `dst`, scaling
 /// each source pixel to a `scale`x`scale` block (nearest neighbour). This is the upload path
-/// for the classic double-size mode; `scale` 1 is the plain swizzle. `dst` must be exactly
-/// `(width*scale) * (height*scale) * 4` bytes.
+/// for the classic double-size mode; `scale` 1 is the plain swizzle. `dst` must hold at least
+/// `(width*scale) * (height*scale) * 4` bytes; shm pools may hand out slightly larger slots,
+/// whose tail is left untouched.
 pub fn write_bgra_scaled(fb: &Framebuffer, scale: u32, dst: &mut [u8]) {
     let scale = scale.max(1) as usize;
     let sw = fb.width as usize;
     let dw = sw * scale;
-    assert_eq!(
-        dst.len(),
-        dw * fb.height as usize * scale * 4,
-        "destination must match the scaled dimensions"
+    let needed = dw * fb.height as usize * scale * 4;
+    assert!(
+        dst.len() >= needed,
+        "destination too small for the scaled dimensions"
     );
+    let dst = &mut dst[..needed];
     for sy in 0..fb.height as usize {
         let src_row = &fb.rgba[sy * sw * 4..(sy + 1) * sw * 4];
         let row_start = sy * scale * dw * 4;

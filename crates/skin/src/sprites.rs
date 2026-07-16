@@ -372,9 +372,9 @@ pub const PLEDIT_SCROLL_HANDLE_SELECTED: Rect = Rect::new(61, 53, 8, 18);
 pub const PLEDIT_SHADE_H: i32 = 14;
 
 /// Classic Winamp resizes the playlist in whole segments: 25px wider or 29px taller at a time
-/// (`WINDOW_RESIZE_SEGMENT_WIDTH`/`_HEIGHT` in Webamp). We render at whatever size the Wayland
-/// compositor hands us (the tiles clip cleanly to any size), so these document the classic segment
-/// dimensions rather than gating the resize.
+/// (`WINDOW_RESIZE_SEGMENT_WIDTH`/`_HEIGHT` in Webamp). The resize drag snaps to this grid from
+/// the 275x116 base; the tiles still clip cleanly to any size, so compositor-driven sizes need
+/// no snapping.
 pub const PLEDIT_SEGMENT_W: i32 = 25;
 pub const PLEDIT_SEGMENT_H: i32 = 29;
 

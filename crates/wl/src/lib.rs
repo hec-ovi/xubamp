@@ -515,8 +515,18 @@ impl JumpWin {
     }
 }
 
+/// Snap a requested playlist dimension to the classic resize grid: the minimum plus a whole
+/// number of segments, rounding to the nearest segment like Winamp's drag (Webamp's
+/// `Math.round(delta / segment)`), never below the minimum.
+fn snap_playlist_dimension(requested: i32, base: i32, segment: i32) -> i32 {
+    let delta = (requested - base).max(0);
+    base + (delta + segment / 2) / segment * segment
+}
+
 /// Resolve a requested playlist size into the actual buffer size and the remembered expanded size.
-/// While shaded, only width updates; restoring recovers the pre-shade height.
+/// While shaded, only width updates; restoring recovers the pre-shade height. Requested sizes snap
+/// to the classic 25x29 resize segments from the 275x116 base, like the original's chunked resize;
+/// a stored size passes through untouched so a restored session keeps its exact geometry.
 fn playlist_configured_size(
     shaded: bool,
     expanded: (i32, i32),
@@ -526,17 +536,22 @@ fn playlist_configured_size(
         expanded.0.max(xubamp_skin::sprites::PLEDIT_W),
         expanded.1.max(xubamp_skin::sprites::PLEDIT_H),
     );
+    if let Some(w) = suggested.0 {
+        expanded.0 = snap_playlist_dimension(
+            w,
+            xubamp_skin::sprites::PLEDIT_W,
+            xubamp_skin::sprites::PLEDIT_SEGMENT_W,
+        );
+    }
     if shaded {
-        if let Some(w) = suggested.0 {
-            expanded.0 = w.max(xubamp_skin::sprites::PLEDIT_W);
-        }
         ((expanded.0, xubamp_skin::sprites::PLEDIT_SHADE_H), expanded)
     } else {
-        if let Some(w) = suggested.0 {
-            expanded.0 = w.max(xubamp_skin::sprites::PLEDIT_W);
-        }
         if let Some(h) = suggested.1 {
-            expanded.1 = h.max(xubamp_skin::sprites::PLEDIT_H);
+            expanded.1 = snap_playlist_dimension(
+                h,
+                xubamp_skin::sprites::PLEDIT_H,
+                xubamp_skin::sprites::PLEDIT_SEGMENT_H,
+            );
         }
         (expanded, expanded)
     }
@@ -4027,5 +4042,31 @@ mod tests {
             )
         );
         assert_eq!(remembered.1, xubamp_skin::sprites::PLEDIT_H);
+    }
+
+    #[test]
+    fn playlist_resize_snaps_to_the_classic_segment_grid() {
+        let base = (
+            xubamp_skin::sprites::PLEDIT_W,
+            xubamp_skin::sprites::PLEDIT_H,
+        );
+        // Mid-segment requests round to the nearest whole 25x29 step from the 275x116 base.
+        let (shown, _) = playlist_configured_size(false, base, (Some(280), Some(120)));
+        assert_eq!(shown, base, "less than half a segment stays at the base");
+        let (shown, _) = playlist_configured_size(false, base, (Some(290), Some(131)));
+        assert_eq!(shown, (300, 145), "past halfway rounds up one segment");
+        let (shown, _) = playlist_configured_size(false, base, (Some(451), Some(236)));
+        assert_eq!(shown, (450, 232), "arbitrary sizes land on the grid");
+
+        // The shade strip's width-only resize snaps to the same 25px columns.
+        let (shown, remembered) = playlist_configured_size(true, base, (Some(340), None));
+        assert_eq!(shown.0, 350);
+        assert_eq!(remembered.0, 350);
+
+        // A stored size (no drag in progress) passes through unsnapped, so a restored
+        // session never jumps.
+        let (shown, remembered) = playlist_configured_size(false, (451, 236), (None, None));
+        assert_eq!(shown, (451, 236));
+        assert_eq!(remembered, shown);
     }
 }

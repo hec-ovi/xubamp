@@ -1,70 +1,62 @@
 # xubamp
 
-A from-scratch, native-Wayland reimplementation of the classic Winamp 2.9x player, built for one target only: Ubuntu 26.04.
+A from-scratch, native-Wayland reimplementation of the classic Winamp 2.9x player, built for one target: Ubuntu 26.04. No Wine, no XWayland, no widget toolkit. One 4.4 MB binary in a 1.5 MB deb that depends on libc, libgcc, PipeWire, and xkbcommon.
 
-It plays music. The main window renders a `.wsz` skin pixel for pixel, with working transport, seek bar, volume and balance, the spectrum/oscilloscope visualizer, the 10-band equalizer, a resizable playlist window, and the classic hotkeys. MP3, WAV, FLAC, and Ogg Vorbis decode through Symphonia and play over PipeWire. Build order and design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the running log is in [docs/PROGRESS.md](docs/PROGRESS.md).
+<!-- demo GIF here: main window + EQ + playlist with the visualizer running -->
 
-## Why
+## Install
 
-Winamp 2.9x did a lot with almost nothing: a 275x116 bitmap UI, a software blitter, and instant startup on 2003 hardware. Reproducing that on a modern machine should come out smaller and faster, not heavier. xubamp aims for a tiny binary, low memory, and the classic skin, hotkey, playlist, and EQ behavior, running natively on Wayland with no widget toolkit and no XWayland.
+Download the deb from [Releases](https://github.com/hec-ovi/xubamp/releases), then:
+
+    sudo apt install ./xubamp_*_amd64.deb
+    xubamp song.mp3
+
+amd64 only for now. It starts on a built-in clean-room skin; point it at any classic `.wsz` on the command line (`xubamp skin.wsz *.mp3`) or switch at runtime from Preferences. No skins ship with it (see License).
 
 ## What works
 
-- Loads classic Winamp 2.x skins (`.wsz`) and renders the main, equalizer, and playlist windows pixel for pixel; skins switch at runtime from the menu or Preferences.
-- Playback of MP3, WAV, FLAC, and Ogg Vorbis through PipeWire, with a Bluetooth-safe gapless seek.
-- Transport (play, pause, stop, previous, next, eject), a dragged seek bar, volume and balance sliders (the value shows in the marquee while you drag), elapsed/remaining clock with the classic paused blink, the play/pause/stop indicator, kbps/kHz/mono/stereo readouts, and a scrolling marquee showing the tagged "N. Artist - Title (M:SS)" (ID3v2, Vorbis comments, RIFF INFO; file name when untagged).
-- Spectrum and oscilloscope visualizer, a faithful port of the XMMS/Audacious classic analyzer (log bands, 40 dB range, the five falloff speeds, frame-rate-independent physics), with the classic options: analyzer styles (normal/fire/line), thick or thin bands, peaks, falloff speeds, and a 10-70 fps refresh rate. Click the panel to cycle the mode.
-- The 10-band equalizer with preamp, the 17 classic presets, EQF load/save, +12/0/-12 db flatten labels, and its own windowshade strip.
-- Shuffle and repeat, with Previous/Next that retrace the real play order, so Previous still works under shuffle.
-- The playlist editor: click to select (Ctrl and Shift extend), double-click to play, a right-click per-track menu (Play, File Info, Remove, Crop), per-track durations and the selected/total readout, a live current-track clock, clickable mini transport, working ADD/REM/SEL/MISC/LIST clusters (including `.m3u`/`.pls` save and load and an Audio Library scan), a skinned draggable scrollbar, resize grip, and a windowshade strip.
-- The playlist survives close and reopen: it is written beside the settings on exit and restored (same current track, stopped) on the next argument-less start.
-- Windowshade mode on all three panes; the main strip shows the title, mini clock, mini seek bar, and mini transport.
-- Double-size mode (Ctrl+D, the menu, or the clutterbar D) doubles the main window and equalizer.
-- The clutterbar: O pops the menu, A shows the always-on-top notice (see Wayland notes), I the file info box, D double size, V the visualization menu.
-- A file info box (playlist MISC, Alt+3, or clutterbar I) showing the stream facts and an editable ID3v1 tag form for MP3s.
-- Native GNOME-styled (Adwaita, light and dark) menus, Preferences, Jump-to-file, and file info dialogs; everything else is skin-rendered.
-- Preferences pages: Shuffle morph rate, Options (read titles on load/play, sort on load, manual advance, title conversions), Visualization, Display (time mode, double size, title scroll, clutterbar, playlist numbers, snap distance), Audio Library roots, and Skins.
-- Classic hotkeys: `z x c v b` transport, `r s` repeat/shuffle, `l` open files, arrows for volume and seek, `j` jump (searching every tag, not just the shown title), `Ctrl+T` time mode, `Ctrl+D` double size, `Ctrl+P` preferences, `Alt+3` file info, Del/Ctrl+A in the playlist.
-- Mouse wheel: volume anywhere on the main window, pan over the balance slider, 5s seeks over the position bar, list scroll in the playlist.
+- Classic `.wsz` skins rendered pixel for pixel: main window, equalizer, resizable playlist, windowshade modes on all three, double-size mode (Ctrl+D).
+- MP3, WAV, FLAC, and Ogg Vorbis decoded with Symphonia, played through PipeWire, with gapless seek.
+- The visualizer is a faithful port of the XMMS/Audacious classic analyzer: log bands, 40 dB range, normal/fire/line styles, thick or thin bands, peaks, five falloff speeds, 10 to 70 fps refresh.
+- The 10-band equalizer with preamp, the 17 classic presets, and EQF load/save.
+- Playlist editor with working ADD/REM/SEL/MISC/LIST clusters, `.m3u`/`.pls` save and load, right-click track menu, per-track times, mini clock and mini transport, a skinned scrollbar, and a resize grip. The playlist survives close and reopen.
+- Jump-to-file (`j`) searches every tag the file carries, not just the shown title.
+- Marquee shows the tagged "N. Artist - Title (M:SS)" (ID3v2, Vorbis comments, RIFF INFO; file name when untagged), next to kbps/kHz readouts and the elapsed/remaining clock with the classic paused blink.
+- Shuffle and repeat retrace the real play order, so Previous works under shuffle.
+- File info box with the stream facts and an editable ID3v1 tag form for MP3s.
+- Classic hotkeys (`z x c v b` transport, `r s`, `l`, `j`, arrows for volume and seek, `Ctrl+T/D/P`, `Alt+3`) and mouse wheel for volume, balance, seek, and list scroll.
+- Menus, Preferences, Jump, and file info are native GNOME dialogs (Adwaita, light and dark); everything else is skin-rendered.
 - Every window drags from any free surface, not just the 14px title strip.
 
-No album art, no media library view, no modern chrome, on purpose. Add URL (network streaming) is not implemented; its menu item is disabled.
+No album art, no library view, no URL streaming (its menu item is disabled), no modern chrome, on purpose.
 
-Out of scope: Windows and macOS, X11, KDE and other compositors, older Ubuntu. This is tuned for Ubuntu 26.04 (GNOME 50, Mutter, Wayland, PipeWire) and nothing else. Targeting one platform is what keeps it small.
+Out of scope: X11, other compositors or distros, Windows, macOS. Tuned for Ubuntu 26.04 (GNOME 50, Mutter, Wayland, PipeWire) and nothing else; targeting one platform is what keeps it small.
+
+## Why
+
+Winamp 2.9x did a lot with almost nothing: a 275x116 bitmap UI, a software blitter, instant startup on 2003 hardware. Reproducing that today should come out smaller, not heavier. The existing routes either emulate (Wine) or carry a toolkit and X11 history (Audacious, QMMP); xubamp draws the skin bitmaps straight into Wayland shared memory.
 
 ## Wayland notes
 
-Wayland does not let a client position its own windows or read another window's position, so a couple of things Winamp assumed work differently:
+Wayland does not let a client position its own windows, so two things work differently:
 
-- The equalizer and playlist panes are child surfaces of the main window, so they dock, edge-snap (threshold configurable in Preferences), and travel with it like the classic cluster. The dialogs (Jump, Preferences, file info) are ordinary top-level windows placed by the compositor.
-- Always on top is a manual GNOME action (Super plus right-click, or a shortcut you bind), not an in-app toggle. Mutter does not expose window stacking to applications, which is why the clutterbar's A button only shows a notice.
-
-## Layout
-
-A small Cargo workspace, one job per crate:
-
-- `crates/skin` decodes `.wsz` skins (BMP sprites, config text) and holds the sprite geometry. No I/O beyond unzip.
-- `crates/render` composes each window's framebuffer from the skin and the UI state and owns the hit-testing. Pure and heavily unit-tested.
-- `crates/audio` decodes with Symphonia and plays through PipeWire, feeding a lock-free ring the realtime callback drains (no allocation or locking on the audio thread).
-- `crates/wl` is the native Wayland layer (smithay-client-toolkit): windows, input, and the software blit into shared-memory buffers.
-- `crates/dsp` is the 10-band equalizer filter and the classic preset table.
-- `crates/config` parses and writes the settings file (`~/.config/xubamp/settings.conf`).
-- `crates/library` classifies audio paths and scans directories.
-- `crates/portal` talks to the XDG desktop portals (file choosers, color scheme).
-- `crates/xubamp` is the binary that wires them together.
+- The equalizer and playlist are child surfaces of the main window: they dock, edge-snap (threshold in Preferences), and travel with it like the classic cluster. Dialogs are ordinary top-level windows placed by the compositor.
+- Always on top is a manual GNOME action (Super plus right-click), because Mutter gives applications no stacking control; the clutterbar's A button shows a notice saying so.
 
 ## Build
 
-Needs a Rust toolchain (pinned to 1.96.0).
+Needs Rust 1.96:
 
     cargo build --release
     cargo test
 
-The UI and skin crates build and test on the host with no system libraries. Playback and in-window keyboard shortcuts sit behind the `audio` and `keyboard` features, which need PipeWire and libxkbcommon; a dev container keeps those off the host and runs the app against the host's Wayland and PipeWire sockets:
+The UI and skin crates build and test on the host with no system libraries. Playback and in-window keyboard input sit behind the `audio` and `keyboard` features (PipeWire, libxkbcommon); a dev container keeps those off the host and runs the app against the host's Wayland and PipeWire sockets:
 
     scripts/dev-docker.sh run skins/your-skin.wsz ~/Music/song.mp3
 
-Bring your own `.wsz` skin and audio files.
+## Layout
+
+A small Cargo workspace, one job per crate: `skin` (wsz/BMP decode, sprite geometry), `render` (pure framebuffer composition and hit testing, heavily unit-tested), `audio` (Symphonia decode, PipeWire output, lock-free ring into the realtime thread), `wl` (smithay-client-toolkit windows, input, shm blit), `dsp` (equalizer filters and presets), `config` (settings file), `library` (audio path scanning), `portal` (XDG portals), `xubamp` (the binary). Design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the running log in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## License
 

@@ -89,10 +89,6 @@ impl Palette {
 pub const POPOVER_RADIUS: i32 = 12;
 /// Corner radius of a window or dialog surface, in pixels.
 pub const WINDOW_RADIUS: i32 = 12;
-/// Height of one menu row, in pixels.
-pub const MENU_ROW_HEIGHT: i32 = 28;
-/// Horizontal padding inside a menu item, in pixels.
-pub const MENU_ITEM_PADDING_X: i32 = 12;
 /// Thickness of a separator line, in pixels.
 pub const SEPARATOR_THICKNESS: i32 = 1;
 /// Thickness of the keyboard focus ring, in pixels.

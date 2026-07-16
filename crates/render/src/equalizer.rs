@@ -243,9 +243,7 @@ fn shade_balance_from_x(x: i32) -> i8 {
     ((offset as f32 / travel as f32 * 200.0).round() as i32 - 100) as i8
 }
 
-fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
-    x >= rx && x < rx + rw && y >= ry && y < ry + rh
-}
+use crate::in_rect;
 
 fn in_placement(x: i32, y: i32, p: Placement) -> bool {
     in_rect(x, y, p.dst_x, p.dst_y, p.src.w, p.src.h)

@@ -257,9 +257,8 @@ fn preferences_model_from(
         visualization_analyzer_style: vis_analyzer_style(settings.visualization.analyzer_style),
         visualization_band_width: vis_band_width(settings.visualization.band_width),
         visualization_osc_style: vis_osc_style(settings.visualization.oscilloscope_style),
-        // Older files stored ten falloff speeds; the classic scale has five.
-        visualization_bar_falloff: settings.visualization.bar_falloff.min(5),
-        visualization_peak_falloff: settings.visualization.peak_falloff.min(5),
+        visualization_bar_falloff: settings.visualization.bar_falloff,
+        visualization_peak_falloff: settings.visualization.peak_falloff,
         visualization_refresh_rate: settings.visualization.refresh_rate,
         read_titles_on_load: settings.playback.read_titles_on_load,
         sort_on_load: settings.playback.sort_on_load,
@@ -1168,10 +1167,11 @@ fn main() {
                         portal_actions::Completion::Saved(path) => {
                             eprintln!("xubamp: saved equalizer preset to {}", path.display());
                         }
-                        portal_actions::Completion::PlaylistToLoad(_)
-                        | portal_actions::Completion::PlaylistToSave(_) => {
+                        portal_actions::Completion::PlaylistToLoad(path)
+                        | portal_actions::Completion::PlaylistToSave(path) => {
                             eprintln!(
-                                "xubamp: built without audio; playlist save/load needs `--features audio`"
+                                "xubamp: built without audio; handling {} needs `--features audio`",
+                                path.display()
                             );
                         }
                         portal_actions::Completion::SkinLoaded { path, skin } => {

@@ -161,7 +161,6 @@ impl<A> Default for Menu<A> {
 pub enum ClassicMenuAction {
     OpenMedia,
     Play,
-    ToggleMainWindow,
     ToggleEqualizer,
     TogglePlaylistEditor,
     LoadSkin,
@@ -228,7 +227,6 @@ pub enum TimeDisplay {
 /// Runtime values reflected by checks and radios in the main menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MainMenuState {
-    pub main_window_open: bool,
     pub equalizer_open: bool,
     pub playlist_open: bool,
     pub time_display: TimeDisplay,
@@ -245,7 +243,6 @@ pub struct MainMenuState {
 impl Default for MainMenuState {
     fn default() -> Self {
         Self {
-            main_window_open: true,
             equalizer_open: false,
             playlist_open: false,
             time_display: TimeDisplay::Elapsed,
@@ -612,10 +609,6 @@ impl MenuInteraction {
 
     pub fn selected_path(&self) -> &[usize] {
         &self.selection
-    }
-
-    pub fn pressed_path(&self) -> Option<&[usize]> {
-        self.pressed.as_deref()
     }
 
     /// Open at the first enabled, non-separator root item. Empty/all-disabled menus still open but

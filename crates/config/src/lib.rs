@@ -23,10 +23,6 @@ pub const SHUFFLE_MORPH_RATE_MIN: u8 = 0;
 pub const SHUFFLE_MORPH_RATE_MAX: u8 = 50;
 pub const DEFAULT_SHUFFLE_MORPH_RATE: u8 = SHUFFLE_MORPH_RATE_MAX;
 
-/// There is intentionally no plugin discovery or loading surface. Preferences can display this as
-/// unavailable, but a config file cannot turn it on.
-pub const PLUGINS_SUPPORTED: bool = false;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TimeDisplay {
     #[default]
@@ -68,9 +64,11 @@ pub enum OscilloscopeStyle {
     Solid,
 }
 
-/// Visualization speed sliders: the refresh rate runs 1..=10; the classic falloffs have five
-/// speeds (values above 5 from older files clamp to the fastest at use).
+/// The visualization refresh-rate slider runs 1..=10.
 pub const VIS_SPEED_MAX: u8 = 10;
+/// The classic analyzer/peak falloffs have exactly five speeds; older files that stored the
+/// former ten-step scale are normalized to the fastest on load.
+pub const FALLOFF_SPEED_MAX: u8 = 5;
 /// Default bar-drop speed (the middle of the five classic speeds).
 pub const DEFAULT_BAR_FALLOFF: u8 = 3;
 /// Default peak-dot-drop speed.
@@ -453,6 +451,7 @@ impl Settings {
                     line,
                     key,
                     &mut warnings,
+                    FALLOFF_SPEED_MAX,
                 ),
                 "visualization.peak_falloff" => set_speed(
                     value,
@@ -460,6 +459,7 @@ impl Settings {
                     line,
                     key,
                     &mut warnings,
+                    FALLOFF_SPEED_MAX,
                 ),
                 "visualization.refresh_rate" => set_speed(
                     value,
@@ -467,6 +467,7 @@ impl Settings {
                     line,
                     key,
                     &mut warnings,
+                    VIS_SPEED_MAX,
                 ),
                 "library.recurse" => set_bool(
                     value,
@@ -658,12 +659,12 @@ impl Settings {
         line(
             &mut out,
             "visualization.bar_falloff",
-            self.visualization.bar_falloff,
+            self.visualization.bar_falloff.min(FALLOFF_SPEED_MAX),
         );
         line(
             &mut out,
             "visualization.peak_falloff",
-            self.visualization.peak_falloff,
+            self.visualization.peak_falloff.min(FALLOFF_SPEED_MAX),
         );
         line(
             &mut out,
@@ -715,23 +716,32 @@ fn set_bool(value: &str, dst: &mut bool, line: usize, key: &str, warnings: &mut 
 }
 
 /// Parse a 1..=VIS_SPEED_MAX visualization speed slider, clamping and warning out of range.
-fn set_speed(value: &str, dst: &mut u8, line: usize, key: &str, warnings: &mut Vec<Warning>) {
+fn set_speed(
+    value: &str,
+    dst: &mut u8,
+    line: usize,
+    key: &str,
+    warnings: &mut Vec<Warning>,
+    max: u8,
+) {
     match value.parse::<i32>() {
         Ok(value) => {
-            let clamped = value.clamp(1, i32::from(VIS_SPEED_MAX)) as u8;
+            let clamped = value.clamp(1, i32::from(max)) as u8;
             *dst = clamped;
-            if i32::from(clamped) != value {
+            // Falloffs once ran 1..=10; those legacy values normalize silently to the classic
+            // five speeds. Anything outside the historical range earns a warning.
+            if value < 1 || value > i32::from(VIS_SPEED_MAX) {
                 warnings.push(Warning {
                     line,
                     key: key.into(),
-                    message: format!("clamped to the 1 to {VIS_SPEED_MAX} range"),
+                    message: format!("clamped to the 1 to {max} range"),
                 });
             }
         }
         Err(_) => warnings.push(Warning {
             line,
             key: key.into(),
-            message: format!("expected a number from 1 to {VIS_SPEED_MAX}"),
+            message: format!("expected a number from 1 to {max}"),
         }),
     }
 }
@@ -1008,7 +1018,7 @@ mod tests {
         s.visualization.band_width = BandWidth::Thin;
         s.visualization.oscilloscope_style = OscilloscopeStyle::Solid;
         s.visualization.bar_falloff = 3;
-        s.visualization.peak_falloff = 9;
+        s.visualization.peak_falloff = 4;
         s.visualization.refresh_rate = 4;
         s.library.roots = vec![PathBuf::from("/music/A B"), odd_path.clone()];
         s.library.recurse = false;

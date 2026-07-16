@@ -237,10 +237,7 @@ fn in_button(b: &sprites::Placement, x: i32, y: i32) -> bool {
     x >= b.dst_x && x < b.dst_x + b.src.w && y >= b.dst_y && y < b.dst_y + b.src.h
 }
 
-/// Is (`x`, `y`) inside the axis-aligned rectangle at (`rx`, `ry`) of size `rw`x`rh`?
-fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
-    x >= rx && x < rx + rw && y >= ry && y < ry + rh
-}
+use crate::in_rect;
 
 /// Which region of the main window is at window-local pixel (`x`, `y`)? Points outside the
 /// window map to [`Region::None`]. Transport buttons and sliders win over the body; the

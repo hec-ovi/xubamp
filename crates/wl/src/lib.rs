@@ -358,6 +358,28 @@ impl Default for PaneLayout {
     }
 }
 
+/// Upload an RGBA framebuffer into a surface's shm pool (upscaled by `scale` for double-size)
+/// and commit. The shared present path for every pane and dialog.
+fn present_frame(
+    pool: &mut SlotPool,
+    fb: &Framebuffer,
+    surface: &wl_surface::WlSurface,
+    scale: u32,
+    what: &str,
+) {
+    let (w, h) = (fb.width * scale, fb.height * scale);
+    let stride = w as i32 * 4;
+    let (buffer, canvas) = pool
+        .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+        .unwrap_or_else(|error| panic!("create {what} wl_shm buffer: {error:?}"));
+    xubamp_render::write_bgra_scaled(fb, scale, canvas);
+    surface.damage_buffer(0, 0, w as i32, h as i32);
+    buffer
+        .attach_to(surface)
+        .unwrap_or_else(|error| panic!("attach {what} buffer: {error:?}"));
+    surface.commit();
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PaneDrag {
     /// Pointer position in parent-surface coordinates when the press began.
@@ -465,22 +487,7 @@ struct FileInfoWin {
 
 impl FileInfoWin {
     fn present(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create file-info wl_shm buffer");
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
-        let surface = self.window.wl_surface();
-        surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(surface).expect("attach file-info buffer");
-        surface.commit();
+        present_frame(&mut self.pool, &self.fb, self.window.wl_surface(), 1, "file-info");
     }
 }
 
@@ -498,46 +505,13 @@ struct PreferencesWin {
 
 impl PreferencesWin {
     fn present(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create preferences wl_shm buffer");
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
-        let surface = self.window.wl_surface();
-        surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer
-            .attach_to(surface)
-            .expect("attach preferences buffer");
-        surface.commit();
+        present_frame(&mut self.pool, &self.fb, self.window.wl_surface(), 1, "preferences");
     }
 }
 
 impl JumpWin {
-    /// Upload `self.fb` to the window's shm buffer and commit (static, no frame callback).
     fn present(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create wl_shm buffer");
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
-        let surface = self.window.wl_surface();
-        surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(surface).expect("attach buffer");
-        surface.commit();
+        present_frame(&mut self.pool, &self.fb, self.window.wl_surface(), 1, "jump");
     }
 }
 
@@ -1646,7 +1620,6 @@ impl App {
     /// Pop the Visualization submenu standalone (the clutterbar's V button).
     fn open_visualization_menu_at(&mut self, position: panes::Point) {
         let model = menu::visualization_menu(menu::MainMenuState {
-            main_window_open: true,
             equalizer_open: self.equalizer.is_some(),
             playlist_open: self.playlist.is_some(),
             repeat: self.state.repeat_on,
@@ -1670,7 +1643,6 @@ impl App {
 
     fn open_main_menu_at(&mut self, position: panes::Point) {
         let model = menu::main_menu(menu::MainMenuState {
-            main_window_open: true,
             equalizer_open: self.equalizer.is_some(),
             playlist_open: self.playlist.is_some(),
             repeat: self.state.repeat_on,
@@ -3187,63 +3159,20 @@ fn external_tick_delay(base: Duration, pending: bool) -> Duration {
 }
 
 impl PlaylistWin {
-    /// Upload `self.fb` to the child surface's shm buffer and commit. No frame callback: playlist is
-    /// static (redrawn only on interaction / track change), so it does not drive an animation loop.
     fn present(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create wl_shm buffer");
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
-        self.surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer.attach_to(&self.surface).expect("attach buffer");
-        self.surface.commit();
+        present_frame(&mut self.pool, &self.fb, &self.surface, 1, "playlist");
     }
 }
 
 impl EqualizerWin {
     fn present(&mut self, scale: u32) {
-        let (w, h) = (self.fb.width * scale, self.fb.height * scale);
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create equalizer wl_shm buffer");
-        xubamp_render::write_bgra_scaled(&self.fb, scale, canvas);
-        self.surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer
-            .attach_to(&self.surface)
-            .expect("attach equalizer buffer");
-        self.surface.commit();
+        present_frame(&mut self.pool, &self.fb, &self.surface, scale, "equalizer");
     }
 }
 
 impl PopupMenuWin {
     fn present(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
-        let stride = w as i32 * 4;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
-            .expect("create popup menu wl_shm buffer");
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
-        self.surface.damage_buffer(0, 0, w as i32, h as i32);
-        buffer
-            .attach_to(&self.surface)
-            .expect("attach popup menu buffer");
-        self.surface.commit();
+        present_frame(&mut self.pool, &self.fb, &self.surface, 1, "popup menu");
     }
 }
 

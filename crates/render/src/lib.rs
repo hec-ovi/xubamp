@@ -440,6 +440,12 @@ pub fn write_bgra_scaled(fb: &Framebuffer, scale: u32, dst: &mut [u8]) {
     }
 }
 
+/// Is (`x`, `y`) inside the axis-aligned rectangle at (`rx`, `ry`) of size `rw`x`rh`? The one
+/// hit-test primitive the interactive modules share.
+pub(crate) fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
 /// Multiply an axis-aligned rectangle toward black to show a pressed control that has no skin
 /// art (the base skin's buttons, the shade strip's baked mini transport).
 pub(crate) fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {

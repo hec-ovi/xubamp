@@ -42,9 +42,8 @@ pub const MAIN_H: i32 = 116;
 /// MAIN.BMP is the full 275x116 background, drawn at the origin.
 pub const MAIN_BG: Placement = Placement::new(Rect::new(0, 0, MAIN_W, MAIN_H), 0, 0);
 
-/// Title-bar strips from TITLEBAR.BMP, drawn at the origin (275x14).
+/// The (focused) title-bar strip from TITLEBAR.BMP, drawn at the origin (275x14).
 pub const TITLEBAR_ACTIVE: Placement = Placement::new(Rect::new(27, 0, 275, 14), 0, 0);
-pub const TITLEBAR_INACTIVE: Placement = Placement::new(Rect::new(27, 15, 275, 14), 0, 0);
 
 /// The four title-bar buttons, 9x9 each at y=3, from TITLEBAR.BMP. Their released (up) graphics are
 /// baked into the title-bar strip above; only the pressed (down) sprite is blitted while a button
@@ -105,7 +104,6 @@ pub const SHADE_POSBAR_W: i32 = 17;
 pub const SHADE_POSBAR_H: i32 = 7;
 pub const SHADE_POSBAR_BG: Rect = Rect::new(0, 36, 17, 7);
 pub const SHADE_POSBAR_THUMB_W: i32 = 3;
-pub const SHADE_POSBAR_THUMB_H: i32 = 7;
 pub const SHADE_POSBAR_THUMB: Rect = Rect::new(20, 36, 3, 7); // centre (34%-65%)
 pub const SHADE_POSBAR_THUMB_LEFT: Rect = Rect::new(17, 36, 3, 7); // <=33%
 pub const SHADE_POSBAR_THUMB_RIGHT: Rect = Rect::new(23, 36, 3, 7); // >=66%
@@ -277,7 +275,6 @@ pub const EQ_SHADE_H: i32 = 14;
 /// Expanded background and focused/unfocused title strips from EQMAIN.BMP.
 pub const EQ_BACKGROUND: Placement = Placement::new(Rect::new(0, 0, EQ_W, EQ_H), 0, 0);
 pub const EQ_TITLE_ACTIVE: Placement = Placement::new(Rect::new(0, 134, EQ_W, 14), 0, 0);
-pub const EQ_TITLE_INACTIVE: Placement = Placement::new(Rect::new(0, 149, EQ_W, 14), 0, 0);
 
 /// Expanded title-button hit/draw geometry. Released artwork is present in the title strip.
 pub const EQ_TITLE_BUTTON_Y: i32 = 3;
@@ -428,7 +425,6 @@ pub const PLEDIT_SHADE_RESIZE_RIGHT: i32 = 20;
 /// bands): x 12..255 (width 243), y from 23, rows [`PLEDIT_ROW_H`] tall.
 pub const PLEDIT_LIST_X: i32 = 12;
 pub const PLEDIT_LIST_Y: i32 = 23;
-pub const PLEDIT_LIST_W: i32 = PLEDIT_W - 12 - 20; // right edge is 20px wide
 pub const PLEDIT_ROW_H: i32 = 13;
 
 /// Volume and balance sliders share a sheet layout: a column of `SLIDER_FRAMES` background

@@ -89,18 +89,6 @@ impl Equalizer {
         self.rebuild_coefficients();
     }
 
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.settings.enabled = enabled;
-    }
-
-    pub fn set_preamp_db(&mut self, db: f32) {
-        let db = sanitize_db(db);
-        if self.settings.preamp_db != db {
-            self.settings.preamp_db = db;
-            self.preamp_gain = db_to_gain(db);
-        }
-    }
-
     pub fn set_band_db(&mut self, index: usize, db: f32) -> bool {
         let Some(current) = self.settings.bands_db.get_mut(index) else {
             return false;

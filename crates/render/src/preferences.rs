@@ -11,13 +11,14 @@ use std::path::PathBuf;
 
 use xubamp_skin::font;
 
+use crate::vis::{AnalyzerStyle, BandWidth, OscStyle};
 use crate::adwaita::{self, Palette, UiFont};
 
 use crate::Framebuffer;
 
 /// Minimum preferences window size. Larger sizes give the library list more room.
 pub const PREFERENCES_W: i32 = 500;
-pub const PREFERENCES_H: i32 = 350;
+pub const PREFERENCES_H: i32 = 560;
 /// Title-bar band height, exported for platform drag handling.
 pub const PREFERENCES_TITLE_H: i32 = 24;
 
@@ -54,6 +55,7 @@ const FIELD: [u8; 3] = [250, 250, 248];
 pub enum Section {
     #[default]
     Shuffle,
+    Options,
     Visualization,
     Display,
     AudioLibrary,
@@ -61,8 +63,9 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Shuffle,
+        Self::Options,
         Self::Visualization,
         Self::Display,
         Self::AudioLibrary,
@@ -72,6 +75,7 @@ impl Section {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Shuffle => "Shuffle",
+            Self::Options => "Options",
             Self::Visualization => "Visualization",
             Self::Display => "Display",
             Self::AudioLibrary => "Audio Library",
@@ -115,9 +119,26 @@ pub struct PreferencesModel {
     pub shuffle_morph_rate: u8,
     pub visualization_mode: VisualizationMode,
     pub visualization_show_peaks: bool,
+    pub visualization_analyzer_style: AnalyzerStyle,
+    pub visualization_band_width: BandWidth,
+    pub visualization_osc_style: OscStyle,
+    /// Falloff and refresh speeds, 1..=10 like the visualization menu.
+    pub visualization_bar_falloff: u8,
+    pub visualization_peak_falloff: u8,
+    pub visualization_refresh_rate: u8,
     pub display_time: TimeDisplay,
     pub display_double_size: bool,
     pub display_scroll_title: bool,
+    pub display_clutterbar: bool,
+    pub display_playlist_numbers: bool,
+    /// Edge-snap threshold for pane drags, 0..=30 px (0 disables).
+    pub display_snap_px: u8,
+    /// Classic "Read titles on Load / Play".
+    pub read_titles_on_load: bool,
+    pub sort_on_load: bool,
+    pub manual_advance: bool,
+    pub convert_underscores: bool,
+    pub convert_percent20: bool,
     /// Audio scan roots. The UI deliberately has no non-audio library model.
     pub library_roots: Vec<PathBuf>,
     pub library_recurse: bool,
@@ -131,9 +152,23 @@ impl Default for PreferencesModel {
             shuffle_morph_rate: DEFAULT_SHUFFLE_MORPH_RATE,
             visualization_mode: VisualizationMode::Spectrum,
             visualization_show_peaks: true,
+            visualization_analyzer_style: AnalyzerStyle::Normal,
+            visualization_band_width: BandWidth::Thick,
+            visualization_osc_style: OscStyle::Lines,
+            visualization_bar_falloff: 7,
+            visualization_peak_falloff: 6,
+            visualization_refresh_rate: 8,
             display_time: TimeDisplay::Elapsed,
             display_double_size: false,
             display_scroll_title: true,
+            display_clutterbar: true,
+            display_playlist_numbers: true,
+            display_snap_px: 15,
+            read_titles_on_load: true,
+            sort_on_load: false,
+            manual_advance: false,
+            convert_underscores: false,
+            convert_percent20: false,
             library_roots: Vec::new(),
             library_recurse: true,
             skin_path: None,
@@ -151,10 +186,30 @@ pub enum ControlId {
     VisualizationOscilloscope,
     VisualizationOff,
     VisualizationShowPeaks,
+    VisualizationRefreshRate,
+    VisualizationAnalyzerNormal,
+    VisualizationAnalyzerFire,
+    VisualizationAnalyzerLine,
+    VisualizationBandThick,
+    VisualizationBandThin,
+    VisualizationBarFalloff,
+    VisualizationPeakFalloff,
+    VisualizationOscDots,
+    VisualizationOscLines,
+    VisualizationOscSolid,
     DisplayElapsed,
     DisplayRemaining,
     DisplayDoubleSize,
     DisplayScrollTitle,
+    DisplayClutterbar,
+    DisplayPlaylistNumbers,
+    DisplaySnapPx,
+    OptionsReadOnLoad,
+    OptionsReadOnPlay,
+    OptionsSortOnLoad,
+    OptionsManualAdvance,
+    OptionsConvertUnderscores,
+    OptionsConvertPercent20,
     LibraryRoot(usize),
     LibraryAdd,
     LibraryRemove,
@@ -223,9 +278,23 @@ pub enum Command {
     SetShuffleMorphRate(u8),
     SetVisualizationMode(VisualizationMode),
     SetVisualizationShowPeaks(bool),
+    SetAnalyzerStyle(AnalyzerStyle),
+    SetBandWidth(BandWidth),
+    SetOscilloscopeStyle(OscStyle),
+    SetBarFalloff(u8),
+    SetPeakFalloff(u8),
+    SetRefreshRate(u8),
     SetDisplayTime(TimeDisplay),
     SetDisplayDoubleSize(bool),
     SetDisplayScrollTitle(bool),
+    SetDisplayClutterbar(bool),
+    SetDisplayPlaylistNumbers(bool),
+    SetSnapPx(u8),
+    SetReadTitlesOnLoad(bool),
+    SetSortOnLoad(bool),
+    SetManualAdvance(bool),
+    SetConvertUnderscores(bool),
+    SetConvertPercent20(bool),
     ChooseLibraryDirectory,
     SetLibraryRoots(Vec<PathBuf>),
     SetLibraryRecurse(bool),
@@ -389,6 +458,27 @@ impl PreferencesState {
             range: None,
             focused: self.focus == id,
         };
+        let slider = |id, label: &str, y, height, value| ControlInfo {
+            id,
+            role: ControlRole::Slider,
+            label: label.into(),
+            rect: Rect {
+                x,
+                y,
+                width: control_width,
+                height,
+            },
+            enabled: true,
+            selected: false,
+            checked: None,
+            range: slider_bounds(id).map(|(minimum, maximum)| RangeInfo {
+                value,
+                minimum,
+                maximum,
+                step: 1,
+            }),
+            focused: self.focus == id,
+        };
 
         match self.section {
             Section::Shuffle => {
@@ -436,11 +526,133 @@ impl PreferencesState {
                     self.model.visualization_mode == VisualizationMode::Off,
                     ControlRole::RadioButton,
                 ));
+                let y0 = content.y + 126;
+                controls.push(slider(
+                    ControlId::VisualizationRefreshRate,
+                    "Refresh rate",
+                    y0,
+                    36,
+                    self.model.visualization_refresh_rate,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationAnalyzerNormal,
+                    "Normal analyzer",
+                    y0 + 42,
+                    self.model.visualization_analyzer_style == AnalyzerStyle::Normal,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationAnalyzerFire,
+                    "Fire analyzer",
+                    y0 + 66,
+                    self.model.visualization_analyzer_style == AnalyzerStyle::Fire,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationAnalyzerLine,
+                    "Line analyzer",
+                    y0 + 90,
+                    self.model.visualization_analyzer_style == AnalyzerStyle::Line,
+                    ControlRole::RadioButton,
+                ));
                 controls.push(check(
                     ControlId::VisualizationShowPeaks,
                     "Show spectrum peaks",
-                    content.y + 146,
+                    y0 + 114,
                     self.model.visualization_show_peaks,
+                    ControlRole::CheckBox,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationBandThick,
+                    "Thick bands",
+                    y0 + 138,
+                    self.model.visualization_band_width == BandWidth::Thick,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationBandThin,
+                    "Thin bands",
+                    y0 + 162,
+                    self.model.visualization_band_width == BandWidth::Thin,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(slider(
+                    ControlId::VisualizationBarFalloff,
+                    "Analyzer falloff",
+                    y0 + 192,
+                    36,
+                    self.model.visualization_bar_falloff,
+                ));
+                controls.push(slider(
+                    ControlId::VisualizationPeakFalloff,
+                    "Peaks falloff",
+                    y0 + 234,
+                    36,
+                    self.model.visualization_peak_falloff,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationOscDots,
+                    "Dot scope",
+                    y0 + 280,
+                    self.model.visualization_osc_style == OscStyle::Dots,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationOscLines,
+                    "Line scope",
+                    y0 + 304,
+                    self.model.visualization_osc_style == OscStyle::Lines,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::VisualizationOscSolid,
+                    "Solid scope",
+                    y0 + 328,
+                    self.model.visualization_osc_style == OscStyle::Solid,
+                    ControlRole::RadioButton,
+                ));
+            }
+            Section::Options => {
+                controls.push(check(
+                    ControlId::OptionsReadOnLoad,
+                    "Read titles on load",
+                    content.y + 50,
+                    self.model.read_titles_on_load,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::OptionsReadOnPlay,
+                    "Read titles on play",
+                    content.y + 74,
+                    !self.model.read_titles_on_load,
+                    ControlRole::RadioButton,
+                ));
+                controls.push(check(
+                    ControlId::OptionsSortOnLoad,
+                    "Sort files on load",
+                    content.y + 118,
+                    self.model.sort_on_load,
+                    ControlRole::CheckBox,
+                ));
+                controls.push(check(
+                    ControlId::OptionsManualAdvance,
+                    "Manual playlist advance (no automatic)",
+                    content.y + 142,
+                    self.model.manual_advance,
+                    ControlRole::CheckBox,
+                ));
+                controls.push(check(
+                    ControlId::OptionsConvertUnderscores,
+                    "Convert underscores to spaces in titles",
+                    content.y + 166,
+                    self.model.convert_underscores,
+                    ControlRole::CheckBox,
+                ));
+                controls.push(check(
+                    ControlId::OptionsConvertPercent20,
+                    "Convert %20 to spaces in titles",
+                    content.y + 190,
+                    self.model.convert_percent20,
                     ControlRole::CheckBox,
                 ));
             }
@@ -472,6 +684,27 @@ impl PreferencesState {
                     content.y + 146,
                     self.model.display_scroll_title,
                     ControlRole::CheckBox,
+                ));
+                controls.push(check(
+                    ControlId::DisplayClutterbar,
+                    "Always show clutterbar",
+                    content.y + 172,
+                    self.model.display_clutterbar,
+                    ControlRole::CheckBox,
+                ));
+                controls.push(check(
+                    ControlId::DisplayPlaylistNumbers,
+                    "Show numbers in playlist",
+                    content.y + 198,
+                    self.model.display_playlist_numbers,
+                    ControlRole::CheckBox,
+                ));
+                controls.push(slider(
+                    ControlId::DisplaySnapPx,
+                    "Snap windows at (pixels)",
+                    content.y + 230,
+                    36,
+                    self.model.display_snap_px,
                 ));
             }
             Section::AudioLibrary => {
@@ -587,8 +820,9 @@ impl PreferencesState {
         }
         self.focus = control.id;
         self.pressed = Some(control.id);
-        if control.id == ControlId::ShuffleMorphRate {
-            self.set_shuffle_morph_rate(slider_value_at_x(control.rect, x))
+        if let Some(bounds) = slider_bounds(control.id) {
+            let value = slider_value_at_x(control.rect, x, bounds);
+            self.set_slider_value(control.id, value)
         } else {
             Outcome::Redraw
         }
@@ -597,30 +831,33 @@ impl PreferencesState {
     /// Update a pressed slider while the pointer is dragged. The value clamps at either end even
     /// when the pointer moves beyond the visible track.
     pub fn pointer_motion(&mut self, x: i32, width: i32, height: i32) -> Outcome {
-        if self.pressed != Some(ControlId::ShuffleMorphRate) {
-            return Outcome::Unchanged;
-        }
-        let Some(control) = self
-            .controls(width, height)
-            .into_iter()
-            .find(|control| control.id == ControlId::ShuffleMorphRate)
+        let Some((pressed, bounds)) = self
+            .pressed
+            .and_then(|id| slider_bounds(id).map(|bounds| (id, bounds)))
         else {
             return Outcome::Unchanged;
         };
-        self.set_shuffle_morph_rate(slider_value_at_x(control.rect, x))
+        let Some(control) = self
+            .controls(width, height)
+            .into_iter()
+            .find(|control| control.id == pressed)
+        else {
+            return Outcome::Unchanged;
+        };
+        self.set_slider_value(pressed, slider_value_at_x(control.rect, x, bounds))
     }
 
     pub fn pointer_release(&mut self, x: i32, y: i32, width: i32, height: i32) -> Outcome {
         let pressed = self.pressed.take();
-        if pressed == Some(ControlId::ShuffleMorphRate) {
+        if let Some((id, bounds)) = pressed.and_then(|id| slider_bounds(id).map(|b| (id, b))) {
             let Some(control) = self
                 .controls(width, height)
                 .into_iter()
-                .find(|control| control.id == ControlId::ShuffleMorphRate)
+                .find(|control| control.id == id)
             else {
                 return Outcome::Redraw;
             };
-            return self.set_shuffle_morph_rate(slider_value_at_x(control.rect, x));
+            return self.set_slider_value(id, slider_value_at_x(control.rect, x, bounds));
         }
         let released = self
             .hit_test(x, y, width, height)
@@ -651,17 +888,19 @@ impl PreferencesState {
             Key::Tab => self.move_tab(1, width, height),
             Key::BackTab => self.move_tab(-1, width, height),
             Key::Space | Key::Enter => self.activate(self.focus, height),
-            Key::Left | Key::Down if self.focus == ControlId::ShuffleMorphRate => {
-                self.adjust_shuffle_morph_rate(-1)
+            Key::Left | Key::Down if slider_bounds(self.focus).is_some() => {
+                self.adjust_slider(self.focus, -1)
             }
-            Key::Right | Key::Up if self.focus == ControlId::ShuffleMorphRate => {
-                self.adjust_shuffle_morph_rate(1)
+            Key::Right | Key::Up if slider_bounds(self.focus).is_some() => {
+                self.adjust_slider(self.focus, 1)
             }
-            Key::Home if self.focus == ControlId::ShuffleMorphRate => {
-                self.set_shuffle_morph_rate(SHUFFLE_MORPH_RATE_MIN)
+            Key::Home if slider_bounds(self.focus).is_some() => {
+                let (minimum, _) = slider_bounds(self.focus).unwrap();
+                self.set_slider_value(self.focus, minimum)
             }
-            Key::End if self.focus == ControlId::ShuffleMorphRate => {
-                self.set_shuffle_morph_rate(SHUFFLE_MORPH_RATE_MAX)
+            Key::End if slider_bounds(self.focus).is_some() => {
+                let (_, maximum) = slider_bounds(self.focus).unwrap();
+                self.set_slider_value(self.focus, maximum)
             }
             Key::Up | Key::Down if matches!(self.focus, ControlId::Section(_)) => {
                 let delta = if key == Key::Up { -1 } else { 1 };
@@ -730,6 +969,48 @@ impl PreferencesState {
                     self.model.visualization_show_peaks,
                 ))
             }
+            ControlId::VisualizationAnalyzerNormal => self.set_analyzer_style(AnalyzerStyle::Normal),
+            ControlId::VisualizationAnalyzerFire => self.set_analyzer_style(AnalyzerStyle::Fire),
+            ControlId::VisualizationAnalyzerLine => self.set_analyzer_style(AnalyzerStyle::Line),
+            ControlId::VisualizationBandThick => self.set_band_width(BandWidth::Thick),
+            ControlId::VisualizationBandThin => self.set_band_width(BandWidth::Thin),
+            ControlId::VisualizationOscDots => self.set_osc_style(OscStyle::Dots),
+            ControlId::VisualizationOscLines => self.set_osc_style(OscStyle::Lines),
+            ControlId::VisualizationOscSolid => self.set_osc_style(OscStyle::Solid),
+            ControlId::VisualizationRefreshRate
+            | ControlId::VisualizationBarFalloff
+            | ControlId::VisualizationPeakFalloff
+            | ControlId::DisplaySnapPx => Outcome::Redraw,
+            ControlId::DisplayClutterbar => {
+                self.model.display_clutterbar = !self.model.display_clutterbar;
+                Outcome::Command(Command::SetDisplayClutterbar(self.model.display_clutterbar))
+            }
+            ControlId::DisplayPlaylistNumbers => {
+                self.model.display_playlist_numbers = !self.model.display_playlist_numbers;
+                Outcome::Command(Command::SetDisplayPlaylistNumbers(
+                    self.model.display_playlist_numbers,
+                ))
+            }
+            ControlId::OptionsReadOnLoad => self.set_read_titles_on_load(true),
+            ControlId::OptionsReadOnPlay => self.set_read_titles_on_load(false),
+            ControlId::OptionsSortOnLoad => {
+                self.model.sort_on_load = !self.model.sort_on_load;
+                Outcome::Command(Command::SetSortOnLoad(self.model.sort_on_load))
+            }
+            ControlId::OptionsManualAdvance => {
+                self.model.manual_advance = !self.model.manual_advance;
+                Outcome::Command(Command::SetManualAdvance(self.model.manual_advance))
+            }
+            ControlId::OptionsConvertUnderscores => {
+                self.model.convert_underscores = !self.model.convert_underscores;
+                Outcome::Command(Command::SetConvertUnderscores(
+                    self.model.convert_underscores,
+                ))
+            }
+            ControlId::OptionsConvertPercent20 => {
+                self.model.convert_percent20 = !self.model.convert_percent20;
+                Outcome::Command(Command::SetConvertPercent20(self.model.convert_percent20))
+            }
             ControlId::DisplayElapsed => self.set_display_time(TimeDisplay::Elapsed),
             ControlId::DisplayRemaining => self.set_display_time(TimeDisplay::Remaining),
             ControlId::DisplayDoubleSize => {
@@ -780,23 +1061,93 @@ impl PreferencesState {
         }
     }
 
-    fn set_shuffle_morph_rate(&mut self, rate: u8) -> Outcome {
-        let rate = rate.clamp(SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX);
-        if self.model.shuffle_morph_rate == rate {
+    fn set_analyzer_style(&mut self, style: AnalyzerStyle) -> Outcome {
+        if self.model.visualization_analyzer_style == style {
             Outcome::Redraw
         } else {
-            self.model.shuffle_morph_rate = rate;
-            Outcome::Command(Command::SetShuffleMorphRate(rate))
+            self.model.visualization_analyzer_style = style;
+            Outcome::Command(Command::SetAnalyzerStyle(style))
         }
     }
 
-    fn adjust_shuffle_morph_rate(&mut self, delta: i8) -> Outcome {
-        let rate = i16::from(self.model.shuffle_morph_rate) + i16::from(delta);
-        self.set_shuffle_morph_rate(rate.clamp(
-            i16::from(SHUFFLE_MORPH_RATE_MIN),
-            i16::from(SHUFFLE_MORPH_RATE_MAX),
-        ) as u8)
+    fn set_band_width(&mut self, width: BandWidth) -> Outcome {
+        if self.model.visualization_band_width == width {
+            Outcome::Redraw
+        } else {
+            self.model.visualization_band_width = width;
+            Outcome::Command(Command::SetBandWidth(width))
+        }
     }
+
+    fn set_osc_style(&mut self, style: OscStyle) -> Outcome {
+        if self.model.visualization_osc_style == style {
+            Outcome::Redraw
+        } else {
+            self.model.visualization_osc_style = style;
+            Outcome::Command(Command::SetOscilloscopeStyle(style))
+        }
+    }
+
+    fn set_read_titles_on_load(&mut self, on_load: bool) -> Outcome {
+        if self.model.read_titles_on_load == on_load {
+            Outcome::Redraw
+        } else {
+            self.model.read_titles_on_load = on_load;
+            Outcome::Command(Command::SetReadTitlesOnLoad(on_load))
+        }
+    }
+
+    /// The current value of a range control.
+    fn slider_value(&self, id: ControlId) -> u8 {
+        match id {
+            ControlId::ShuffleMorphRate => self.model.shuffle_morph_rate,
+            ControlId::VisualizationRefreshRate => self.model.visualization_refresh_rate,
+            ControlId::VisualizationBarFalloff => self.model.visualization_bar_falloff,
+            ControlId::VisualizationPeakFalloff => self.model.visualization_peak_falloff,
+            ControlId::DisplaySnapPx => self.model.display_snap_px,
+            _ => 0,
+        }
+    }
+
+    /// Set a range control's value, emitting its command on a real change.
+    fn set_slider_value(&mut self, id: ControlId, value: u8) -> Outcome {
+        let Some((minimum, maximum)) = slider_bounds(id) else {
+            return Outcome::Unchanged;
+        };
+        let value = value.clamp(minimum, maximum);
+        if self.slider_value(id) == value {
+            return Outcome::Redraw;
+        }
+        match id {
+            ControlId::ShuffleMorphRate => {
+                self.model.shuffle_morph_rate = value;
+                Outcome::Command(Command::SetShuffleMorphRate(value))
+            }
+            ControlId::VisualizationRefreshRate => {
+                self.model.visualization_refresh_rate = value;
+                Outcome::Command(Command::SetRefreshRate(value))
+            }
+            ControlId::VisualizationBarFalloff => {
+                self.model.visualization_bar_falloff = value;
+                Outcome::Command(Command::SetBarFalloff(value))
+            }
+            ControlId::VisualizationPeakFalloff => {
+                self.model.visualization_peak_falloff = value;
+                Outcome::Command(Command::SetPeakFalloff(value))
+            }
+            ControlId::DisplaySnapPx => {
+                self.model.display_snap_px = value;
+                Outcome::Command(Command::SetSnapPx(value))
+            }
+            _ => Outcome::Unchanged,
+        }
+    }
+
+    fn adjust_slider(&mut self, id: ControlId, delta: i8) -> Outcome {
+        let value = (i16::from(self.slider_value(id)) + i16::from(delta)).max(0) as u8;
+        self.set_slider_value(id, value)
+    }
+
 
     fn set_display_time(&mut self, time: TimeDisplay) -> Outcome {
         if self.model.display_time == time {
@@ -1132,6 +1483,10 @@ fn draw_page_static_adwaita(
         Section::Visualization => {
             atext(fb, font, content.x + 18, content.y + 32, "Visualization mode", BODY_PX, dim);
         }
+        Section::Options => {
+            atext(fb, font, content.x + 18, content.y + 32, "Read titles on", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 100, "Playlist behaviour", BODY_PX, dim);
+        }
         Section::Display => {
             atext(fb, font, content.x + 18, content.y + 32, "Time display", BODY_PX, dim);
             atext(fb, font, content.x + 18, content.y + 104, "Window display", BODY_PX, dim);
@@ -1346,6 +1701,16 @@ fn draw_page_static(fb: &mut Framebuffer, state: &PreferencesState, content: Rec
                 content.x + 18,
                 content.y + 32,
                 "Visualization mode",
+                DIM,
+            );
+        }
+        Section::Options => {
+            draw_text(fb, content.x + 18, content.y + 32, "Read titles on", DIM);
+            draw_text(
+                fb,
+                content.x + 18,
+                content.y + 100,
+                "Playlist behaviour",
                 DIM,
             );
         }
@@ -1649,13 +2014,25 @@ fn close_rect(width: i32, height: i32) -> Rect {
     }
 }
 
-fn slider_value_at_x(rect: Rect, x: i32) -> u8 {
+fn slider_value_at_x(rect: Rect, x: i32, (minimum, maximum): (u8, u8)) -> u8 {
     let start = rect.x + SLIDER_THUMB_W / 2;
     let span = (rect.width - SLIDER_THUMB_W).max(1);
     let position = (x - start).clamp(0, span);
-    let value_span = i32::from(SHUFFLE_MORPH_RATE_MAX - SHUFFLE_MORPH_RATE_MIN);
+    let value_span = i32::from(maximum - minimum);
     let rounded = (position * value_span + span / 2) / span;
-    SHUFFLE_MORPH_RATE_MIN + rounded as u8
+    minimum + rounded as u8
+}
+
+/// The (minimum, maximum) of a range control, `None` for everything that is not a slider.
+fn slider_bounds(id: ControlId) -> Option<(u8, u8)> {
+    match id {
+        ControlId::ShuffleMorphRate => Some((SHUFFLE_MORPH_RATE_MIN, SHUFFLE_MORPH_RATE_MAX)),
+        ControlId::VisualizationRefreshRate
+        | ControlId::VisualizationBarFalloff
+        | ControlId::VisualizationPeakFalloff => Some((1, 10)),
+        ControlId::DisplaySnapPx => Some((0, 30)),
+        _ => None,
+    }
 }
 
 fn library_list_rect(content: Rect) -> Rect {
@@ -1787,6 +2164,7 @@ mod tests {
             Section::ALL.map(Section::label),
             [
                 "Shuffle",
+                "Options",
                 "Visualization",
                 "Display",
                 "Audio Library",
@@ -1932,8 +2310,119 @@ mod tests {
     }
 
     #[test]
+    fn options_page_toggles_emit_their_commands() {
+        let mut state = PreferencesState::default();
+        state.set_section(Section::Options);
+        assert_eq!(
+            click(&mut state, ControlId::OptionsReadOnPlay),
+            Outcome::Command(Command::SetReadTitlesOnLoad(false))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::OptionsReadOnLoad),
+            Outcome::Command(Command::SetReadTitlesOnLoad(true))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::OptionsSortOnLoad),
+            Outcome::Command(Command::SetSortOnLoad(true))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::OptionsManualAdvance),
+            Outcome::Command(Command::SetManualAdvance(true))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::OptionsConvertUnderscores),
+            Outcome::Command(Command::SetConvertUnderscores(true))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::OptionsConvertPercent20),
+            Outcome::Command(Command::SetConvertPercent20(true))
+        );
+    }
+
+    #[test]
+    fn visualization_page_styles_and_speed_sliders_are_live() {
+        let mut state = PreferencesState::default();
+        state.set_section(Section::Visualization);
+        assert_eq!(
+            click(&mut state, ControlId::VisualizationAnalyzerFire),
+            Outcome::Command(Command::SetAnalyzerStyle(AnalyzerStyle::Fire))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::VisualizationBandThin),
+            Outcome::Command(Command::SetBandWidth(BandWidth::Thin))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::VisualizationOscSolid),
+            Outcome::Command(Command::SetOscilloscopeStyle(OscStyle::Solid))
+        );
+        // The three speed sliders are accessible ranges with the 1..=10 bounds.
+        for (id, value) in [
+            (ControlId::VisualizationRefreshRate, 8),
+            (ControlId::VisualizationBarFalloff, 7),
+            (ControlId::VisualizationPeakFalloff, 6),
+        ] {
+            let info = control(&state, id);
+            assert_eq!(info.role, ControlRole::Slider);
+            assert_eq!(
+                info.range,
+                Some(RangeInfo {
+                    value,
+                    minimum: 1,
+                    maximum: 10,
+                    step: 1
+                })
+            );
+        }
+        // Keyboard range conventions work on the generalized sliders.
+        state.focus = ControlId::VisualizationRefreshRate;
+        assert_eq!(
+            state.key(Key::Left, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetRefreshRate(7))
+        );
+        assert_eq!(
+            state.key(Key::End, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetRefreshRate(10))
+        );
+    }
+
+    #[test]
+    fn display_page_gains_clutterbar_numbers_and_snap() {
+        let mut state = PreferencesState::default();
+        state.set_section(Section::Display);
+        assert_eq!(
+            click(&mut state, ControlId::DisplayClutterbar),
+            Outcome::Command(Command::SetDisplayClutterbar(false))
+        );
+        assert_eq!(
+            click(&mut state, ControlId::DisplayPlaylistNumbers),
+            Outcome::Command(Command::SetDisplayPlaylistNumbers(false))
+        );
+        let snap = control(&state, ControlId::DisplaySnapPx);
+        assert_eq!(
+            snap.range,
+            Some(RangeInfo {
+                value: 15,
+                minimum: 0,
+                maximum: 30,
+                step: 1
+            })
+        );
+        state.focus = ControlId::DisplaySnapPx;
+        assert_eq!(
+            state.key(Key::Home, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Command(Command::SetSnapPx(0)),
+            "snapping can be disabled entirely"
+        );
+    }
+
+    #[test]
     fn keyboard_navigation_changes_sections_and_activates_controls() {
         let mut state = PreferencesState::default();
+        assert_eq!(
+            state.key(Key::Down, PREFERENCES_W, PREFERENCES_H),
+            Outcome::Redraw
+        );
+        assert_eq!(state.section(), Section::Options);
         assert_eq!(
             state.key(Key::Down, PREFERENCES_W, PREFERENCES_H),
             Outcome::Redraw

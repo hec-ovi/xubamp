@@ -253,6 +253,20 @@ fn preferences_model_from(
         },
         display_double_size: settings.display.double_size,
         display_scroll_title: settings.display.scroll_title,
+        display_clutterbar: settings.display.show_clutterbar,
+        display_playlist_numbers: settings.display.playlist_numbers,
+        display_snap_px: settings.display.snap_px,
+        visualization_analyzer_style: vis_analyzer_style(settings.visualization.analyzer_style),
+        visualization_band_width: vis_band_width(settings.visualization.band_width),
+        visualization_osc_style: vis_osc_style(settings.visualization.oscilloscope_style),
+        visualization_bar_falloff: settings.visualization.bar_falloff,
+        visualization_peak_falloff: settings.visualization.peak_falloff,
+        visualization_refresh_rate: settings.visualization.refresh_rate,
+        read_titles_on_load: settings.playback.read_titles_on_load,
+        sort_on_load: settings.playback.sort_on_load,
+        manual_advance: settings.playback.manual_advance,
+        convert_underscores: settings.display.convert_underscores,
+        convert_percent20: settings.display.convert_percent20,
         library_roots: settings.library.roots.clone(),
         library_recurse: settings.library.recurse,
         skin_path: settings.skin_path.clone(),
@@ -295,6 +309,28 @@ fn apply_preference_to_settings(
         }
         Command::SetDisplayDoubleSize(on) => settings.display.double_size = *on,
         Command::SetDisplayScrollTitle(on) => settings.display.scroll_title = *on,
+        Command::SetDisplayClutterbar(on) => settings.display.show_clutterbar = *on,
+        Command::SetDisplayPlaylistNumbers(on) => settings.display.playlist_numbers = *on,
+        Command::SetSnapPx(px) => settings.display.snap_px = *px,
+        Command::SetAnalyzerStyle(style) => {
+            settings.visualization.analyzer_style = config_analyzer_style(*style)
+        }
+        Command::SetBandWidth(width) => {
+            settings.visualization.band_width = config_band_width(*width)
+        }
+        Command::SetOscilloscopeStyle(style) => {
+            settings.visualization.oscilloscope_style = config_osc_style(*style)
+        }
+        Command::SetBarFalloff(speed) => settings.visualization.bar_falloff = *speed,
+        Command::SetPeakFalloff(speed) => settings.visualization.peak_falloff = *speed,
+        Command::SetRefreshRate(speed) => settings.visualization.refresh_rate = *speed,
+        Command::SetReadTitlesOnLoad(on_load) => {
+            settings.playback.read_titles_on_load = *on_load
+        }
+        Command::SetSortOnLoad(on) => settings.playback.sort_on_load = *on,
+        Command::SetManualAdvance(on) => settings.playback.manual_advance = *on,
+        Command::SetConvertUnderscores(on) => settings.display.convert_underscores = *on,
+        Command::SetConvertPercent20(on) => settings.display.convert_percent20 = *on,
         Command::SetLibraryRoots(roots) => settings.library.roots = roots.clone(),
         Command::SetLibraryRecurse(recurse) => settings.library.recurse = *recurse,
         Command::SetSkinPath(path) => settings.skin_path = path.clone(),
@@ -444,6 +480,19 @@ fn write_playlist(
         _ => playlist_file::write_m3u(items, base),
     };
     std::fs::write(dest, text).map_err(|error| format!("cannot write {}: {error}", dest.display()))
+}
+
+/// The player's Options-page behaviours as persisted.
+#[cfg(feature = "audio")]
+fn player_options_from(settings: &xubamp_config::Settings) -> player::PlayerOptions {
+    player::PlayerOptions {
+        read_titles_on_load: settings.playback.read_titles_on_load,
+        sort_on_load: settings.playback.sort_on_load,
+        manual_advance: settings.playback.manual_advance,
+        playlist_numbers: settings.display.playlist_numbers,
+        convert_underscores: settings.display.convert_underscores,
+        convert_percent20: settings.display.convert_percent20,
+    }
 }
 
 /// Assemble everything the file-info box shows for a track: filesystem size, header-level stream
@@ -605,6 +654,8 @@ fn main() {
         time_display: ui_time_display(settings.display.time),
         scroll_title: settings.display.scroll_title,
         double_size: settings.display.double_size,
+        show_clutterbar: settings.display.show_clutterbar,
+        snap_px: settings.display.snap_px,
         visualization_mode: match settings.visualization.mode {
             xubamp_config::VisualizationMode::Spectrum => xubamp_render::vis::VisMode::Bars,
             xubamp_config::VisualizationMode::Oscilloscope => {
@@ -680,12 +731,13 @@ fn main() {
             preamp_db: settings.equalizer.preamp_db,
             bands_db: settings.equalizer.bands_db,
         };
-        let player = Rc::new(RefCell::new(player::Player::with_settings(
+        let player = Rc::new(RefCell::new(player::Player::with_settings_and_options(
             tracks,
             settings.playback.shuffle,
             settings.playback.repeat,
             settings.playback.shuffle_morph_rate,
             equalizer,
+            player_options_from(&settings),
         )));
         let settings = Rc::new(RefCell::new(settings));
         player.borrow_mut().start(); // begin the first track
@@ -912,6 +964,18 @@ fn main() {
                             eprintln!("xubamp: loaded skin {}", path.display());
                             events.push(xubamp_wl::ExternalEvent::SkinLoaded(skin));
                         }
+                        portal_actions::Completion::LibraryRoot(root) => {
+                            let mut settings = settings.borrow_mut();
+                            if !settings.library.roots.contains(&root) {
+                                settings.library.roots.push(root.clone());
+                                if let Some(path) = settings_path.as_deref() {
+                                    if let Err(error) = xubamp_config::save(path, &settings) {
+                                        eprintln!("xubamp: cannot save library root: {error}");
+                                    }
+                                }
+                            }
+                            events.push(xubamp_wl::ExternalEvent::LibraryRootChosen(root));
+                        }
                         portal_actions::Completion::Error(error) => {
                             eprintln!("xubamp: {error}");
                         }
@@ -933,6 +997,12 @@ fn main() {
                 }
                 let mut settings = settings.borrow_mut();
                 if apply_preference_to_settings(&command, &mut settings) {
+                    // The Options-page behaviours act inside the player; refresh them from the
+                    // just-updated settings so the change is live, not only persisted.
+                    let options = player_options_from(&settings);
+                    if player.borrow().options() != options {
+                        player.borrow_mut().set_options(options);
+                    }
                     if let Some(path) = settings_path.as_deref() {
                         if let Err(error) = xubamp_config::save(path, &settings) {
                             eprintln!("xubamp: cannot save preference: {error}");
@@ -1073,6 +1143,18 @@ fn main() {
                             }
                             eprintln!("xubamp: loaded skin {}", path.display());
                             events.push(xubamp_wl::ExternalEvent::SkinLoaded(skin));
+                        }
+                        portal_actions::Completion::LibraryRoot(root) => {
+                            let mut settings = settings.borrow_mut();
+                            if !settings.library.roots.contains(&root) {
+                                settings.library.roots.push(root.clone());
+                                if let Some(path) = settings_path.as_deref() {
+                                    if let Err(error) = xubamp_config::save(path, &settings) {
+                                        eprintln!("xubamp: cannot save library root: {error}");
+                                    }
+                                }
+                            }
+                            events.push(xubamp_wl::ExternalEvent::LibraryRootChosen(root));
                         }
                         portal_actions::Completion::Error(error) => eprintln!("xubamp: {error}"),
                     }

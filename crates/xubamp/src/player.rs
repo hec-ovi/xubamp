@@ -58,6 +58,38 @@ pub struct Player {
     /// Tag-derived display names (`Artist - Title`), keyed by path, probed alongside the
     /// durations. A path with no usable tags stays absent and shows its file stem instead.
     names: HashMap<PathBuf, String>,
+    /// The classic Options-page behaviours.
+    options: PlayerOptions,
+}
+
+/// The classic Options-page behaviours the player honors, restored from settings and updated
+/// live from the Preferences window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerOptions {
+    /// Read titles (tags and durations) when tracks are added; off defers to first play.
+    pub read_titles_on_load: bool,
+    /// Sort each added batch of files alphabetically before appending.
+    pub sort_on_load: bool,
+    /// Stop at the end of a track instead of advancing.
+    pub manual_advance: bool,
+    /// Prefix playlist rows with their 1-based number.
+    pub playlist_numbers: bool,
+    /// Show underscores / `%20` in filename-derived titles as spaces.
+    pub convert_underscores: bool,
+    pub convert_percent20: bool,
+}
+
+impl Default for PlayerOptions {
+    fn default() -> Self {
+        Self {
+            read_titles_on_load: true,
+            sort_on_load: false,
+            manual_advance: false,
+            playlist_numbers: true,
+            convert_underscores: false,
+            convert_percent20: false,
+        }
+    }
 }
 
 impl Player {
@@ -75,6 +107,7 @@ impl Player {
             equalizer: EqSettings::default(),
             durations: HashMap::new(),
             names: HashMap::new(),
+            options: PlayerOptions::default(),
         };
         player.append_paths(tracks);
         player.shuffle_cycle.anchor(&player.playlist);
@@ -90,7 +123,30 @@ impl Player {
         shuffle_morph_rate: u8,
         equalizer: EqSettings,
     ) -> Self {
-        let mut player = Self::new(tracks);
+        Self::with_settings_and_options(
+            tracks,
+            shuffle,
+            repeat,
+            shuffle_morph_rate,
+            equalizer,
+            PlayerOptions::default(),
+        )
+    }
+
+    /// [`Self::with_settings`] plus the Options-page behaviours, applied before the initial
+    /// tracks are appended so read-titles-on-play defers their probing too.
+    pub fn with_settings_and_options(
+        tracks: Vec<PathBuf>,
+        shuffle: bool,
+        repeat: bool,
+        shuffle_morph_rate: u8,
+        equalizer: EqSettings,
+        options: PlayerOptions,
+    ) -> Self {
+        let mut player = Self::new(Vec::new());
+        player.options = options;
+        player.append_paths(tracks);
+        player.shuffle_cycle.anchor(&player.playlist);
         player.shuffle = shuffle;
         player.playlist.set_repeat(repeat);
         player.set_shuffle_morph_rate(shuffle_morph_rate);
@@ -109,8 +165,14 @@ impl Player {
     /// The returned stable IDs correspond one-for-one with accepted MP3/WAV paths. Unsupported
     /// extensions are ignored as a final audio-only guard after file or directory selection.
     pub fn append_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> Vec<TrackId> {
-        let accepted: Vec<PathBuf> = paths.into_iter().filter(|path| is_audio_path(path)).collect();
-        self.probe_durations(&accepted);
+        let mut accepted: Vec<PathBuf> =
+            paths.into_iter().filter(|path| is_audio_path(path)).collect();
+        if self.options.sort_on_load {
+            sort_batch(&mut accepted);
+        }
+        if self.options.read_titles_on_load {
+            self.probe_durations(&accepted);
+        }
         self.playlist.extend(accepted)
     }
 
@@ -137,10 +199,33 @@ impl Player {
     /// A track's display name: its tag-derived `Artist - Title` when the file carries tags, else
     /// the file stem, Winamp's classic fallback.
     fn display_name(&self, path: &Path) -> String {
-        self.names
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| track_title(&path.to_string_lossy()))
+        if let Some(name) = self.names.get(path) {
+            return name.clone();
+        }
+        let mut stem = track_title(&path.to_string_lossy());
+        if self.options.convert_percent20 {
+            stem = stem.replace("%20", " ");
+        }
+        if self.options.convert_underscores {
+            stem = stem.replace('_', " ");
+        }
+        stem
+    }
+
+    /// Update the Options-page behaviours live. Turning read-titles back to on-load probes
+    /// everything still unknown so the playlist fills in.
+    pub fn set_options(&mut self, options: PlayerOptions) {
+        let probe_all = options.read_titles_on_load && !self.options.read_titles_on_load;
+        self.options = options;
+        if probe_all {
+            let paths: Vec<PathBuf> = self.playlist.tracks().map(Path::to_path_buf).collect();
+            self.probe_durations(&paths);
+        }
+    }
+
+    /// The current Options-page behaviours (for folding one change back in).
+    pub fn options(&self) -> PlayerOptions {
+        self.options
     }
 
     /// The currently loaded track's path, if any.
@@ -166,14 +251,19 @@ impl Player {
     /// decoded until [`Self::start`], allowing a cancelled or invalid picker result to leave the
     /// existing playlist untouched.
     pub fn replace_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) -> usize {
-        let accepted: Vec<_> = paths
+        let mut accepted: Vec<_> = paths
             .into_iter()
             .filter(|path| is_audio_path(path))
             .collect();
         if accepted.is_empty() {
             return 0;
         }
-        self.probe_durations(&accepted);
+        if self.options.sort_on_load {
+            sort_batch(&mut accepted);
+        }
+        if self.options.read_titles_on_load {
+            self.probe_durations(&accepted);
+        }
         let repeat = self.playlist.repeat();
         self.engine = None;
         self.playlist = Playlist::new(accepted);
@@ -314,6 +404,8 @@ impl Player {
             return false;
         };
         self.engine = None; // join old workers before opening the replacement stream
+        // Read-titles-on-play: a deferred title is read the first time its track loads.
+        self.probe_durations(std::slice::from_ref(&path));
         match AudioEngine::play_with_equalizer(&path, self.equalizer_settings()) {
             Ok(engine) => {
                 let h = engine.handle();
@@ -713,6 +805,11 @@ impl Player {
         if self.stopped || !self.engine.as_ref().is_some_and(AudioEngine::is_finished) {
             return;
         }
+        if self.options.manual_advance {
+            // Classic manual advance: a finished track parks like a hard playlist end.
+            self.stopped = true;
+            return;
+        }
         if !self.advance(true) {
             // Natural end at a hard playlist boundary: leave the decoder and clock at the end. The
             // stopped marker prevents this poll from retrying forever; Play/Pause can restart it.
@@ -730,7 +827,11 @@ impl Player {
             .map(|(i, path)| {
                 let duration_secs = self.durations.get(path).copied();
                 pledit::Row {
-                    title: format!("{}. {}", i + 1, self.display_name(path)),
+                    title: if self.options.playlist_numbers {
+                        format!("{}. {}", i + 1, self.display_name(path))
+                    } else {
+                        self.display_name(path)
+                    },
                     duration: duration_secs.map(fmt_mmss).unwrap_or_default(),
                     duration_secs,
                 }
@@ -810,6 +911,15 @@ fn skip_target(current: usize, len: usize, delta: i32) -> Option<usize> {
     Some((current as i32 + delta).clamp(0, len as i32 - 1) as usize)
 }
 
+/// Sort one added batch of paths by file name (case-insensitive), the classic sort-on-load.
+fn sort_batch(paths: &mut [PathBuf]) {
+    paths.sort_by_key(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+}
+
 /// Format a whole-second track length as classic Winamp M:SS (minutes are not zero-padded).
 fn fmt_mmss(secs: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
@@ -844,6 +954,50 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].duration_secs, Some(2), "header duration probed");
         assert_eq!(rows[0].duration, "0:02");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn options_sort_numbers_conversions_and_deferred_titles_apply() {
+        let dir = std::env::temp_dir().join(format!("xubamp-opts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let later = dir.join("b_track%20x.wav");
+        let earlier = dir.join("a song.wav");
+        write_wav(&later, 48_000, 1);
+        write_wav(&earlier, 48_000, 1);
+
+        let options = PlayerOptions {
+            read_titles_on_load: false,
+            sort_on_load: true,
+            playlist_numbers: false,
+            convert_underscores: true,
+            convert_percent20: true,
+            ..Default::default()
+        };
+        let mut player = Player::with_settings_and_options(
+            vec![later.clone(), earlier.clone()],
+            false,
+            false,
+            xubamp_config::DEFAULT_SHUFFLE_MORPH_RATE,
+            EqSettings::default(),
+            options,
+        );
+        let (rows, _) = player.playlist_view();
+        assert_eq!(rows[0].title, "a song", "sorted, unnumbered");
+        assert_eq!(
+            rows[1].title, "b track x",
+            "underscores and %20 read as spaces"
+        );
+        assert_eq!(rows[0].duration_secs, None, "read-on-play defers probing");
+
+        // Flipping back to read-on-load probes everything still unknown.
+        player.set_options(PlayerOptions {
+            read_titles_on_load: true,
+            ..options
+        });
+        let (rows, _) = player.playlist_view();
+        assert_eq!(rows[0].duration_secs, Some(1));
+        assert_eq!(rows[1].duration_secs, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

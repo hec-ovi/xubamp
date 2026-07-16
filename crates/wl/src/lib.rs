@@ -9,6 +9,7 @@
 mod panes;
 
 use std::error::Error;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::reexports::calloop::{
@@ -116,6 +117,9 @@ pub enum MenuRequest {
     /// Playlist editor mutations that need the player. The window layer attaches the selection (as
     /// display-row indices) or the sort key; the application layer maps them to the player.
     Playlist(PlaylistRequest),
+    /// Scan the Audio Library roots (captured at the moment of the action, with the recurse
+    /// preference) and append the audio files found to the playlist.
+    AddLibrary { roots: Vec<PathBuf>, recurse: bool },
 }
 
 /// A playlist-editor operation to carry out on the player, emitted by the REM/SEL/MISC/LIST clusters
@@ -166,6 +170,9 @@ pub enum ExternalEvent {
     EqualizerPreset(equalizer::Preset),
     /// A fully decoded and fallback-completed skin produced off the Wayland event thread.
     SkinLoaded(Box<Skin>),
+    /// The Preferences "Add Directory..." chooser picked an Audio Library root (already
+    /// persisted by the application); refresh the open Preferences page.
+    LibraryRootChosen(PathBuf),
 }
 
 /// Result of polling application work such as a desktop-portal dialog. `pending` keeps the poll
@@ -265,6 +272,10 @@ pub struct UiOptions {
     pub scroll_title: bool,
     /// Classic double-size mode: the main window (and the linked equalizer) render at 2x.
     pub double_size: bool,
+    /// Whether the clutterbar column shows (off draws the blank strip).
+    pub show_clutterbar: bool,
+    /// Edge-snap threshold for pane drags, in pixels (0 disables).
+    pub snap_px: u8,
     pub visualization_mode: VisMode,
     pub visualization_show_peaks: bool,
     pub analyzer_style: AnalyzerStyle,
@@ -284,6 +295,8 @@ impl Default for UiOptions {
             time_display: hit::TimeDisplay::Elapsed,
             scroll_title: true,
             double_size: false,
+            show_clutterbar: true,
+            snap_px: 15,
             visualization_mode: VisMode::Bars,
             visualization_show_peaks: true,
             analyzer_style: AnalyzerStyle::Normal,
@@ -599,9 +612,11 @@ pub fn run(
         time_display: runtime.ui_options.time_display,
         scroll_title: runtime.ui_options.scroll_title,
         double_size: runtime.ui_options.double_size,
+        show_clutterbar: runtime.ui_options.show_clutterbar,
         vis: visualization,
         ..Default::default()
     };
+    panes::set_snap_px(i32::from(runtime.ui_options.snap_px));
     let fb = compose_main_window(&skin, &state);
     // Double-size renders the same skin-space frame into a 2x buffer, so the toplevel's size and
     // pool are the scaled dimensions while composition and hit-testing stay in skin space.
@@ -1367,6 +1382,13 @@ impl App {
                 self.redraw_equalizer();
             }
             ExternalEvent::SkinLoaded(skin) => self.replace_skin(*skin),
+            ExternalEvent::LibraryRootChosen(root) => {
+                let roots = &mut self.preferences_state.model.library_roots;
+                if !roots.contains(&root) {
+                    roots.push(root);
+                    self.redraw_preferences();
+                }
+            }
         }
     }
 
@@ -1811,6 +1833,15 @@ impl App {
             menu::ClassicMenuAction::TogglePlaylistEditor => self.toggle_playlist(),
             menu::ClassicMenuAction::ToggleDoubleSize => {
                 self.set_double_size(!self.double_size);
+            }
+            menu::ClassicMenuAction::PlaylistAddLibrary => {
+                let roots = self.preferences_state.model.library_roots.clone();
+                if roots.is_empty() {
+                    self.show_notice("AUDIO LIBRARY IS EMPTY: ADD FOLDERS IN PREFERENCES");
+                } else {
+                    let recurse = self.preferences_state.model.library_recurse;
+                    (self.on_menu)(MenuRequest::AddLibrary { roots, recurse });
+                }
             }
             menu::ClassicMenuAction::ToggleRepeat => {
                 (self.on_command)(hit::Command::ToggleMode(hit::ModeButton::Repeat));
@@ -2861,8 +2892,49 @@ impl App {
                         self.set_double_size(on);
                         (self.on_preferences)(preferences::Command::SetDisplayDoubleSize(on));
                     }
+                    preferences::Command::SetDisplayClutterbar(on) => {
+                        self.state.show_clutterbar = on;
+                        self.redraw();
+                        (self.on_preferences)(preferences::Command::SetDisplayClutterbar(on));
+                    }
+                    preferences::Command::SetSnapPx(px) => {
+                        panes::set_snap_px(i32::from(px));
+                        (self.on_preferences)(preferences::Command::SetSnapPx(px));
+                    }
+                    preferences::Command::SetAnalyzerStyle(style) => {
+                        self.state.vis.analyzer_style = style;
+                        self.redraw();
+                        (self.on_preferences)(preferences::Command::SetAnalyzerStyle(style));
+                    }
+                    preferences::Command::SetBandWidth(width) => {
+                        self.state.vis.band_width = width;
+                        self.redraw();
+                        (self.on_preferences)(preferences::Command::SetBandWidth(width));
+                    }
+                    preferences::Command::SetOscilloscopeStyle(style) => {
+                        self.state.vis.osc_style = style;
+                        self.redraw();
+                        (self.on_preferences)(preferences::Command::SetOscilloscopeStyle(style));
+                    }
+                    preferences::Command::SetBarFalloff(speed) => {
+                        self.state.vis.bar_falloff = speed;
+                        (self.on_preferences)(preferences::Command::SetBarFalloff(speed));
+                    }
+                    preferences::Command::SetPeakFalloff(speed) => {
+                        self.state.vis.peak_falloff = speed;
+                        (self.on_preferences)(preferences::Command::SetPeakFalloff(speed));
+                    }
+                    preferences::Command::SetRefreshRate(speed) => {
+                        self.state.vis.refresh_rate = speed;
+                        (self.on_preferences)(preferences::Command::SetRefreshRate(speed));
+                    }
                     preferences::Command::ChooseSkinFile => {
                         (self.on_menu)(MenuRequest::Action(menu::ClassicMenuAction::LoadSkin));
+                    }
+                    preferences::Command::ChooseLibraryDirectory => {
+                        (self.on_menu)(MenuRequest::Action(
+                            menu::ClassicMenuAction::LibraryAddDirectory,
+                        ));
                     }
                     preferences::Command::SetSkinPath(None) => {
                         self.replace_skin(default_skin());

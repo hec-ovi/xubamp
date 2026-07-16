@@ -189,6 +189,11 @@ pub enum ClassicMenuAction {
     PlaylistAddUrl,
     PlaylistAddDirectory,
     PlaylistAddFile,
+    /// Append every configured Audio Library root's scan to the playlist.
+    PlaylistAddLibrary,
+    /// Preferences: pick a directory to add as an Audio Library root (no menu item; a portal
+    /// request routed through the same channel as Load Skin).
+    LibraryAddDirectory,
     PlaylistRemoveSelected,
     PlaylistRemoveAll,
     PlaylistCrop,
@@ -313,8 +318,6 @@ pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
     Menu::new(vec![
         MenuItem::submenu("Play", play),
         MenuItem::separator(),
-        MenuItem::action("Main Window", ClassicMenuAction::ToggleMainWindow)
-            .with_mark(ItemMark::Check(state.main_window_open)),
         MenuItem::action("Equalizer", ClassicMenuAction::ToggleEqualizer)
             .with_mark(ItemMark::Check(state.equalizer_open)),
         MenuItem::action("Playlist Editor", ClassicMenuAction::TogglePlaylistEditor)
@@ -382,9 +385,12 @@ pub fn visualization_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
 /// The playlist editor's Add flyout.
 pub fn playlist_add_menu() -> Menu<ClassicMenuAction> {
     Menu::new(vec![
-        MenuItem::action("URL...", ClassicMenuAction::PlaylistAddUrl),
+        // Streaming is not implemented; keep the classic item visible but honestly disabled
+        // rather than silently doing nothing.
+        MenuItem::action("URL...", ClassicMenuAction::PlaylistAddUrl).with_enabled(false),
         MenuItem::action("Directory...", ClassicMenuAction::PlaylistAddDirectory),
         MenuItem::action("File...", ClassicMenuAction::PlaylistAddFile),
+        MenuItem::action("Library", ClassicMenuAction::PlaylistAddLibrary),
     ])
 }
 
@@ -1377,7 +1383,6 @@ mod tests {
             root,
             [
                 "Play",
-                "Main Window",
                 "Equalizer",
                 "Playlist Editor",
                 "Skins",
@@ -1451,8 +1456,11 @@ mod tests {
         assert_eq!(labels(submenu(&menu, "Play")), ["File..."]);
         assert_eq!(
             labels(&playlist_add_menu()),
-            ["URL...", "Directory...", "File..."]
+            ["URL...", "Directory...", "File...", "Library"]
         );
+        let add = playlist_add_menu();
+        let url = add.items.iter().find(|i| i.label == "URL...").unwrap();
+        assert!(!url.state.enabled, "streaming is not implemented");
     }
 
     #[test]

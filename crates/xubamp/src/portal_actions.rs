@@ -33,6 +33,8 @@ pub(crate) enum Completion {
     PlaylistToLoad(PathBuf),
     /// The user picked a destination to save the current playlist to.
     PlaylistToSave(PathBuf),
+    /// The user picked a directory to add as an Audio Library root.
+    LibraryRoot(PathBuf),
     Error(String),
 }
 
@@ -136,10 +138,12 @@ fn is_supported(request: &MenuRequest) -> bool {
             | MenuRequest::Action(
                 ClassicMenuAction::PlaylistAddDirectory
                     | ClassicMenuAction::PlaylistAddFile
+                    | ClassicMenuAction::LibraryAddDirectory
                     | ClassicMenuAction::LoadSkin
                     | ClassicMenuAction::EqualizerLoadEqf
             )
             | MenuRequest::SaveEqualizer(_)
+            | MenuRequest::AddLibrary { .. }
             | MenuRequest::Playlist(PlaylistRequest::Load | PlaylistRequest::Save)
     )
 }
@@ -181,6 +185,24 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
                 }
                 DialogResult::Cancelled => None,
             }),
+        MenuRequest::Action(ClassicMenuAction::LibraryAddDirectory) => chooser
+            .open_directory_blocking(None)
+            .map_err(|error| format!("cannot open directory chooser: {error}"))
+            .map(|result| match result {
+                DialogResult::Selected(root) => Some(Completion::LibraryRoot(root)),
+                DialogResult::Cancelled => None,
+            }),
+        MenuRequest::AddLibrary { roots, recurse } => {
+            let mut paths = Vec::new();
+            let mut warnings = Vec::new();
+            for root in roots {
+                let report =
+                    xubamp_library::scan(&root, xubamp_library::ScanOptions { recursive: recurse });
+                paths.extend(report.tracks);
+                warnings.extend(report.errors.into_iter().map(|error| error.to_string()));
+            }
+            Ok(Some(Completion::AddPaths { paths, warnings }))
+        }
         MenuRequest::Action(ClassicMenuAction::LoadSkin) => {
             let result = chooser
                 .open_skin_archive_blocking(None)

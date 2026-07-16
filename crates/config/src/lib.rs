@@ -77,6 +77,10 @@ pub const DEFAULT_PEAK_FALLOFF: u8 = 6;
 /// Default visualization refresh rate (snappy out of the box).
 pub const DEFAULT_VIS_REFRESH: u8 = 8;
 
+/// Classic edge-snap threshold for pane drags, and its settable ceiling.
+pub const DEFAULT_SNAP_PX: u8 = 15;
+pub const SNAP_PX_MAX: u8 = 30;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackSettings {
     pub shuffle: bool,
@@ -84,6 +88,13 @@ pub struct PlaybackSettings {
     /// Controls how much a completed shuffle order changes before a repeated cycle.
     /// This does not enable shuffle.
     pub shuffle_morph_rate: u8,
+    /// Read titles (tags and durations) when tracks are added (`true`, classic "Load") or only
+    /// when a track plays (`false`, classic "Play").
+    pub read_titles_on_load: bool,
+    /// Sort each added batch of files alphabetically before appending.
+    pub sort_on_load: bool,
+    /// Stop at the end of a track instead of advancing to the next one.
+    pub manual_advance: bool,
 }
 
 impl Default for PlaybackSettings {
@@ -92,6 +103,9 @@ impl Default for PlaybackSettings {
             shuffle: false,
             repeat: false,
             shuffle_morph_rate: DEFAULT_SHUFFLE_MORPH_RATE,
+            read_titles_on_load: true,
+            sort_on_load: false,
+            manual_advance: false,
         }
     }
 }
@@ -101,6 +115,16 @@ pub struct DisplaySettings {
     pub time: TimeDisplay,
     pub double_size: bool,
     pub scroll_title: bool,
+    /// Show the clutterbar (the O/A/I/D/V column); off draws the blank strip.
+    pub show_clutterbar: bool,
+    /// Prefix playlist rows with their 1-based number.
+    pub playlist_numbers: bool,
+    /// Edge-snap threshold for dragging the child panes, in pixels (0 disables), 0..=SNAP_PX_MAX.
+    pub snap_px: u8,
+    /// Show underscores in filename-derived titles as spaces.
+    pub convert_underscores: bool,
+    /// Show `%20` in filename-derived titles as spaces.
+    pub convert_percent20: bool,
 }
 
 impl Default for DisplaySettings {
@@ -109,6 +133,11 @@ impl Default for DisplaySettings {
             time: TimeDisplay::Elapsed,
             double_size: false,
             scroll_title: true,
+            show_clutterbar: true,
+            playlist_numbers: true,
+            snap_px: DEFAULT_SNAP_PX,
+            convert_underscores: false,
+            convert_percent20: false,
         }
     }
 }
@@ -325,6 +354,60 @@ impl Settings {
                     key,
                     &mut warnings,
                 ),
+                "display.show_clutterbar" => set_bool(
+                    value,
+                    &mut settings.display.show_clutterbar,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "display.playlist_numbers" => set_bool(
+                    value,
+                    &mut settings.display.playlist_numbers,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "display.snap_px" => match value.parse::<u8>() {
+                    Ok(v) if v <= SNAP_PX_MAX => settings.display.snap_px = v,
+                    _ => bad(
+                        &format!("expected an integer in 0..={SNAP_PX_MAX}"),
+                        &mut warnings,
+                    ),
+                },
+                "display.convert_underscores" => set_bool(
+                    value,
+                    &mut settings.display.convert_underscores,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "display.convert_percent20" => set_bool(
+                    value,
+                    &mut settings.display.convert_percent20,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "playback.read_titles" => match value {
+                    "load" => settings.playback.read_titles_on_load = true,
+                    "play" => settings.playback.read_titles_on_load = false,
+                    _ => bad("expected load or play", &mut warnings),
+                },
+                "playback.sort_on_load" => set_bool(
+                    value,
+                    &mut settings.playback.sort_on_load,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
+                "playback.manual_advance" => set_bool(
+                    value,
+                    &mut settings.playback.manual_advance,
+                    line,
+                    key,
+                    &mut warnings,
+                ),
                 "visualization.mode" => match value {
                     "spectrum" => settings.visualization.mode = VisualizationMode::Spectrum,
                     "oscilloscope" => settings.visualization.mode = VisualizationMode::Oscilloscope,
@@ -478,6 +561,46 @@ impl Settings {
         );
         line(&mut out, "display.double_size", self.display.double_size);
         line(&mut out, "display.scroll_title", self.display.scroll_title);
+        line(
+            &mut out,
+            "display.show_clutterbar",
+            self.display.show_clutterbar,
+        );
+        line(
+            &mut out,
+            "display.playlist_numbers",
+            self.display.playlist_numbers,
+        );
+        line(
+            &mut out,
+            "display.snap_px",
+            self.display.snap_px.min(SNAP_PX_MAX),
+        );
+        line(
+            &mut out,
+            "display.convert_underscores",
+            self.display.convert_underscores,
+        );
+        line(
+            &mut out,
+            "display.convert_percent20",
+            self.display.convert_percent20,
+        );
+        line(
+            &mut out,
+            "playback.read_titles",
+            if self.playback.read_titles_on_load {
+                "load"
+            } else {
+                "play"
+            },
+        );
+        line(&mut out, "playback.sort_on_load", self.playback.sort_on_load);
+        line(
+            &mut out,
+            "playback.manual_advance",
+            self.playback.manual_advance,
+        );
         line(
             &mut out,
             "visualization.mode",
@@ -856,6 +979,14 @@ mod tests {
         s.display.time = TimeDisplay::Remaining;
         s.display.double_size = true;
         s.display.scroll_title = false;
+        s.display.show_clutterbar = false;
+        s.display.playlist_numbers = false;
+        s.display.snap_px = 22;
+        s.display.convert_underscores = true;
+        s.display.convert_percent20 = true;
+        s.playback.read_titles_on_load = false;
+        s.playback.sort_on_load = true;
+        s.playback.manual_advance = true;
         s.visualization.mode = VisualizationMode::Oscilloscope;
         s.visualization.show_peaks = false;
         s.visualization.analyzer_style = AnalyzerStyle::Fire;

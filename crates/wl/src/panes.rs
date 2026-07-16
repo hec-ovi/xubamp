@@ -8,6 +8,20 @@
 /// fourteen-pixel gap snaps and a fifteen-pixel gap does not.
 pub const SNAP_DISTANCE: i32 = 15;
 
+/// The active snap threshold. The classic 15px is the default; the Preferences Display page can
+/// change it (0 disables snapping). Read on the single UI thread only.
+use std::sync::atomic::{AtomicI32, Ordering};
+static SNAP_PX: AtomicI32 = AtomicI32::new(SNAP_DISTANCE);
+
+/// Set the edge-snap threshold in pixels (0 disables).
+pub fn set_snap_px(px: i32) {
+    SNAP_PX.store(px.clamp(0, 64), Ordering::Relaxed);
+}
+
+fn snap_px() -> i32 {
+    SNAP_PX.load(Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Point {
     pub x: i32,
@@ -47,16 +61,16 @@ struct Snap {
     y: Option<i32>,
 }
 
-const fn near(a: i32, b: i32) -> bool {
-    (a - b).abs() < SNAP_DISTANCE
+fn near(a: i32, b: i32) -> bool {
+    (a - b).abs() < snap_px()
 }
 
-const fn overlaps_x(a: Rect, b: Rect) -> bool {
-    a.x <= b.right() + SNAP_DISTANCE && b.x <= a.right() + SNAP_DISTANCE
+fn overlaps_x(a: Rect, b: Rect) -> bool {
+    a.x <= b.right() + snap_px() && b.x <= a.right() + snap_px()
 }
 
-const fn overlaps_y(a: Rect, b: Rect) -> bool {
-    a.y <= b.bottom() + SNAP_DISTANCE && b.y <= a.bottom() + SNAP_DISTANCE
+fn overlaps_y(a: Rect, b: Rect) -> bool {
+    a.y <= b.bottom() + snap_px() && b.y <= a.bottom() + snap_px()
 }
 
 /// Return the coordinates that would align `moving` to `stationary`.  Axis choices follow the

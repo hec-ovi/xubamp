@@ -1,3 +1,21 @@
+xubamp (0.2.2-1) resolute; urgency=medium
+
+  * Analyzer/peak falloff is frame-rate independent: a falloff setting
+    now means the same thing at every refresh rate, fixing the glitchy
+    look of fast falloffs at high fps.
+  * The windowshade title scrolls like the original instead of sitting
+    clipped mid-glyph.
+  * The playlist's selected/total readout sits left-anchored in its
+    classic recess and never cuts its last digit; the baked mini
+    transport row under it is clickable.
+  * The Visualization preferences page no longer overlaps its header.
+  * FLAC and Ogg Vorbis are declared in the desktop file, AppStream
+    metadata, man page, and package description, so "Open with xubamp"
+    now appears for those files.
+  * Internal: dead-code audit applied; the workspace is clippy-clean.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Thu, 17 Jul 2026 00:00:00 +0000
+
 xubamp (0.2.1-1) resolute; urgency=medium
 
   * Jump-to-file (J) searches every piece of metadata (artist, album,

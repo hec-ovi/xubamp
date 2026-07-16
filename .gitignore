@@ -11,3 +11,5 @@ Cargo.lock.bak
 # Local agent resume state; never part of a source archive.
 /session
 /sessionCodexz
+# Local agent settings; never part of a source archive.
+/.claude/

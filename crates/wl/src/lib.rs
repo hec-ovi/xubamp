@@ -67,6 +67,10 @@ use wayland_client::protocol::wl_keyboard;
 /// falls back to a once-a-second cadence for the clock, so an idle window stays cheap.
 const MARQUEE_TICK: Duration = Duration::from_millis(100);
 
+/// The paused clock blink beat: the pause glyph and time digits hide and show on this cadence,
+/// the classic Winamp paused blink.
+const BLINK_TICK: Duration = Duration::from_millis(600);
+
 /// Timer backstop for the visualizer while animating. The frame-callback loop (see
 /// [`App::draw`]/[`App::on_frame`]) normally drives it at the display's refresh rate, but the timer
 /// re-arms and redraws the loop at this cadence too, so if the compositor throttles or drops the
@@ -612,6 +616,7 @@ pub fn run(
         main_shade_on_release: false,
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
+        last_blink: Instant::now(),
         qh: qh.clone(),
         frame_pending: false,
         playing: false,
@@ -694,6 +699,8 @@ struct App {
     /// When the marquee last stepped, so it advances on its own ~100ms wall clock independent of
     /// how fast the visualizer drives the redraw timer.
     last_marquee: Instant,
+    /// When the paused blink last toggled, so it beats on its own ~600ms wall clock.
+    last_blink: Instant,
     /// The compositor, kept so a cursor surface can be created when the pointer is set up.
     compositor: CompositorState,
     /// Positions the playlist and equalizer as child panes of the main toplevel.
@@ -1042,6 +1049,21 @@ impl App {
         }
     }
 
+    /// Advance the paused blink on its ~600ms wall clock; outside pause, leave a stale hidden
+    /// phase immediately so the clock never sticks in its off beat. Returns whether the shown
+    /// display changed.
+    fn step_blink(&mut self) -> bool {
+        if self.state.status == hit::PlayStatus::Paused {
+            if self.last_blink.elapsed() >= BLINK_TICK {
+                self.last_blink = Instant::now();
+                return self.state.on_blink();
+            }
+            false
+        } else {
+            self.state.on_blink()
+        }
+    }
+
     /// A compositor frame callback: the display is ready for the next frame. Step the clock, marquee
     /// and visualizer and redraw. The redraw re-arms the next frame callback while still animating,
     /// so this self-sustains at the display's refresh rate; when playback stops it does not re-arm
@@ -1097,9 +1119,10 @@ impl App {
             self.frame_pending = false;
             // Not playing, so no frame callbacks. When STOPPED the visualizer settles to baseline
             // (step_vis advances with silence and reports the change); when merely PAUSED it stays
-            // frozen. The clock and marquee keep moving regardless.
+            // frozen. The clock and marquee keep moving regardless, and the paused clock blinks.
             let vis_changed = self.step_vis();
-            if changed || vis_changed {
+            let blink_changed = self.step_blink();
+            if changed || vis_changed || blink_changed {
                 self.redraw();
             }
             if vis_changed {
@@ -1110,6 +1133,9 @@ impl App {
                 && marquee::is_scrolling(&self.state.title)
             {
                 MARQUEE_TICK
+            } else if self.state.status == hit::PlayStatus::Paused {
+                // Keep ticking on the blink beat so the paused clock actually blinks.
+                BLINK_TICK
             } else {
                 Duration::from_secs(1)
             }

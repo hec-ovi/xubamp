@@ -96,19 +96,22 @@ pub fn compose(skin: &Skin, state: &UiState) -> Framebuffer {
     }
     // Mini clock: the selected MM:SS representation in the small text.bmp font, blank when that
     // value is unavailable. Remaining mode uses the compact font's leading minus glyph. The four
-    // digit cells sit at fixed x offsets, minutes then seconds.
+    // digit cells sit at fixed x offsets, minutes then seconds. While paused the digits share the
+    // classic blink with the expanded clock.
     if let (Some(text), Some(secs)) = (&skin.text, state.displayed_time()) {
-        if state.time_display == hit::TimeDisplay::Remaining {
-            if let Some(cell) = textfont::cell('-') {
-                blit(&mut fb, text, cell, 128, sprites::SHADE_TIME_Y);
+        if !state.blink_hides() {
+            if state.time_display == hit::TimeDisplay::Remaining {
+                if let Some(cell) = textfont::cell('-') {
+                    blit(&mut fb, text, cell, 128, sprites::SHADE_TIME_Y);
+                }
             }
-        }
-        for (&x, &d) in sprites::SHADE_TIME_DIGITS_X
-            .iter()
-            .zip(mmss_digits(secs).iter())
-        {
-            if let Some(cell) = textfont::cell((b'0' + d) as char) {
-                blit(&mut fb, text, cell, x, sprites::SHADE_TIME_Y);
+            for (&x, &d) in sprites::SHADE_TIME_DIGITS_X
+                .iter()
+                .zip(mmss_digits(secs).iter())
+            {
+                if let Some(cell) = textfont::cell((b'0' + d) as char) {
+                    blit(&mut fb, text, cell, x, sprites::SHADE_TIME_Y);
+                }
             }
         }
     }

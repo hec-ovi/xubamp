@@ -136,6 +136,15 @@ pub const TRANSPORT_ORDER: [Transport; 6] = [
     Transport::Eject,
 ];
 
+/// The transport status shown by the classic indicator (from `playpaus.bmp`) left of the clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlayStatus {
+    Playing,
+    Paused,
+    #[default]
+    Stopped,
+}
+
 /// An interactive region of the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Region {
@@ -380,6 +389,12 @@ pub struct UiState {
     pub pressed_mode: Option<ModeButton>,
     /// Whether the MM:SS clock shows elapsed time or a remaining-time countdown.
     pub time_display: TimeDisplay,
+    /// The transport status, for the classic play/pause/stop indicator left of the clock.
+    pub status: PlayStatus,
+    /// Blink phase while paused: when `true` the pause glyph and the clock digits are hidden,
+    /// giving the classic paused blink. Toggled by the platform timer via [`UiState::on_blink`];
+    /// always `false` outside of pause.
+    pub blink_hidden: bool,
     /// Elapsed play time, in whole seconds, or `None` when nothing is loaded or stopped. The
     /// platform timer refreshes it once a second via [`on_tick`]. Composition combines this with
     /// [`Self::duration`] according to [`Self::time_display`].
@@ -438,6 +453,8 @@ impl Default for UiState {
             repeat_on: false,
             pressed_mode: None,
             time_display: TimeDisplay::Elapsed,
+            status: PlayStatus::Stopped,
+            blink_hidden: false,
             elapsed: None,
             title: String::new(),
             scroll_title: true,
@@ -478,6 +495,27 @@ impl UiState {
             TimeDisplay::Elapsed => self.elapsed,
             TimeDisplay::Remaining => Some(self.duration?.saturating_sub(self.elapsed?)),
         }
+    }
+
+    /// Advance the paused blink phase: while paused, toggle whether the pause glyph and the clock
+    /// digits are hidden; in any other state make sure they show. Returns whether the display
+    /// changed (the platform timer redraws only then).
+    pub fn on_blink(&mut self) -> bool {
+        if self.status == PlayStatus::Paused {
+            self.blink_hidden = !self.blink_hidden;
+            true
+        } else if self.blink_hidden {
+            self.blink_hidden = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether the paused blink is in its hidden phase (the pause glyph and clock digits skip a
+    /// beat). Never hides anything outside of pause.
+    pub fn blink_hides(&self) -> bool {
+        self.status == PlayStatus::Paused && self.blink_hidden
     }
 }
 
@@ -906,6 +944,25 @@ pub fn on_tick(state: &mut UiState, pb: Playback) -> bool {
         state.repeat_on = pb.repeat;
         changed = true;
     }
+    // The play/pause/stop indicator. Nothing loaded (no clock at all) reads as stopped; a track
+    // that is neither playing nor stopped is paused. Leaving pause resets the blink phase so the
+    // clock never sticks in its hidden beat.
+    let status = if pb.elapsed.is_none() {
+        PlayStatus::Stopped
+    } else if pb.playing {
+        PlayStatus::Playing
+    } else if pb.stopped {
+        PlayStatus::Stopped
+    } else {
+        PlayStatus::Paused
+    };
+    if state.status != status {
+        state.status = status;
+        if status != PlayStatus::Paused {
+            state.blink_hidden = false;
+        }
+        changed = true;
+    }
     // The seek bar and time: a pointer drag owns them outright; after a committed seek (keyboard or
     // drag-release) hold the target until the engine's clock reaches it, so the thumb does not snap
     // back to the lagging pre-seek position (which made held-arrow seeks jitter back and forth).
@@ -997,6 +1054,61 @@ mod tests {
             Region::Body,
             "bottom-right of the window"
         );
+    }
+
+    #[test]
+    fn on_tick_maps_the_transport_state_to_the_status_indicator() {
+        let mut s = UiState::default();
+        assert_eq!(s.status, PlayStatus::Stopped, "fresh window reads stopped");
+        let mut pb = Playback {
+            elapsed: Some(3),
+            playing: true,
+            ..Default::default()
+        };
+        assert!(on_tick(&mut s, pb.clone()));
+        assert_eq!(s.status, PlayStatus::Playing);
+        pb.playing = false;
+        on_tick(&mut s, pb.clone());
+        assert_eq!(s.status, PlayStatus::Paused, "loaded but not playing");
+        pb.stopped = true;
+        on_tick(&mut s, pb.clone());
+        assert_eq!(s.status, PlayStatus::Stopped);
+        pb.stopped = false;
+        pb.elapsed = None;
+        on_tick(&mut s, pb);
+        assert_eq!(s.status, PlayStatus::Stopped, "nothing loaded is stopped");
+    }
+
+    #[test]
+    fn blink_toggles_only_while_paused_and_resets_on_leaving_pause() {
+        let mut s = UiState {
+            status: PlayStatus::Paused,
+            elapsed: Some(3),
+            ..Default::default()
+        };
+        assert!(!s.blink_hides(), "starts on-beat");
+        assert!(s.on_blink(), "first beat hides");
+        assert!(s.blink_hides());
+        assert!(s.on_blink(), "second beat shows again");
+        assert!(!s.blink_hides());
+
+        // While playing, on_blink never hides and reports no change.
+        s.status = PlayStatus::Playing;
+        assert!(!s.on_blink());
+        assert!(!s.blink_hides());
+
+        // Resuming out of a hidden beat unhides immediately via on_tick.
+        s.status = PlayStatus::Paused;
+        s.on_blink();
+        assert!(s.blink_hides(), "hidden while paused");
+        let pb = Playback {
+            elapsed: Some(3),
+            playing: true,
+            ..Default::default()
+        };
+        assert!(on_tick(&mut s, pb));
+        assert_eq!(s.status, PlayStatus::Playing);
+        assert!(!s.blink_hides(), "leaving pause clears the hidden phase");
     }
 
     #[test]

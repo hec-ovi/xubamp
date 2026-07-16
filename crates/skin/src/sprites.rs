@@ -186,6 +186,16 @@ pub const KHZ_X: i32 = 156;
 pub const KHZ_Y: i32 = 43;
 pub const KHZ_DIGITS: usize = 2;
 
+/// The play/pause/stop status indicator (`playpaus.bmp`, 42x9). The three 9x9 status glyphs sit
+/// at source columns 0 (play), 9 (pause), and 18 (stop) and draw at (26,28), left of the time
+/// display. The 3px-wide work-indicator columns sit at source x=36 (idle) and x=39 (busy) and
+/// draw at (24,28), butted against the status glyph. Cross-checked against Webamp's
+/// skinSprites.ts and main-window.css (which clips the work cell to 3px).
+pub const STATUS_PLAYING: Placement = Placement::new(Rect::new(0, 0, 9, 9), 26, 28);
+pub const STATUS_PAUSED: Placement = Placement::new(Rect::new(9, 0, 9, 9), 26, 28);
+pub const STATUS_STOPPED: Placement = Placement::new(Rect::new(18, 0, 9, 9), 26, 28);
+pub const STATUS_WORK_IDLE: Placement = Placement::new(Rect::new(36, 0, 3, 9), 24, 28);
+
 /// The mono/stereo indicator (`monoster.bmp`, 56x24): the lit words are the top row (y=0), the dim
 /// words the bottom row (y=12); the left block (29px) is "stereo", the right (27px) is "mono". On
 /// the window, "mono" sits at (212,41) and "stereo" at (239,41). Both are always drawn; the one

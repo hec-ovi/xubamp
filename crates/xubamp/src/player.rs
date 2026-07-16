@@ -752,7 +752,9 @@ impl Player {
                     position: if finished { Some(0.0) } else { h.position_fraction() },
                     duration: h.duration_secs(),
                     playing: h.is_playing(),
-                    stopped: self.stopped,
+                    // A naturally finished track reads as stopped (classic "ended" state), so the
+                    // status indicator shows stop and the visualizer settles, not a paused freeze.
+                    stopped: self.stopped || finished,
                     kbps: h.bitrate_kbps(),
                     khz: h.khz(),
                     channels: h.channels(),

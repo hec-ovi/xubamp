@@ -34,6 +34,9 @@ pub struct Skin {
     /// The mono/stereo indicator sheet (`monoster.bmp`, 56x24): lit words on top, unlit below.
     /// `None` skips the indicator.
     pub monoster: Option<Image>,
+    /// The play/pause/stop status sheet (`playpaus.bmp`, 42x9): the three 9x9 status glyphs plus
+    /// the 3px work-indicator columns. `None` skips the status indicator.
+    pub playpaus: Option<Image>,
     /// The shuffle/repeat/EQ/PL toggle-button sheet (`shufrep.bmp`). `None` skips those buttons.
     pub shufrep: Option<Image>,
     /// The equalizer window sheet (`eqmain.bmp`): expanded background, title bar, controls,
@@ -71,6 +74,7 @@ impl Skin {
                 .get("viscolor.txt")
                 .map(|b| VisColor::parse(&String::from_utf8_lossy(b))),
             monoster: sheet("monoster.bmp"),
+            playpaus: sheet("playpaus.bmp"),
             shufrep: sheet("shufrep.bmp"),
             eqmain: sheet("eqmain.bmp"),
             eq_ex: sheet("eq_ex.bmp"),
@@ -93,6 +97,7 @@ impl Skin {
             || self.balance.is_some()
             || self.posbar.is_some()
             || self.monoster.is_some()
+            || self.playpaus.is_some()
             || self.shufrep.is_some()
             || self.eqmain.is_some()
             || self.eq_ex.is_some()
@@ -119,6 +124,7 @@ impl Skin {
         fill!(posbar);
         fill!(viscolor);
         fill!(monoster);
+        fill!(playpaus);
         fill!(shufrep);
         fill!(eqmain);
         fill!(eq_ex);

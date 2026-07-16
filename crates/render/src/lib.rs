@@ -128,12 +128,28 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     // Time display: four digits from the number sheet, but only while the selected value is
     // available. Remaining mode derives duration - elapsed and adds the skin's classic minus
     // indicator. With nothing loaded (or no duration for a countdown), the display stays blank.
+    // While paused the digits blink: they skip the hidden phase of the blink beat.
     if let (Some(numbers), Some(secs)) = (&skin.numbers, state.displayed_time()) {
-        if state.time_display == hit::TimeDisplay::Remaining {
-            draw_time_minus(&mut fb, numbers);
+        if !state.blink_hides() {
+            if state.time_display == hit::TimeDisplay::Remaining {
+                draw_time_minus(&mut fb, numbers);
+            }
+            for (&(dx, dy), &d) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
+                blit(&mut fb, numbers, sprites::DIGITS[d as usize], dx, dy);
+            }
         }
-        for (&(dx, dy), &d) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
-            blit(&mut fb, numbers, sprites::DIGITS[d as usize], dx, dy);
+    }
+    // The play/pause/stop status indicator and its 3px work column, left of the clock. The pause
+    // glyph shares the paused blink with the digits. Skins without playpaus.bmp skip it.
+    if let Some(playpaus) = &skin.playpaus {
+        blit_placement(&mut fb, playpaus, sprites::STATUS_WORK_IDLE);
+        let glyph = match state.status {
+            hit::PlayStatus::Playing => Some(sprites::STATUS_PLAYING),
+            hit::PlayStatus::Paused => (!state.blink_hides()).then_some(sprites::STATUS_PAUSED),
+            hit::PlayStatus::Stopped => Some(sprites::STATUS_STOPPED),
+        };
+        if let Some(glyph) = glyph {
+            blit_placement(&mut fb, playpaus, glyph);
         }
     }
     // Song-title marquee: drawn from the skin's text.bmp font over the display panel. While a
@@ -290,8 +306,9 @@ fn draw_base_fallbacks(fb: &mut Framebuffer, skin: &Skin, state: &hit::UiState) 
             }
         }
     }
-    // The clock, in the built-in 5x7 font at the classic digit slots.
-    if skin.numbers.is_none() {
+    // The clock, in the built-in 5x7 font at the classic digit slots. It shares the paused blink
+    // with the skinned clock.
+    if skin.numbers.is_none() && !state.blink_hides() {
         if let Some(secs) = state.displayed_time() {
             for (&(dx, dy), &digit) in sprites::TIME_DIGITS.iter().zip(mmss_digits(secs).iter()) {
                 font::draw_text(
@@ -303,6 +320,39 @@ fn draw_base_fallbacks(fb: &mut Framebuffer, skin: &Skin, state: &hit::UiState) 
                     &digit.to_string(),
                     CYAN,
                 );
+            }
+        }
+    }
+    // The play/pause/stop status glyph at its classic slot, drawn geometrically (the built-in
+    // skin ships no playpaus.bmp). The pause glyph blinks like the clock.
+    if skin.playpaus.is_none() {
+        let (x0, y0) = (
+            sprites::STATUS_PLAYING.dst_x,
+            sprites::STATUS_PLAYING.dst_y,
+        );
+        match state.status {
+            hit::PlayStatus::Playing => {
+                // A right-pointing triangle: columns widen toward the left edge.
+                for i in 0..5 {
+                    for y in i..(9 - i) {
+                        put_rgb(fb, x0 + i, y0 + y, CYAN);
+                    }
+                }
+            }
+            hit::PlayStatus::Paused if !state.blink_hides() => {
+                for y in 0..9 {
+                    for &bar in &[1, 2, 5, 6] {
+                        put_rgb(fb, x0 + bar, y0 + y, CYAN);
+                    }
+                }
+            }
+            hit::PlayStatus::Paused => {}
+            hit::PlayStatus::Stopped => {
+                for y in 1..8 {
+                    for x in 1..8 {
+                        put_rgb(fb, x0 + x, y0 + y, CYAN);
+                    }
+                }
             }
         }
     }
@@ -810,6 +860,74 @@ mod tests {
             px(&none, stereo_x, stereo_y),
             BLUE,
             "stereo dim with no track"
+        );
+    }
+
+    #[test]
+    fn status_indicator_shows_the_transport_state_and_blinks_while_paused() {
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        const YELLOW: [u8; 4] = [255, 255, 0, 255];
+        const MAGENTA: [u8; 4] = [255, 0, 255, 255];
+        use xubamp_skin::sprites::{STATUS_PLAYING, STATUS_WORK_IDLE, TIME_DIGITS};
+        // playpaus sheet: play cell GREEN, pause BLUE, stop YELLOW, work columns MAGENTA.
+        let mut playpaus = solid(42, 9, MAGENTA);
+        for y in 0..9u32 {
+            for x in 0..27u32 {
+                let o = ((y * 42 + x) * 4) as usize;
+                let c = match x / 9 {
+                    0 => GREEN,
+                    1 => BLUE,
+                    _ => YELLOW,
+                };
+                playpaus.rgba[o..o + 4].copy_from_slice(&c);
+            }
+        }
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            numbers: Some(solid(99, 13, GREEN)),
+            playpaus: Some(playpaus),
+            ..Default::default()
+        };
+        let glyph = (STATUS_PLAYING.dst_x as u32 + 4, STATUS_PLAYING.dst_y as u32 + 4);
+        let work = (STATUS_WORK_IDLE.dst_x as u32 + 1, STATUS_WORK_IDLE.dst_y as u32 + 4);
+        let digit = (TIME_DIGITS[0].0 as u32 + 4, TIME_DIGITS[0].1 as u32 + 6);
+
+        let playing = compose_main_window(
+            &skin,
+            &hit::UiState {
+                status: hit::PlayStatus::Playing,
+                elapsed: Some(61),
+                ..Default::default()
+            },
+        );
+        assert_eq!(px(&playing, glyph.0, glyph.1), GREEN, "play glyph");
+        assert_eq!(px(&playing, work.0, work.1), MAGENTA, "idle work column");
+        assert_eq!(px(&playing, digit.0, digit.1), GREEN, "digits show");
+
+        let stopped = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(px(&stopped, glyph.0, glyph.1), YELLOW, "stop glyph");
+
+        let paused_shown = hit::UiState {
+            status: hit::PlayStatus::Paused,
+            elapsed: Some(61),
+            ..Default::default()
+        };
+        let shown = compose_main_window(&skin, &paused_shown);
+        assert_eq!(px(&shown, glyph.0, glyph.1), BLUE, "pause glyph on-beat");
+        assert_eq!(px(&shown, digit.0, digit.1), GREEN, "digits on-beat");
+        let hidden = compose_main_window(
+            &skin,
+            &hit::UiState {
+                blink_hidden: true,
+                ..paused_shown
+            },
+        );
+        assert_eq!(px(&hidden, glyph.0, glyph.1), RED, "pause glyph blinks off");
+        assert_eq!(px(&hidden, digit.0, digit.1), RED, "digits blink off");
+        assert_eq!(
+            px(&hidden, work.0, work.1),
+            MAGENTA,
+            "the work column does not blink"
         );
     }
 

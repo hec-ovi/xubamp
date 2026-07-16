@@ -2,7 +2,35 @@
 
 A from-scratch, native-Wayland reimplementation of the classic Winamp 2.9x player, built for one target: Ubuntu 26.04. No Wine, no XWayland, no widget toolkit. One 4.4 MB binary in a 1.5 MB deb that depends on libc, libgcc, PipeWire, and xkbcommon.
 
-<!-- demo GIF here: main window + EQ + playlist with the visualizer running -->
+## Showcase
+
+Classic `.wsz` skins, loaded at runtime:
+
+![Skin switching](docs/gifs/skins.gif)
+
+The equalizer and playlist dock to the main window and drag anywhere (they are Wayland child surfaces, so the cluster moves like the original):
+
+![Dragging the windows](docs/gifs/docking.gif)
+
+Windowshade mode on every pane:
+
+![Windowshade](docs/gifs/windowshade.gif)
+
+The classic menus:
+
+![Menus](docs/gifs/menus.gif)
+
+Native GNOME Preferences:
+
+![Preferences](docs/gifs/preferences.gif)
+
+The visualizer options: analyzer styles, bands, peaks, falloffs, 10 to 70 fps:
+
+![Visualization options](docs/gifs/visualization.gif)
+
+File info with editable ID3v1 tags:
+
+![File info](docs/gifs/file-info.gif)
 
 ## Install
 

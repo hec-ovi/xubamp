@@ -324,6 +324,7 @@ fn apply_ui_session(settings: &mut xubamp_config::Settings, session: xubamp_wl::
     settings.equalizer.bands_db = session.equalizer_bands_db;
     settings.display.time = config_time_display(session.time_display);
     settings.display.scroll_title = session.scroll_title;
+    settings.display.double_size = session.double_size;
     settings.visualization.mode = match session.visualization_mode {
         xubamp_render::vis::VisMode::Bars => xubamp_config::VisualizationMode::Spectrum,
         xubamp_render::vis::VisMode::Oscilloscope => {
@@ -530,6 +531,7 @@ fn main() {
     let ui_options = xubamp_wl::UiOptions {
         time_display: ui_time_display(settings.display.time),
         scroll_title: settings.display.scroll_title,
+        double_size: settings.display.double_size,
         visualization_mode: match settings.visualization.mode {
             xubamp_config::VisualizationMode::Spectrum => xubamp_render::vis::VisMode::Bars,
             xubamp_config::VisualizationMode::Oscilloscope => {
@@ -1223,6 +1225,7 @@ mod tests {
             equalizer_bands_db: [-12.0, -9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0, 12.0, 1.5],
             time_display: xubamp_render::hit::TimeDisplay::Remaining,
             scroll_title: false,
+            double_size: true,
             visualization_mode: xubamp_render::vis::VisMode::Oscilloscope,
             visualization_show_peaks: false,
             analyzer_style: xubamp_render::vis::AnalyzerStyle::Fire,
@@ -1258,6 +1261,7 @@ mod tests {
         assert_eq!(settings.equalizer.bands_db, session.equalizer_bands_db);
         assert_eq!(settings.display.time, xubamp_config::TimeDisplay::Remaining);
         assert!(!settings.display.scroll_title);
+        assert!(settings.display.double_size);
         assert_eq!(
             settings.visualization.mode,
             xubamp_config::VisualizationMode::Oscilloscope

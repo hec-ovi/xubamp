@@ -384,6 +384,42 @@ fn fallback_thumb(fb: &mut Framebuffer, track_x: i32, track_y: i32, track_w: i32
     }
 }
 
+/// Convert the RGBA framebuffer to little-endian ARGB bytes (BGRA order) into `dst`, scaling
+/// each source pixel to a `scale`x`scale` block (nearest neighbour). This is the upload path
+/// for the classic double-size mode; `scale` 1 is the plain swizzle. `dst` must be exactly
+/// `(width*scale) * (height*scale) * 4` bytes.
+pub fn write_bgra_scaled(fb: &Framebuffer, scale: u32, dst: &mut [u8]) {
+    let scale = scale.max(1) as usize;
+    let sw = fb.width as usize;
+    let dw = sw * scale;
+    assert_eq!(
+        dst.len(),
+        dw * fb.height as usize * scale * 4,
+        "destination must match the scaled dimensions"
+    );
+    for sy in 0..fb.height as usize {
+        let src_row = &fb.rgba[sy * sw * 4..(sy + 1) * sw * 4];
+        let row_start = sy * scale * dw * 4;
+        // Write the first scaled row pixel by pixel, then copy it for the block's other rows.
+        {
+            let row = &mut dst[row_start..row_start + dw * 4];
+            for (sx, px) in src_row.chunks_exact(4).enumerate() {
+                for rep in 0..scale {
+                    let o = (sx * scale + rep) * 4;
+                    row[o] = px[2];
+                    row[o + 1] = px[1];
+                    row[o + 2] = px[0];
+                    row[o + 3] = px[3];
+                }
+            }
+        }
+        for rep in 1..scale {
+            let (done, rest) = dst.split_at_mut(row_start + rep * dw * 4);
+            rest[..dw * 4].copy_from_slice(&done[row_start..row_start + dw * 4]);
+        }
+    }
+}
+
 /// Multiply an axis-aligned rectangle toward black to show a pressed control that has no skin
 /// art (the base skin's buttons, the shade strip's baked mini transport).
 pub(crate) fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
@@ -862,6 +898,31 @@ mod tests {
             BLUE,
             "stereo dim with no track"
         );
+    }
+
+    #[test]
+    fn write_bgra_scaled_doubles_pixels_and_swizzles_channels() {
+        // A 2x1 framebuffer: RED then GREEN.
+        let mut fb = Framebuffer::new(2, 1);
+        fb.rgba[0..4].copy_from_slice(&RED);
+        fb.rgba[4..8].copy_from_slice(&GREEN);
+
+        // Scale 1 is the plain RGBA->BGRA swizzle.
+        let mut flat = vec![0u8; 8];
+        write_bgra_scaled(&fb, 1, &mut flat);
+        assert_eq!(&flat[0..4], &[0, 0, 255, 255], "RED as BGRA");
+        assert_eq!(&flat[4..8], &[0, 255, 0, 255], "GREEN as BGRA");
+
+        // Scale 2: each pixel becomes a 2x2 block; both rows identical.
+        let mut doubled = vec![0u8; 4 * 2 * 4];
+        write_bgra_scaled(&fb, 2, &mut doubled);
+        let px = |x: usize, y: usize| &doubled[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4];
+        for y in 0..2 {
+            assert_eq!(px(0, y), &[0, 0, 255, 255], "red block left column");
+            assert_eq!(px(1, y), &[0, 0, 255, 255], "red block right column");
+            assert_eq!(px(2, y), &[0, 255, 0, 255], "green block left column");
+            assert_eq!(px(3, y), &[0, 255, 0, 255], "green block right column");
+        }
     }
 
     #[test]

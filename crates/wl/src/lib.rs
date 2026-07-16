@@ -229,6 +229,8 @@ impl Runtime {
 pub struct UiOptions {
     pub time_display: hit::TimeDisplay,
     pub scroll_title: bool,
+    /// Classic double-size mode: the main window (and the linked equalizer) render at 2x.
+    pub double_size: bool,
     pub visualization_mode: VisMode,
     pub visualization_show_peaks: bool,
     pub analyzer_style: AnalyzerStyle,
@@ -247,6 +249,7 @@ impl Default for UiOptions {
         Self {
             time_display: hit::TimeDisplay::Elapsed,
             scroll_title: true,
+            double_size: false,
             visualization_mode: VisMode::Bars,
             visualization_show_peaks: true,
             analyzer_style: AnalyzerStyle::Normal,
@@ -284,6 +287,7 @@ pub struct SessionState {
     pub equalizer_bands_db: [f32; 10],
     pub time_display: hit::TimeDisplay,
     pub scroll_title: bool,
+    pub double_size: bool,
     pub visualization_mode: VisMode,
     pub visualization_show_peaks: bool,
     pub analyzer_style: AnalyzerStyle,
@@ -533,7 +537,10 @@ pub fn run(
         ..Default::default()
     };
     let fb = compose_main_window(&skin, &state);
-    let (w, h) = (fb.width, fb.height);
+    // Double-size renders the same skin-space frame into a 2x buffer, so the toplevel's size and
+    // pool are the scaled dimensions while composition and hit-testing stay in skin space.
+    let ui_scale: u32 = if runtime.ui_options.double_size { 2 } else { 1 };
+    let (w, h) = (fb.width * ui_scale, fb.height * ui_scale);
 
     let surface = compositor.create_surface(&qh);
     // RequestClient: no server-side decorations. We draw the whole window ourselves.
@@ -614,6 +621,7 @@ pub fn run(
         last_click: None,
         title_last_click: None,
         main_shade_on_release: false,
+        double_size: runtime.ui_options.double_size,
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
         last_blink: Instant::now(),
@@ -792,6 +800,10 @@ struct App {
     /// the release so a quick click-then-drag still drags (the motion cancels this instead of the
     /// press swallowing the drag).
     main_shade_on_release: bool,
+    /// Classic double-size mode: the main window and the equalizer render at 2x (nearest
+    /// neighbour) and their pointer coordinates are halved back to skin space. The playlist
+    /// never doubles, as in classic Winamp.
+    double_size: bool,
     /// Polled each tick for the current track rows + playing index, to keep the playlist in sync.
     playlist_source: PlaylistSource,
     /// Non-blocking application-owned worker poller. Results are applied only on this UI thread.
@@ -826,6 +838,7 @@ impl App {
             equalizer_bands_db: self.equalizer_state.bands_db,
             time_display: self.state.time_display,
             scroll_title: self.state.scroll_title,
+            double_size: self.double_size,
             visualization_mode: self.state.vis.mode,
             visualization_show_peaks: self.state.vis.show_peaks,
             analyzer_style: self.state.vis.analyzer_style,
@@ -835,6 +848,102 @@ impl App {
             peak_falloff: self.state.vis.peak_falloff,
             refresh_rate: self.state.vis.refresh_rate,
         }
+    }
+
+    /// The main window's pixel scale: 2 in classic double-size mode, else 1. Composition and
+    /// hit-testing stay in skin space; only the uploaded buffer and pointer division scale.
+    fn scale(&self) -> i32 {
+        if self.double_size {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// The equalizer's pixel scale. Classic Winamp doubles the equalizer with the main window
+    /// (the "linked" behaviour); the playlist never doubles.
+    fn eq_scale(&self) -> i32 {
+        self.scale()
+    }
+
+    /// The main pane's rectangle at the origin, in surface pixels: skin size times the scale,
+    /// honoring windowshade.
+    fn main_rect(&self) -> panes::Rect {
+        let h = if self.state.shade {
+            xubamp_skin::sprites::MAIN_SHADE_H
+        } else {
+            xubamp_skin::sprites::MAIN_H
+        };
+        panes::Rect {
+            x: 0,
+            y: 0,
+            width: xubamp_skin::sprites::MAIN_W * self.scale(),
+            height: h * self.scale(),
+        }
+    }
+
+    /// The equalizer pane's rectangle at its current position, in surface pixels.
+    fn equalizer_rect(&self) -> panes::Rect {
+        let h = if self.equalizer_state.shade {
+            xubamp_skin::sprites::EQ_SHADE_H
+        } else {
+            xubamp_skin::sprites::EQ_H
+        };
+        panes::Rect::at(
+            self.equalizer_position,
+            xubamp_skin::sprites::EQ_W * self.eq_scale(),
+            h * self.eq_scale(),
+        )
+    }
+
+    /// Enable or disable classic double-size: resize the toplevel to the scaled fixed size,
+    /// re-dock the child panes across the size change (so a pane attached to an edge stays
+    /// attached), and push scaled buffers.
+    fn set_double_size(&mut self, on: bool) {
+        if self.double_size == on {
+            return;
+        }
+        let old_main = self.main_rect();
+        let old_equalizer = self.equalizer_rect();
+        self.double_size = on;
+        let new_main = self.main_rect();
+
+        self.equalizer_position =
+            panes::preserve_resize_attachment(old_equalizer, old_main, new_main);
+        let new_equalizer = self.equalizer_rect();
+        let playlist_h = if self.playlist_state.shade {
+            xubamp_skin::sprites::PLEDIT_SHADE_H
+        } else {
+            self.pl_size.1
+        };
+        let playlist_rect = panes::Rect::at(self.pl_position, self.pl_size.0, playlist_h);
+        let after_main = panes::preserve_resize_attachment(playlist_rect, old_main, new_main);
+        let playlist_rect = panes::Rect::at(after_main, self.pl_size.0, playlist_h);
+        self.pl_position =
+            panes::preserve_resize_attachment(playlist_rect, old_equalizer, new_equalizer);
+        if let Some(equalizer) = &mut self.equalizer {
+            equalizer.position = self.equalizer_position;
+            equalizer
+                .subsurface
+                .set_position(self.equalizer_position.x, self.equalizer_position.y);
+        }
+        if let Some(playlist) = &mut self.playlist {
+            playlist.position = self.pl_position;
+            playlist
+                .subsurface
+                .set_position(self.pl_position.x, self.pl_position.y);
+        }
+
+        let (w, h) = (new_main.width as u32, new_main.height as u32);
+        self.window.set_min_size(Some((w, h)));
+        self.window.set_max_size(Some((w, h)));
+        self.window.set_window_geometry(0, 0, w, h);
+        self.window.commit();
+        if self.configured {
+            self.redraw();
+            self.redraw_equalizer();
+        }
+        self.sync_preferences_from_ui();
     }
 
     /// Recompose the frame from the current UI state and push it to the screen. Cheap (the
@@ -870,8 +979,10 @@ impl App {
                 hit::TitleButton::Minimize => self.window.set_minimized(),
                 hit::TitleButton::Shade => self.toggle_shade(),
                 hit::TitleButton::Options => self.open_main_menu_at(panes::Point {
-                    x: xubamp_skin::sprites::TITLE_BUTTONS_PRESSED[0].dst_x,
-                    y: hit::TITLEBAR_H,
+                    // Menu anchors live in surface pixels, so the button's skin-space corner is
+                    // scaled up in double-size mode.
+                    x: xubamp_skin::sprites::TITLE_BUTTONS_PRESSED[0].dst_x * self.scale(),
+                    y: hit::TITLEBAR_H * self.scale(),
                 }),
             }
         }
@@ -896,6 +1007,7 @@ impl App {
         };
         let changed = self.preferences_state.model.display_time != time
             || self.preferences_state.model.display_scroll_title != self.state.scroll_title
+            || self.preferences_state.model.display_double_size != self.double_size
             || self.preferences_state.model.visualization_mode != visualization
             || self.preferences_state.model.visualization_show_peaks != self.state.vis.show_peaks;
         if !changed {
@@ -903,6 +1015,7 @@ impl App {
         }
         self.preferences_state.model.display_time = time;
         self.preferences_state.model.display_scroll_title = self.state.scroll_title;
+        self.preferences_state.model.display_double_size = self.double_size;
         self.preferences_state.model.visualization_mode = visualization;
         self.preferences_state.model.visualization_show_peaks = self.state.vis.show_peaks;
         self.redraw_preferences();
@@ -912,18 +1025,9 @@ impl App {
     /// and immediately attach a matching buffer. Size hints do not require the compositor to send a
     /// new configure, so waiting for one can leave the old-size surface visible indefinitely.
     fn toggle_shade(&mut self) {
-        let old_h = if self.state.shade {
-            xubamp_skin::sprites::MAIN_SHADE_H
-        } else {
-            xubamp_skin::sprites::MAIN_H
-        };
+        let old_main = self.main_rect();
         self.state.shade = !self.state.shade;
-        let w = xubamp_skin::sprites::MAIN_W as u32;
-        let h = if self.state.shade {
-            xubamp_skin::sprites::MAIN_SHADE_H
-        } else {
-            xubamp_skin::sprites::MAIN_H
-        };
+        let new_main = self.main_rect();
 
         // Preserve the direct pane graph through the main height change, including a playlist
         // attached below an equalizer which itself is attached below the main pane. Positions are
@@ -933,33 +1037,10 @@ impl App {
         } else {
             self.pl_size.1
         };
-        let old_main = panes::Rect {
-            x: 0,
-            y: 0,
-            width: xubamp_skin::sprites::MAIN_W,
-            height: old_h,
-        };
-        let new_main = panes::Rect {
-            height: h,
-            ..old_main
-        };
-        let equalizer_h = if self.equalizer_state.shade {
-            xubamp_skin::sprites::EQ_SHADE_H
-        } else {
-            xubamp_skin::sprites::EQ_H
-        };
-        let old_equalizer = panes::Rect::at(
-            self.equalizer_position,
-            xubamp_skin::sprites::EQ_W,
-            equalizer_h,
-        );
+        let old_equalizer = self.equalizer_rect();
         self.equalizer_position =
             panes::preserve_resize_attachment(old_equalizer, old_main, new_main);
-        let new_equalizer = panes::Rect::at(
-            self.equalizer_position,
-            xubamp_skin::sprites::EQ_W,
-            equalizer_h,
-        );
+        let new_equalizer = self.equalizer_rect();
         let playlist_rect = panes::Rect::at(self.pl_position, self.pl_size.0, visible_playlist_h);
         let after_main = panes::preserve_resize_attachment(playlist_rect, old_main, new_main);
         let playlist_rect = panes::Rect::at(after_main, self.pl_size.0, visible_playlist_h);
@@ -978,7 +1059,7 @@ impl App {
                 .set_position(self.pl_position.x, self.pl_position.y);
         }
 
-        let h = h as u32;
+        let (w, h) = (new_main.width as u32, new_main.height as u32);
         self.window.set_min_size(Some((w, h)));
         self.window.set_max_size(Some((w, h)));
         self.window.set_window_geometry(0, 0, w, h);
@@ -1174,20 +1255,17 @@ impl App {
     }
 
     fn draw(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
+        let scale = self.scale() as u32;
+        let (w, h) = (self.fb.width * scale, self.fb.height * scale);
         let stride = w as i32 * 4;
         let (buffer, canvas) = self
             .pool
             .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
             .expect("create wl_shm buffer");
 
-        // Framebuffer is RGBA; wl_shm Argb8888 is BGRA in little-endian memory.
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
+        // Framebuffer is RGBA; wl_shm Argb8888 is BGRA in little-endian memory. Double-size
+        // upscales each skin pixel to a 2x2 block on the way through.
+        xubamp_render::write_bgra_scaled(&self.fb, scale, canvas);
 
         // Own the surface handle so setting `frame_pending` below does not clash with a borrow of
         // `self.window`.
@@ -1291,33 +1369,29 @@ impl App {
             return;
         }
         let fb = equalizer::compose(&self.skin, &self.equalizer_state);
+        let scale = self.eq_scale() as u32;
         let equalizer = self.equalizer.as_mut().unwrap();
         equalizer.fb = fb;
-        equalizer.present();
+        equalizer.present(scale);
     }
 
     fn set_equalizer_shade(&mut self, shaded: bool) {
-        // Renderer actions are emitted after `EqState` flips, so derive the previous height from the
-        // requested destination rather than reading the already-updated flag.
+        // Renderer actions are emitted after `EqState` flips, so derive the previous height from
+        // the requested destination rather than reading the possibly-already-updated flag.
         let old_h = if shaded {
             xubamp_skin::sprites::EQ_H
         } else {
             xubamp_skin::sprites::EQ_SHADE_H
         };
+        let old_eq = panes::Rect::at(
+            self.equalizer_position,
+            xubamp_skin::sprites::EQ_W * self.eq_scale(),
+            old_h * self.eq_scale(),
+        );
         self.equalizer_state.shade = shaded;
-        let new_h = if shaded {
-            xubamp_skin::sprites::EQ_SHADE_H
-        } else {
-            xubamp_skin::sprites::EQ_H
-        };
-
         // Keep a playlist directly attached below the equalizer attached when the EQ changes
         // height. Side-by-side panes remain fixed because the equalizer width never changes.
-        let old_eq = panes::Rect::at(self.equalizer_position, xubamp_skin::sprites::EQ_W, old_h);
-        let new_eq = panes::Rect {
-            height: new_h,
-            ..old_eq
-        };
+        let new_eq = self.equalizer_rect();
         let playlist_h = if self.playlist_state.shade {
             xubamp_skin::sprites::PLEDIT_SHADE_H
         } else {
@@ -1405,9 +1479,12 @@ impl App {
         interaction.open(&model);
         let fb = menu::compose(&model, &interaction, &self.menu_theme());
         let button = xubamp_skin::sprites::EQ_PRESETS;
+        // The button's skin-space rect scales up to pane-surface pixels in double-size mode.
+        let scale = self.eq_scale();
         let position = panes::Point {
-            x: self.equalizer_position.x + button.dst_x + button.src.w - fb.width as i32,
-            y: self.equalizer_position.y + button.dst_y + button.src.h,
+            x: self.equalizer_position.x + (button.dst_x + button.src.w) * scale
+                - fb.width as i32,
+            y: self.equalizer_position.y + (button.dst_y + button.src.h) * scale,
         };
         self.open_popup_menu(
             PopupOwner::EqualizerPresets,
@@ -1425,6 +1502,7 @@ impl App {
             playlist_open: self.playlist.is_some(),
             repeat: self.state.repeat_on,
             shuffle: self.state.shuffle_on,
+            double_size: self.double_size,
             time_display: match self.state.time_display {
                 hit::TimeDisplay::Elapsed => menu::TimeDisplay::Elapsed,
                 hit::TimeDisplay::Remaining => menu::TimeDisplay::Remaining,
@@ -1434,7 +1512,6 @@ impl App {
             band_width: self.state.vis.band_width,
             osc_style: self.state.vis.osc_style,
             show_peaks: self.state.vis.show_peaks,
-            ..menu::MainMenuState::default()
         });
         let mut interaction = menu::MenuInteraction::default();
         interaction.open(&model);
@@ -1578,6 +1655,9 @@ impl App {
             }
             menu::ClassicMenuAction::ToggleEqualizer => self.toggle_equalizer(),
             menu::ClassicMenuAction::TogglePlaylistEditor => self.toggle_playlist(),
+            menu::ClassicMenuAction::ToggleDoubleSize => {
+                self.set_double_size(!self.double_size);
+            }
             menu::ClassicMenuAction::ToggleRepeat => {
                 (self.on_command)(hit::Command::ToggleMode(hit::ModeButton::Repeat));
             }
@@ -1915,6 +1995,9 @@ impl App {
     }
 
     fn equalizer_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        // `x`/`y` are raw pane-surface pixels (drag/snap geometry works in that space); the
+        // skin hit-testing coordinates are halved back to skin space in double-size mode.
+        let (hx, hy) = (x / self.eq_scale(), y / self.eq_scale());
         match kind {
             PointerEventKind::Enter { .. } => {
                 if let Some(pointer) = &self.pointer {
@@ -1922,7 +2005,7 @@ impl App {
                 }
             }
             PointerEventKind::Press { button, .. } if *button == BTN_LEFT => {
-                let outcome = equalizer::on_press(&mut self.equalizer_state, x, y);
+                let outcome = equalizer::on_press(&mut self.equalizer_state, hx, hy);
                 // Title-bar and dead-area presses both arm a pane drag; only a title-bar press
                 // takes part in the double-click shade toggle, and that toggle is deferred to the
                 // release so a quick click-then-drag still drags.
@@ -1968,27 +2051,13 @@ impl App {
                     let dy = pointer.y - drag.press.y;
                     if drag.moved || hit::exceeds_move_threshold(dx, dy) {
                         drag.moved = true;
+                        let template = self.equalizer_rect();
                         let proposed = panes::Rect {
                             x: drag.origin.x + dx,
                             y: drag.origin.y + dy,
-                            width: xubamp_skin::sprites::EQ_W,
-                            height: if self.equalizer_state.shade {
-                                xubamp_skin::sprites::EQ_SHADE_H
-                            } else {
-                                xubamp_skin::sprites::EQ_H
-                            },
+                            ..template
                         };
-                        let main = panes::Rect {
-                            x: 0,
-                            y: 0,
-                            width: xubamp_skin::sprites::MAIN_W,
-                            height: if self.state.shade {
-                                xubamp_skin::sprites::MAIN_SHADE_H
-                            } else {
-                                xubamp_skin::sprites::MAIN_H
-                            },
-                        };
-                        let mut stationary = vec![main];
+                        let mut stationary = vec![self.main_rect()];
                         if let Some(playlist) = &self.playlist {
                             stationary.push(panes::Rect::at(
                                 playlist.position,
@@ -2009,7 +2078,7 @@ impl App {
                     }
                     return;
                 }
-                let outcome = equalizer::on_motion(&mut self.equalizer_state, x, y);
+                let outcome = equalizer::on_motion(&mut self.equalizer_state, hx, hy);
                 self.apply_equalizer(outcome);
             }
             PointerEventKind::Release { button, .. } if *button == BTN_LEFT => {
@@ -2020,7 +2089,7 @@ impl App {
                     // toggles the compact strip now.
                     toggle_shade = std::mem::take(&mut eq.shade_on_release);
                 }
-                let outcome = equalizer::on_release(&mut self.equalizer_state, x, y);
+                let outcome = equalizer::on_release(&mut self.equalizer_state, hx, hy);
                 self.apply_equalizer(outcome);
                 if toggle_shade {
                     self.set_equalizer_shade(!self.equalizer_state.shade);
@@ -2195,27 +2264,9 @@ impl App {
                             width,
                             height,
                         };
-                        let main = panes::Rect {
-                            x: 0,
-                            y: 0,
-                            width: xubamp_skin::sprites::MAIN_W,
-                            height: if self.state.shade {
-                                xubamp_skin::sprites::MAIN_SHADE_H
-                            } else {
-                                xubamp_skin::sprites::MAIN_H
-                            },
-                        };
-                        let mut stationary = vec![main];
-                        if let Some(equalizer) = &self.equalizer {
-                            stationary.push(panes::Rect::at(
-                                equalizer.position,
-                                xubamp_skin::sprites::EQ_W,
-                                if self.equalizer_state.shade {
-                                    xubamp_skin::sprites::EQ_SHADE_H
-                                } else {
-                                    xubamp_skin::sprites::EQ_H
-                                },
-                            ));
+                        let mut stationary = vec![self.main_rect()];
+                        if self.equalizer.is_some() {
+                            stationary.push(self.equalizer_rect());
                         }
                         let position = panes::snap_to_many(proposed, &stationary);
                         self.pl_position = position;
@@ -2503,6 +2554,10 @@ impl App {
                             enabled,
                         ));
                     }
+                    preferences::Command::SetDisplayDoubleSize(on) => {
+                        self.set_double_size(on);
+                        (self.on_preferences)(preferences::Command::SetDisplayDoubleSize(on));
+                    }
                     preferences::Command::ChooseSkinFile => {
                         (self.on_menu)(MenuRequest::Action(menu::ClassicMenuAction::LoadSkin));
                     }
@@ -2768,19 +2823,14 @@ impl PlaylistWin {
 }
 
 impl EqualizerWin {
-    fn present(&mut self) {
-        let (w, h) = (self.fb.width, self.fb.height);
+    fn present(&mut self, scale: u32) {
+        let (w, h) = (self.fb.width * scale, self.fb.height * scale);
         let stride = w as i32 * 4;
         let (buffer, canvas) = self
             .pool
             .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
             .expect("create equalizer wl_shm buffer");
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(self.fb.rgba.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = src[3];
-        }
+        xubamp_render::write_bgra_scaled(&self.fb, scale, canvas);
         self.surface.damage_buffer(0, 0, w as i32, h as i32);
         buffer
             .attach_to(&self.surface)
@@ -3018,6 +3068,8 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
+            // Raw surface coordinates: subsurface positioning (menu anchors, pane drags) works in
+            // this space. Skin hit-testing divides by the window's scale in double-size mode.
             let (x, y) = (event.position.0 as i32, event.position.1 as i32);
             let on_main = event.surface == *self.window.wl_surface();
             let on_popup = !on_main
@@ -3105,6 +3157,8 @@ impl PointerHandler for App {
             if !on_main {
                 continue; // an event for some other surface (e.g. the cursor surface)
             }
+            // Skin space: double-size halves the raw coordinates back to the 275x116 layout.
+            let (x, y) = (x / self.scale(), y / self.scale());
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     // Set a normal arrow cursor; without this the window shows whatever cursor was
@@ -3297,6 +3351,11 @@ impl App {
                 }
                 Keysym::p | Keysym::P => {
                     self.open_preferences();
+                    return;
+                }
+                Keysym::d | Keysym::D => {
+                    // Ctrl+D is the classic double-size toggle.
+                    self.set_double_size(!self.double_size);
                     return;
                 }
                 Keysym::a | Keysym::A => {

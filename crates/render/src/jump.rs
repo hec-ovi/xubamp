@@ -56,8 +56,8 @@ pub struct JumpState {
     /// First visible match position (list scroll).
     pub scroll: usize,
     /// Fractional wheel rows carried between events, so trackpad deltas smaller than one
-    /// row still add up to scrolling. Transient input state, never persisted.
-    wheel_rem: f32,
+    /// row still add up to scrolling. Transient input state, never persisted; leave at 0.
+    pub wheel_rem: f32,
 }
 
 impl JumpState {

@@ -167,7 +167,7 @@ fn in_mini_time(width: i32, height: i32, x: i32, y: i32) -> bool {
 /// playlist bottom-right layout (Webamp: `.mini-time` at (66,23) of the right-anchored 150px
 /// section).
 const MINI_TIME_RIGHT: i32 = 84;
-const MINI_TIME_BOTTOM: i32 = 15;
+const MINI_TIME_BOTTOM: i32 = 16;
 
 /// The six baked mini transport glyphs (previous, play, pause, stop, next, eject) on the row
 /// under the running-time display. Webamp does not implement them, so the row's geometry is
@@ -635,11 +635,10 @@ fn draw_running_time(
     );
 }
 
-/// The running-time display's distance in from the right edge and up from the bottom: 7px into
-/// the classic right-anchored 150px section (Webamp's layout), vertically as verified against
-/// the live skin recess.
-const RUNTIME_RIGHT: i32 = 143;
-const RUNTIME_BOTTOM: i32 = 25;
+/// The running-time display's distance in from the right edge and up from the bottom, measured
+/// pixel-exact against the live skin recess (10px into the classic right-anchored section).
+const RUNTIME_RIGHT: i32 = 140;
+const RUNTIME_BOTTOM: i32 = 28;
 
 /// Draw the live mini clock in its classic bottom-bar slot: `MM:SS` of the current track (a
 /// leading minus in remaining mode), in the playlist's current-track colour. Blank when nothing

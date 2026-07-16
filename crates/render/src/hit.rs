@@ -909,9 +909,24 @@ pub fn on_key(state: &mut UiState, key: KeyPress, is_repeat: bool) -> Outcome {
         KeyPress::Down => volume_key(state, -VOLUME_STEP),
         KeyPress::Right => seek_key(state, SEEK_STEP_SECS),
         KeyPress::Left => seek_key(state, -SEEK_STEP_SECS),
-        // Any other character key is unbound (for now: r/s/l and the rest arrive with the playlist
-        // and equalizer).
+        // Mode toggles: once per press, like the transport keys.
+        KeyPress::Char('r') => mode_key(is_repeat, ModeButton::Repeat),
+        KeyPress::Char('s') => mode_key(is_repeat, ModeButton::Shuffle),
+        // L is the classic open-file dialog, the Eject button's action.
+        KeyPress::Char('l') => transport_key(is_repeat, Transport::Eject),
+        // Any other character key is unbound.
         KeyPress::Char(_) => Outcome::default(),
+    }
+}
+
+/// A shuffle/repeat toggle shortcut: once per press, auto-repeats swallowed.
+fn mode_key(is_repeat: bool, m: ModeButton) -> Outcome {
+    if is_repeat {
+        return Outcome::default();
+    }
+    Outcome {
+        command: Some(Command::ToggleMode(m)),
+        ..Default::default()
     }
 }
 
@@ -2153,6 +2168,26 @@ mod tests {
                 repeat,
                 Outcome::default(),
                 "{ch} held emits nothing on repeat"
+            );
+        }
+    }
+
+    #[test]
+    fn r_s_and_l_keys_map_to_repeat_shuffle_and_the_open_dialog() {
+        let mut s = UiState::default();
+        let out = on_key(&mut s, KeyPress::Char('r'), false);
+        assert_eq!(out.command, Some(Command::ToggleMode(ModeButton::Repeat)));
+        let out = on_key(&mut s, KeyPress::Char('s'), false);
+        assert_eq!(out.command, Some(Command::ToggleMode(ModeButton::Shuffle)));
+        // L is the classic open-file dialog: exactly what the Eject button does.
+        let out = on_key(&mut s, KeyPress::Char('l'), false);
+        assert_eq!(out.command, Some(Command::Transport(Transport::Eject)));
+        // All three fire once and swallow auto-repeat.
+        for ch in ['r', 's', 'l'] {
+            assert_eq!(
+                on_key(&mut s, KeyPress::Char(ch), true),
+                Outcome::default(),
+                "{ch} held: no repeat"
             );
         }
     }

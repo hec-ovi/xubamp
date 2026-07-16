@@ -3777,6 +3777,19 @@ impl App {
                 _ => {}
             }
         }
+        // Alt+3 is the classic file-info box: the selected playlist row, else the current track.
+        if m.alt && !m.ctrl && !m.logo && !is_repeat && event.keysym == Keysym::_3 {
+            let selected = self
+                .playlist
+                .as_ref()
+                .and_then(|_| self.playlist_state.selected.iter().min().copied());
+            let query = match selected {
+                Some(row) => FileInfoQuery::Row(row),
+                None => FileInfoQuery::Current,
+            };
+            self.open_file_info(query);
+            return;
+        }
         if m.ctrl || m.alt || m.logo {
             return;
         }

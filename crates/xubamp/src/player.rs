@@ -116,6 +116,8 @@ impl Player {
 
     /// Construct a player from persisted playback and equalizer settings without starting audio.
     /// Delaying playback until [`Self::start`] lets startup finish restoring all state first.
+    /// Production goes through [`Self::with_settings_and_options`]; the tests keep this shorthand.
+    #[cfg(test)]
     pub fn with_settings(
         tracks: Vec<PathBuf>,
         shuffle: bool,

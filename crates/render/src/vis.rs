@@ -589,8 +589,10 @@ mod tests {
         let loud: Vec<f32> =
             (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
 
-        let mut slow = VisState::default();
-        slow.bar_falloff = 5;
+        let mut slow = VisState {
+            bar_falloff: 5,
+            ..Default::default()
+        };
         slow.advance(&loud, 33.0);
         let mut fast = slow.clone();
 

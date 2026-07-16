@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use xubamp_skin::bmp::Image;
 use xubamp_skin::color::Rgb;
 use xubamp_skin::sprites::{self, Rect};
-use xubamp_skin::{font, Skin};
+use xubamp_skin::{font, textfont, Skin};
 
 use crate::{blit, Framebuffer};
 
@@ -150,11 +150,11 @@ fn in_scrollbar_track(width: i32, height: i32, x: i32, y: i32) -> bool {
     x >= sx && x < sx + sw && y >= sy && y < sy + sh
 }
 
-/// The live mini clock's rectangle (x, y, w, h) in the bottom bar: the classic slot left of the
-/// LIST cluster, anchored to the bottom-right like the rest of the bar. Sized for `-MM:SS` in the
-/// built-in 5x7 font.
+/// The live mini clock's click target (x, y, w, h): the recessed display baked into the skin's
+/// bottom-right art (a 34x8 black box in the classic sheet, measured from `PLEDIT.BMP`'s
+/// bottom-right tile), anchored to the bottom-right like the rest of the bar.
 pub fn mini_time_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
-    (width - MINI_TIME_RIGHT, height - MINI_TIME_BOTTOM, 36, 8)
+    (width - MINI_TIME_RIGHT - 3, height - MINI_TIME_BOTTOM - 1, 34, 8)
 }
 
 /// Is a window-local point inside the mini clock's click target?
@@ -163,11 +163,18 @@ fn in_mini_time(width: i32, height: i32, x: i32, y: i32) -> bool {
     x >= mx && x < mx + mw && y >= my && y < my + mh
 }
 
-/// The mini clock's distance in from the right edge and up from the bottom, from the classic
-/// playlist bottom-right layout (Webamp: `.mini-time` at (66,23) of the right-anchored 150px
-/// section).
+/// The mini clock's digit-slot origin: distance in from the right edge and up from the bottom,
+/// from the classic playlist bottom-right layout (Webamp: `.mini-time` at (66,23) of the
+/// right-anchored 150px section, 38px bottom bar).
 const MINI_TIME_RIGHT: i32 = 84;
-const MINI_TIME_BOTTOM: i32 = 16;
+const MINI_TIME_BOTTOM: i32 = 15;
+/// X offsets of the four `text.bmp` digit cells (minute tens/ones, second tens/ones) from the
+/// slot origin, and of the leading minus in remaining mode. The 17..20 gap between minutes and
+/// seconds is left untouched: the skin bakes the colon there in its bottom-right art, and the
+/// space left of the minutes is the guide's room for hour-long tracks. The last cell ends flush
+/// against the recess's right edge.
+const MINI_TIME_DIGITS_X: [i32; 4] = [7, 12, 20, 25];
+const MINI_TIME_SIGN_X: i32 = 1;
 
 /// The six baked mini transport glyphs (previous, play, pause, stop, next, eject) on the row
 /// under the running-time display. Webamp does not implement them, so the row's geometry is
@@ -582,7 +589,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
     }
 
     draw_running_time(&mut fb, state, &colors, w, h);
-    draw_mini_time(&mut fb, state, &colors, w, h);
+    draw_mini_time(&mut fb, skin, state, &colors, w, h);
     draw_rows(&mut fb, state, &colors, h, list_w);
     draw_scrollbar(&mut fb, skin, state, &colors, w, h);
     fb
@@ -640,11 +647,16 @@ fn draw_running_time(
 const RUNTIME_RIGHT: i32 = 140;
 const RUNTIME_BOTTOM: i32 = 28;
 
-/// Draw the live mini clock in its classic bottom-bar slot: `MM:SS` of the current track (a
-/// leading minus in remaining mode), in the playlist's current-track colour. Blank when nothing
-/// is loaded or during the paused blink's hidden beat (`state.clock` is `None` then).
+/// Draw the live mini clock in its classic bottom-bar slot: the current track's four MM:SS
+/// digits as `text.bmp` cells (a leading minus in remaining mode, a third minutes digit past
+/// 99 minutes). No colon is drawn: the skin bakes it into the recess art between the minute
+/// and second cells, and the digit slots align to that baked guide, seconds flush against the
+/// recess's right edge. Blank when nothing is loaded or during the paused blink's hidden beat
+/// (`state.clock` is `None` then). A skin with no TEXT sheet bakes no guide either, so it
+/// falls back to the built-in font, colon included.
 fn draw_mini_time(
     fb: &mut Framebuffer,
+    skin: &Skin,
     state: &PlState,
     colors: &xubamp_skin::pledit::PlEdit,
     width: i32,
@@ -653,18 +665,46 @@ fn draw_mini_time(
     let Some(secs) = state.clock else {
         return;
     };
-    let sign = if state.clock_negative { "-" } else { "" };
-    let text = format!("{}{:02}:{:02}", sign, secs / 60, secs % 60);
-    let (x, y, _, _) = mini_time_rect(width, height);
-    font::draw_text(
-        &mut fb.rgba,
-        fb.width,
-        fb.height,
-        x,
-        y,
-        &text,
-        [colors.current.r, colors.current.g, colors.current.b],
-    );
+    let x0 = width - MINI_TIME_RIGHT;
+    let y = height - MINI_TIME_BOTTOM;
+    let Some(text) = &skin.text else {
+        let sign = if state.clock_negative { "-" } else { "" };
+        let clock = format!("{}{:02}:{:02}", sign, secs / 60, secs % 60);
+        font::draw_text(
+            &mut fb.rgba,
+            fb.width,
+            fb.height,
+            x0,
+            y,
+            &clock,
+            [colors.current.r, colors.current.g, colors.current.b],
+        );
+        return;
+    };
+    let mins = secs / 60;
+    if state.clock_negative {
+        if let Some(cell) = textfont::cell('-') {
+            blit(fb, text, cell, x0 + MINI_TIME_SIGN_X, y);
+        }
+    } else if mins >= 100 {
+        // The guide's spare room: a track past 99 minutes grows a third minutes digit into
+        // the hours space (capped at 9, far past any real track).
+        let hundreds = (mins / 100).min(9) as u8;
+        if let Some(cell) = textfont::cell((b'0' + hundreds) as char) {
+            blit(fb, text, cell, x0 + MINI_TIME_SIGN_X, y);
+        }
+    }
+    let digits = [
+        (mins / 10 % 10) as u8,
+        (mins % 10) as u8,
+        (secs % 60 / 10) as u8,
+        (secs % 10) as u8,
+    ];
+    for (&dx, &d) in MINI_TIME_DIGITS_X.iter().zip(digits.iter()) {
+        if let Some(cell) = textfont::cell((b'0' + d) as char) {
+            blit(fb, text, cell, x0 + dx, y);
+        }
+    }
 }
 
 /// Compose the 14px playlist windowshade strip. The width is independent of the expanded/shaded
@@ -753,7 +793,7 @@ fn draw_fallback_expanded(
     draw_fallback_title_buttons(fb, state, w);
     draw_fallback_bottom_buttons(fb, state, w, h, colors);
     draw_running_time(fb, state, colors, w, h);
-    draw_mini_time(fb, state, colors, w, h);
+    draw_mini_time(fb, skin, state, colors, w, h);
     draw_rows(fb, state, colors, h, list_w);
     draw_scrollbar(fb, skin, state, colors, w, h);
 }
@@ -1211,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn mini_time_draws_the_live_clock_in_the_current_color_and_has_a_click_target() {
+    fn mini_time_without_a_text_sheet_falls_back_to_the_current_color_font() {
         let colors = PlEdit {
             normal_bg: Rgb::new(0, 0, 0),
             current: Rgb::new(250, 250, 250),
@@ -1253,6 +1293,80 @@ mod tests {
             region_at(&PlState::default(), w, h, mx + mw / 2, my + mh / 2),
             Region::MiniTime
         );
+    }
+
+    #[test]
+    fn mini_time_draws_text_bmp_digits_around_the_skins_baked_colon() {
+        // A text.bmp-shaped sheet where cell (row, col) is the solid colour (col+1, row+1, 128),
+        // so a drawn pixel identifies which glyph landed (digits are row 1, columns 0-9).
+        let (tw, th) = (155u32, 18u32);
+        let mut rgba = vec![0u8; (tw * th * 4) as usize];
+        for row in 0..3u32 {
+            for col in 0..31u32 {
+                let color = [(col + 1) as u8, (row + 1) as u8, 128, 255];
+                for yy in row * 6..row * 6 + 6 {
+                    for xx in col * 5..col * 5 + 5 {
+                        let o = ((yy * tw + xx) * 4) as usize;
+                        rgba[o..o + 4].copy_from_slice(&color);
+                    }
+                }
+            }
+        }
+        let skin = Skin {
+            text: Some(Image {
+                width: tw,
+                height: th,
+                rgba,
+            }),
+            ..Default::default()
+        };
+        let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
+        let (x0, y) = ((w - 84) as u32, (h - 15) as u32);
+
+        // 75s = 01:15. The four digit cells land on the Webamp slot offsets [7, 12, 20, 25];
+        // the 17..20 gap stays untouched because the skin art bakes the colon there.
+        let state = PlState {
+            clock: Some(75),
+            ..Default::default()
+        };
+        let fb = compose(&skin, &state, w, h);
+        let digit = |d: u8| [d + 1, 2, 128, 255];
+        assert_eq!(px(&fb, x0 + 7, y), digit(0), "minute tens");
+        assert_eq!(px(&fb, x0 + 12, y), digit(1), "minute ones");
+        assert_eq!(px(&fb, x0 + 20, y), digit(1), "second tens");
+        assert_eq!(px(&fb, x0 + 25, y), digit(5), "second ones");
+        assert_eq!(px(&fb, x0 + 29, y), digit(5), "seconds end flush at the recess edge");
+        let colon = [13u8, 2, 128, 255]; // ':' is row 1, column 12
+        for gx in 17..20 {
+            assert_ne!(px(&fb, x0 + gx, y), colon, "no colon of our own at +{gx}");
+        }
+        assert_ne!(
+            px(&fb, x0 + 1, y),
+            [16, 2, 128, 255],
+            "no minus in elapsed mode"
+        );
+
+        // Remaining mode: the minus cell (row 1, column 15) lands on the sign slot.
+        let negative = PlState {
+            clock: Some(75),
+            clock_negative: true,
+            ..Default::default()
+        };
+        let fb = compose(&skin, &negative, w, h);
+        assert_eq!(px(&fb, x0 + 1, y), [16, 2, 128, 255], "minus sign at +1");
+
+        // Past 99 minutes the third minutes digit grows into the guide's hours space:
+        // 6305s = 105:05.
+        let long = PlState {
+            clock: Some(6305),
+            ..Default::default()
+        };
+        let fb = compose(&skin, &long, w, h);
+        assert_eq!(px(&fb, x0 + 1, y), digit(1), "minutes hundreds in the hours space");
+        assert_eq!(px(&fb, x0 + 7, y), digit(0), "minute tens");
+        assert_eq!(px(&fb, x0 + 12, y), digit(5), "minute ones");
+        assert_eq!(px(&fb, x0 + 20, y), digit(0), "second tens");
+        assert_eq!(px(&fb, x0 + 25, y), digit(5), "second ones");
     }
 
     #[test]

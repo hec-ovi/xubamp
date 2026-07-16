@@ -361,20 +361,22 @@ mod tests {
 
     #[test]
     fn filter_also_matches_hidden_metadata() {
-        let mut state = JumpState::default();
-        state.rows = vec![
-            Row {
-                title: "1. Aphex Twin - Xtal".into(),
-                search: "aphex twin xtal selected ambient works 85-92 ambient 1992 xtal.mp3"
-                    .into(),
-                ..Default::default()
-            },
-            Row {
-                title: "2. Boards of Canada - Roygbiv".into(),
-                search: "boards of canada roygbiv music has the right to children 1998".into(),
-                ..Default::default()
-            },
-        ];
+        let mut state = JumpState {
+            rows: vec![
+                Row {
+                    title: "1. Aphex Twin - Xtal".into(),
+                    search: "aphex twin xtal selected ambient works 85-92 ambient 1992 xtal.mp3"
+                        .into(),
+                    ..Default::default()
+                },
+                Row {
+                    title: "2. Boards of Canada - Roygbiv".into(),
+                    search: "boards of canada roygbiv music has the right to children 1998".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
         // An album word matches even though no row title contains it.
         state.set_query("ambient works".into(), JUMP_H);
         assert_eq!(state.matches(), [0]);

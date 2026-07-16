@@ -384,8 +384,9 @@ fn fallback_thumb(fb: &mut Framebuffer, track_x: i32, track_y: i32, track_w: i32
     }
 }
 
-/// Multiply an axis-aligned rectangle toward black to show a pressed control on the base skin.
-fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
+/// Multiply an axis-aligned rectangle toward black to show a pressed control that has no skin
+/// art (the base skin's buttons, the shade strip's baked mini transport).
+pub(crate) fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
     for yy in y.max(0)..(y + h).min(fb.height as i32) {
         for xx in x.max(0)..(x + w).min(fb.width as i32) {
             let o = ((yy as u32 * fb.width + xx as u32) * 4) as usize;

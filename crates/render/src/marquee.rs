@@ -78,6 +78,12 @@ pub fn draw(fb: &mut Framebuffer, sheet: &Image, title: &str, offset: u32) {
     }
 }
 
+/// Draw `s` once, left-aligned at (`x`, `y`) and clipped to destination columns
+/// `[x, x + width)`: a static text strip (no scrolling) for the compact shade layouts.
+pub fn draw_clipped(fb: &mut Framebuffer, sheet: &Image, s: &str, x: i32, y: i32, width: i32) {
+    draw_str(fb, sheet, s, x, y, x, x + width);
+}
+
 /// Draw `s` starting at (`x`, `y`), advancing one [`ADVANCE`] per character, clipping every
 /// pixel to destination columns `[clip0, clip1)`. Characters with no cell advance blank.
 fn draw_str(fb: &mut Framebuffer, sheet: &Image, s: &str, mut x: i32, y: i32, clip0: i32, clip1: i32) {

@@ -12,7 +12,7 @@ use xubamp_skin::sprites::{self, Rect};
 use xubamp_skin::{textfont, Skin};
 
 use crate::hit::{self, UiState};
-use crate::{blit, blit_placement, mmss_digits, Framebuffer};
+use crate::{blit, blit_placement, darken_rect, marquee, mmss_digits, Framebuffer};
 
 /// Pixels the mini seek thumb travels across its trough: trough width minus thumb width, so the
 /// thumb is flush-left at position 0.0 and flush-right at 1.0.
@@ -44,8 +44,9 @@ fn seek_thumb(fraction: f32) -> Rect {
 }
 
 /// Compose the collapsed (windowshade) main window: the 275x14 title strip, a held title button's
-/// pressed sprite, the mini seek bar at the current position, and the mini MM:SS clock. Missing
-/// sheets are skipped (their pixels stay whatever the lower layer left), as in the full compose.
+/// pressed sprite, pressed feedback for the baked mini transport, the song title (static,
+/// clipped), the mini seek bar at the current position, and the mini MM:SS clock. Missing sheets
+/// are skipped (their pixels stay whatever the lower layer left), as in the full compose.
 pub fn compose(skin: &Skin, state: &UiState) -> Framebuffer {
     let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_SHADE_H as u32);
     // A malformed/incomplete skin must never map an all-transparent toplevel. Production's built-in
@@ -92,6 +93,29 @@ pub fn compose(skin: &Skin, state: &UiState) -> Framebuffer {
             Rect::new(0, 0, sprites::MAIN_W, sprites::MAIN_SHADE_H),
             0,
             0,
+        );
+    }
+    // A held mini transport button: the strip bakes only the up art, so darken its footprint for
+    // pressed feedback, like the other artless pressed states.
+    if let Some(held) = state.pressed {
+        if let Some((&(bx, by, bw, bh), _)) = sprites::SHADE_TRANSPORT
+            .iter()
+            .zip(hit::TRANSPORT_ORDER)
+            .find(|(_, t)| *t == held)
+        {
+            darken_rect(&mut fb, bx, by, bw, bh);
+        }
+    }
+    // The song title, static and clipped to its strip between the menu button and the mini clock
+    // (the classic shade layout does not scroll it).
+    if let Some(text) = &skin.text {
+        marquee::draw_clipped(
+            &mut fb,
+            text,
+            &state.title,
+            sprites::SHADE_TITLE_X,
+            sprites::SHADE_TIME_Y,
+            sprites::SHADE_TITLE_W,
         );
     }
     // Mini clock: the selected MM:SS representation in the small text.bmp font, blank when that
@@ -145,6 +169,98 @@ mod tests {
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     const GREEN: [u8; 4] = [0, 255, 0, 255];
     const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    #[test]
+    fn shade_draws_the_title_clipped_to_its_strip() {
+        // GREEN glyph cells over a BLUE strip: any drawn glyph pixel reads GREEN.
+        let skin = Skin {
+            titlebar: Some(solid(344, 87, BLUE)),
+            text: Some(solid(155, 18, GREEN)),
+            ..Default::default()
+        };
+        let state = UiState {
+            shade: true,
+            // 40 chars * 6px overruns the 118px strip, so the tail must clip.
+            title: "A".repeat(40),
+            ..Default::default()
+        };
+        let fb = compose(&skin, &state);
+        assert_eq!(
+            px(&fb, sprites::SHADE_TITLE_X, sprites::SHADE_TIME_Y),
+            GREEN,
+            "first glyph column drawn"
+        );
+        assert_eq!(
+            px(
+                &fb,
+                sprites::SHADE_TITLE_X + sprites::SHADE_TITLE_W - 1,
+                sprites::SHADE_TIME_Y
+            ),
+            GREEN,
+            "strip filled to its clip edge"
+        );
+        assert_eq!(
+            px(
+                &fb,
+                sprites::SHADE_TITLE_X + sprites::SHADE_TITLE_W,
+                sprites::SHADE_TIME_Y
+            ),
+            BLUE,
+            "nothing leaks past the clip edge"
+        );
+        // No title: the strip shows the background.
+        let empty = compose(
+            &skin,
+            &UiState {
+                shade: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            px(&empty, sprites::SHADE_TITLE_X, sprites::SHADE_TIME_Y),
+            BLUE,
+            "empty title draws nothing"
+        );
+    }
+
+    #[test]
+    fn shade_darkens_a_held_mini_transport_button() {
+        let skin = Skin {
+            titlebar: Some(solid(344, 87, WHITE)),
+            ..Default::default()
+        };
+        let (bx, by, bw, bh) = sprites::SHADE_TRANSPORT[1]; // play
+        let held = compose(
+            &skin,
+            &UiState {
+                shade: true,
+                pressed: Some(hit::Transport::Play),
+                ..Default::default()
+            },
+        );
+        let pressed_px = px(&held, bx + bw / 2, by + bh / 2);
+        assert!(
+            pressed_px[0] < 250 && pressed_px[0] > 0,
+            "held button footprint darkened, got {pressed_px:?}"
+        );
+        assert_eq!(
+            px(&held, bx - 2, by + bh / 2),
+            WHITE,
+            "neighbouring strip pixels untouched"
+        );
+        let released = compose(
+            &skin,
+            &UiState {
+                shade: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            px(&released, bx + bw / 2, by + bh / 2),
+            WHITE,
+            "no feedback without a held button"
+        );
+    }
 
     #[test]
     fn seek_math_round_trips_and_clamps_to_the_mini_track() {

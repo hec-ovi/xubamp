@@ -116,11 +116,11 @@ pub const SHADE_POSBAR_THUMB_RIGHT: Rect = Rect::new(23, 36, 3, 7); // >=66%
 pub const SHADE_TIME_Y: i32 = 4;
 pub const SHADE_TIME_DIGITS_X: [i32; 4] = [134, 139, 147, 152];
 
-/// The song-title strip in shade mode: the classic layout shows the title in the small TEXT.BMP
-/// font between the menu button and the mini clock, clipped (not scrolled). The glyph row shares
-/// the clock's y.
+/// The song-title strip in shade mode: the title in the small TEXT.BMP font between the menu
+/// button and the mini clock (whose leading minus slot starts at x=128), scrolling when it
+/// overruns. The glyph row shares the clock's y.
 pub const SHADE_TITLE_X: i32 = 8;
-pub const SHADE_TITLE_W: i32 = 118;
+pub const SHADE_TITLE_W: i32 = 116;
 
 /// The six transport buttons from CBUTTONS.BMP (normal state, top row), in order:
 /// previous, play, pause, stop, next, eject.

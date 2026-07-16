@@ -6,8 +6,6 @@
 //! The skin is otherwise resolved in order: `$XUBAMP_SKIN`, the saved skin, a local `skins/` test
 //! skin if one is checked out, then the built-in default (original, clean-room;
 //! `xubamp_skin::default_skin`).
-//! Transport controls, a time display, and the rest land in later phases; see
-//! `docs/ARCHITECTURE.md`.
 
 use std::path::{Path, PathBuf};
 

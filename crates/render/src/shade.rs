@@ -44,9 +44,9 @@ fn seek_thumb(fraction: f32) -> Rect {
 }
 
 /// Compose the collapsed (windowshade) main window: the 275x14 title strip, a held title button's
-/// pressed sprite, pressed feedback for the baked mini transport, the song title (static,
-/// clipped), the mini seek bar at the current position, and the mini MM:SS clock. Missing sheets
-/// are skipped (their pixels stay whatever the lower layer left), as in the full compose.
+/// pressed sprite, pressed feedback for the baked mini transport, the song title (scrolling in
+/// its narrower strip when it overruns), the mini seek bar at the current position, and the mini
+/// MM:SS clock. Missing sheets are skipped, as in the full compose.
 pub fn compose(skin: &Skin, state: &UiState) -> Framebuffer {
     let mut fb = Framebuffer::new(sprites::MAIN_W as u32, sprites::MAIN_SHADE_H as u32);
     // A malformed/incomplete skin must never map an all-transparent toplevel. Production's built-in
@@ -106,13 +106,14 @@ pub fn compose(skin: &Skin, state: &UiState) -> Framebuffer {
             darken_rect(&mut fb, bx, by, bw, bh);
         }
     }
-    // The song title, static and clipped to its strip between the menu button and the mini clock
-    // (the classic shade layout does not scroll it).
+    // The song title in its strip between the menu button and the mini clock: left-aligned when
+    // it fits, the looping marquee otherwise, like the expanded window.
     if let Some(text) = &skin.text {
-        marquee::draw_clipped(
+        marquee::draw_in(
             &mut fb,
             text,
             &state.title,
+            if state.scroll_title { state.marquee_offset } else { 0 },
             sprites::SHADE_TITLE_X,
             sprites::SHADE_TIME_Y,
             sprites::SHADE_TITLE_W,

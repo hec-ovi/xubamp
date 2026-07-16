@@ -29,7 +29,12 @@ pub fn text_px_width(text: &str) -> u32 {
 /// scrolls exactly when it does not fit [`sprites::MARQUEE_W`], which for the 5px cell means 31
 /// characters or more (31 glyphs span 155px against a 154px strip), matching the classic display.
 pub fn is_scrolling(text: &str) -> bool {
-    text_px_width(text) > sprites::MARQUEE_W as u32
+    is_scrolling_in(text, sprites::MARQUEE_W)
+}
+
+/// [`is_scrolling`] for an arbitrary strip width (the windowshade title strip is narrower).
+pub fn is_scrolling_in(text: &str, width: i32) -> bool {
+    text_px_width(text) > width as u32
 }
 
 /// Width of one full scroll loop: the title plus the separator.
@@ -41,7 +46,13 @@ fn loop_px_width(title: &str) -> u32 {
 /// width, returning `true` (it moved). Otherwise pin the offset to 0 and return `false`, so the
 /// caller can slow its timer back down when nothing is animating.
 pub fn advance(state: &mut UiState) -> bool {
-    if !state.scroll_title || !is_scrolling(&state.title) {
+    advance_in(state, sprites::MARQUEE_W)
+}
+
+/// [`advance`] against an arbitrary strip width, so the narrower windowshade strip scrolls
+/// titles that would fit the full marquee.
+pub fn advance_in(state: &mut UiState, width: i32) -> bool {
+    if !state.scroll_title || !is_scrolling_in(&state.title, width) {
         state.marquee_offset = 0;
         return false;
     }
@@ -54,14 +65,35 @@ pub fn advance(state: &mut UiState) -> bool {
 /// (`text.bmp`). A short title is drawn once, left-aligned; a long one is drawn as two loop
 /// copies so the wrap is seamless. Everything is clipped to the marquee rectangle.
 pub fn draw(fb: &mut Framebuffer, sheet: &Image, title: &str, offset: u32) {
+    draw_in(
+        fb,
+        sheet,
+        title,
+        offset,
+        sprites::MARQUEE_X,
+        sprites::MARQUEE_Y,
+        sprites::MARQUEE_W,
+    );
+}
+
+/// [`draw`] into an arbitrary strip: left-aligned when the title fits `width`, the seamless
+/// two-copy scroll loop otherwise. The windowshade title strip uses this.
+pub fn draw_in(
+    fb: &mut Framebuffer,
+    sheet: &Image,
+    title: &str,
+    offset: u32,
+    x: i32,
+    y: i32,
+    width: i32,
+) {
     if title.is_empty() {
         return;
     }
-    let clip0 = sprites::MARQUEE_X;
-    let clip1 = sprites::MARQUEE_X + sprites::MARQUEE_W;
-    let y = sprites::MARQUEE_Y;
+    let clip0 = x;
+    let clip1 = x + width;
 
-    if !is_scrolling(title) {
+    if !is_scrolling_in(title, width) {
         draw_str(fb, sheet, title, clip0, y, clip0, clip1);
         return;
     }
@@ -76,12 +108,6 @@ pub fn draw(fb: &mut Framebuffer, sheet: &Image, title: &str, offset: u32) {
         draw_str(fb, sheet, title, base, y, clip0, clip1);
         draw_str(fb, sheet, SEPARATOR, base + title_w, y, clip0, clip1);
     }
-}
-
-/// Draw `s` once, left-aligned at (`x`, `y`) and clipped to destination columns
-/// `[x, x + width)`: a static text strip (no scrolling) for the compact shade layouts.
-pub fn draw_clipped(fb: &mut Framebuffer, sheet: &Image, s: &str, x: i32, y: i32, width: i32) {
-    draw_str(fb, sheet, s, x, y, x, x + width);
 }
 
 /// Draw `s` starting at (`x`, `y`), advancing one [`ADVANCE`] per character, clipping every

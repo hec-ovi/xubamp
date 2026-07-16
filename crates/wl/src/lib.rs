@@ -1227,15 +1227,16 @@ impl App {
         }
         // The marquee steps on its OWN 100 ms clock, not once per redraw: the visualizer timer
         // redraws up to ~60 times a second, and stepping the title every frame would scroll it
-        // far too fast. Only skins with text.bmp render a marquee; the collapsed strip shows none.
+        // far too fast. Only skins with text.bmp render a marquee; the collapsed strip scrolls
+        // over its own narrower width.
         if self.state.scroll_title
-            && !self.state.shade
             && self.skin.text.is_some()
-            && marquee::is_scrolling(&self.state.title)
+            && marquee::is_scrolling_in(&self.state.title, self.title_strip_width())
         {
+            let strip_width = self.title_strip_width();
             let elapsed = self.last_marquee.elapsed();
             if elapsed >= MARQUEE_TICK {
-                changed |= marquee::advance(&mut self.state);
+                changed |= marquee::advance_in(&mut self.state, strip_width);
                 self.last_marquee = if elapsed < MARQUEE_TICK * 2 {
                     self.last_marquee + MARQUEE_TICK
                 } else {
@@ -1257,12 +1258,22 @@ impl App {
         }
         if self.playing {
             (self.sample_source)(&mut self.vis_samples);
-            self.state.vis.advance(&self.vis_samples)
+            let period = frame_fallback(self.state.vis.refresh_rate).as_millis() as f32;
+            self.state.vis.advance(&self.vis_samples, period)
         } else if self.stopped {
             self.vis_samples.iter_mut().for_each(|s| *s = 0.0);
-            self.state.vis.advance(&self.vis_samples)
+            self.state.vis.advance(&self.vis_samples, VIS_SETTLE_TICK.as_millis() as f32)
         } else {
             false // paused: frozen
+        }
+    }
+
+    /// The active title strip's width: the full marquee, or the narrower windowshade strip.
+    fn title_strip_width(&self) -> i32 {
+        if self.state.shade {
+            xubamp_skin::sprites::SHADE_TITLE_W
+        } else {
+            xubamp_skin::sprites::MARQUEE_W
         }
     }
 
@@ -1340,10 +1351,9 @@ impl App {
             }
             if vis_changed {
                 VIS_SETTLE_TICK
-            } else if !self.state.shade
-                && self.state.scroll_title
+            } else if self.state.scroll_title
                 && self.skin.text.is_some()
-                && marquee::is_scrolling(&self.state.title)
+                && marquee::is_scrolling_in(&self.state.title, self.title_strip_width())
             {
                 MARQUEE_TICK
             } else if self.state.status == hit::PlayStatus::Paused {

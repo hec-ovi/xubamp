@@ -35,6 +35,10 @@ const OSC_CENTER: i32 = 8;
 /// The falloff sliders run 1 (slowest) to [`SPEED_MAX`] (fastest): the five classic speeds.
 pub const SPEED_MAX: u8 = 5;
 
+/// The tick the classic falloff speeds were tuned for: the original advanced its visualizer at
+/// roughly 30fps, and [`AFALLOFF`]/[`PFALLOFF`] are per-tick amounts on that clock.
+const REFERENCE_PERIOD_MS: f32 = 33.0;
+
 /// Bar drop per frame (in 0..=16 units) for each falloff speed: XMMS/Audacious
 /// `vis_afalloff_speeds`.
 const AFALLOFF: [f32; 5] = [0.34, 0.5, 1.0, 1.3, 1.6];
@@ -188,15 +192,20 @@ impl VisState {
     /// stopped). For the oscilloscope the columns follow the waveform. Returns whether the drawn
     /// output changed this frame, so the caller redraws exactly the frames that move (including the
     /// final settle-to-baseline frame) and can slow its timer once nothing changes.
-    pub fn advance(&mut self, samples: &[f32]) -> bool {
+    pub fn advance(&mut self, samples: &[f32], period_ms: f32) -> bool {
+        // The classic falloff constants are per tick of the original's ~30fps vis timer. Our
+        // timer runs anywhere from 10 to ~70fps, so scale each step by the actual frame period
+        // or fast refresh rates would fall (and compound the peak speed) several times too fast,
+        // which reads as glitching.
+        let dt = (period_ms / REFERENCE_PERIOD_MS).clamp(0.1, 4.0);
         match self.mode {
             VisMode::Off => false,
             VisMode::Bars => {
                 let bands = self.band_width.bands();
                 let mut graph = [0.0f32; VIS_COLS];
                 make_log_graph(samples, &mut graph[..bands]);
-                let fall = afalloff(self.bar_falloff);
-                let mult = pfalloff(self.peak_falloff);
+                let fall = afalloff(self.bar_falloff) * dt;
+                let mult = pfalloff(self.peak_falloff).powf(dt);
                 let mut changed = false;
                 for (i, &target) in graph.iter().enumerate().take(bands) {
                     let (old_bar, old_peak) = (self.data[i], self.peaks[i]);
@@ -205,7 +214,7 @@ impl VisState {
                         self.data[i] = target;
                         if self.data[i] > self.peaks[i] {
                             self.peaks[i] = self.data[i];
-                            self.peak_speed[i] = 0.01;
+                            self.peak_speed[i] = 0.01 * dt;
                         } else {
                             self.fall_peak(i, mult);
                         }
@@ -572,17 +581,47 @@ mod tests {
     }
 
     #[test]
+    fn falloff_is_frame_rate_independent() {
+        // The same wall-clock time must fall the same distance whether it elapses as one 33ms
+        // reference tick or as many fast 14ms (~70fps) frames; otherwise fast refresh rates
+        // fall several times too fast (the reported "glitch" at high falloff + high fps).
+        let k = 30usize;
+        let loud: Vec<f32> =
+            (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
+
+        let mut slow = VisState::default();
+        slow.bar_falloff = 5;
+        slow.advance(&loud, 33.0);
+        let mut fast = slow.clone();
+
+        // 56ms of silence: one long 56ms tick vs four fast 14ms (~70fps) frames.
+        slow.advance(&[0.0f32; FFT_N], 56.0);
+        for _ in 0..4 {
+            fast.advance(&[0.0f32; FFT_N], 14.0);
+        }
+        let col = (0..VIS_COLS)
+            .max_by(|&a, &b| slow.data[a].total_cmp(&slow.data[b]))
+            .unwrap();
+        assert!(
+            (slow.data[col] - fast.data[col]).abs() < 0.01,
+            "same elapsed time falls the same distance (slow {}, fast {})",
+            slow.data[col],
+            fast.data[col]
+        );
+    }
+
+    #[test]
     fn advance_bars_rise_instantly_then_fall_gradually() {
         let mut s = VisState::default();
         let k = 60usize;
         let loud: Vec<f32> =
             (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
-        assert!(s.advance(&loud), "a tone animates the bars");
+        assert!(s.advance(&loud, 33.0), "a tone animates the bars");
         let peak_col = (0..VIS_COLS).max_by(|&a, &b| s.data[a].total_cmp(&s.data[b])).unwrap();
         let high = s.data[peak_col];
         assert!(high > 5.0, "bar rose to the tone");
         // Now feed silence: the bar falls by at most one falloff step per frame (gradual release).
-        s.advance(&[0.0f32; FFT_N]);
+        s.advance(&[0.0f32; FFT_N], 33.0);
         let after = s.data[peak_col];
         assert!(after < high, "bar falls toward silence");
         let fall = afalloff(s.bar_falloff);
@@ -596,17 +635,17 @@ mod tests {
         let k = 60usize;
         let loud: Vec<f32> =
             (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
-        s.advance(&loud);
+        s.advance(&loud, 33.0);
         let col = (0..VIS_COLS).max_by(|&a, &b| s.data[a].total_cmp(&s.data[b])).unwrap();
         let seeded = s.peaks[col];
         assert!(seeded > 5.0, "peak seeded to the tone");
         // First silent frame: the peak descends (gravity is nonzero and the sign is down).
-        s.advance(&[0.0f32; FFT_N]);
+        s.advance(&[0.0f32; FFT_N], 33.0);
         let p1 = s.peaks[col];
         let drop1 = seeded - p1;
         assert!(drop1 > 0.0, "peak falls, not rises");
         // Second silent frame: it descends further, and by MORE than the first (accelerating).
-        s.advance(&[0.0f32; FFT_N]);
+        s.advance(&[0.0f32; FFT_N], 33.0);
         let drop2 = p1 - s.peaks[col];
         assert!(drop2 > drop1, "peak fall accelerates each frame");
         // Throughout, the peak stays at or above the (faster-)falling bar.
@@ -728,7 +767,7 @@ mod tests {
         let loud: Vec<f32> =
             (0..FFT_N).map(|i| 0.9 * (TAU * k as f32 * i as f32 / FFT_N as f32).cos()).collect();
 
-        assert!(s.advance(&loud), "a tone still advances the spectrum");
+        assert!(s.advance(&loud, 33.0), "a tone still advances the spectrum");
         assert!(
             s.data.iter().any(|&bar| bar > 5.0),
             "hidden peaks do not suppress bar motion"
@@ -863,7 +902,7 @@ mod tests {
             for b in s.data.iter_mut() {
                 *b = 12.0;
             }
-            s.advance(&[0.0f32; FFT_N]); // silence: bars fall one step
+            s.advance(&[0.0f32; FFT_N], 33.0); // silence: bars fall one step
             s.data[0]
         };
         assert!(

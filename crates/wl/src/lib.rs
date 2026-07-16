@@ -75,11 +75,9 @@ const BLINK_TICK: Duration = Duration::from_millis(600);
 /// How long a marquee notice (e.g. the always-on-top explanation) stays before the title returns.
 const NOTICE_DURATION: Duration = Duration::from_secs(2);
 
-/// Timer backstop for the visualizer while animating. The frame-callback loop (see
-/// [`App::draw`]/[`App::on_frame`]) normally drives it at the display's refresh rate, but the timer
-/// re-arms and redraws the loop at this cadence too, so if the compositor throttles or drops the
-/// frame callbacks the analyzer still moves at the chosen refresh rate instead of crawling. Rate
-/// 1..=10 maps to roughly 100 ms (10 fps) down to 16 ms (~60 fps).
+/// The visualizer's animation period while playing: the redraw timer steps and repaints it at
+/// the user's refresh-rate setting. Rate 1..=10 maps to roughly 100 ms (10 fps) down to 16 ms
+/// (~60 fps).
 fn frame_fallback(refresh_rate: u8) -> Duration {
     let ms = (100u64 / u64::from(refresh_rate.clamp(1, 10))).clamp(16, 100);
     Duration::from_millis(ms)
@@ -714,7 +712,6 @@ pub fn run(
         last_blink: Instant::now(),
         notice_until: None,
         qh: qh.clone(),
-        frame_pending: false,
         playing: false,
         stopped: false,
         equalizer: None,
@@ -835,14 +832,10 @@ struct App {
     /// repeat when the seat advertises the capability. The `'static` here pins the loop's lifetime.
     #[cfg(feature = "keyboard")]
     loop_handle: LoopHandle<'static, App>,
-    /// A queue handle, kept so a redraw can request the next frame callback (the visualizer renders
-    /// off the compositor's frame callbacks while playing, for display-rate smoothness).
+    /// A queue handle, kept so child surfaces and dialogs can be created after startup.
     qh: QueueHandle<App>,
-    /// Whether a frame callback has been requested and not yet delivered, so we request at most one
-    /// in flight (a second request without a callback would stall the loop).
-    frame_pending: bool,
-    /// Whether audio is playing, from the last playback poll. Gates the frame-callback loop: the
-    /// visualizer only animates from live audio while this holds.
+    /// Whether audio is playing, from the last playback poll. The visualizer only animates from
+    /// live audio while this holds.
     playing: bool,
     /// Whether playback is stopped (vs paused), from the last poll. Stop settles the visualizer to
     /// baseline; a pause freezes it on its last frame.
@@ -1205,8 +1198,8 @@ impl App {
 
     /// Whether the visualizer should be animating from live audio right now: configured, expanded (no
     /// visualizer shows in the collapsed strip), a palette present, a mode other than Off, and audio
-    /// playing. While this holds the visualizer renders off frame callbacks; otherwise the timer
-    /// settles it to baseline.
+    /// playing. While this holds the redraw timer steps it at the refresh-rate cadence; otherwise
+    /// the timer settles it to baseline.
     fn animating(&self) -> bool {
         self.configured
             && !self.state.shade
@@ -1229,9 +1222,9 @@ impl App {
             self.state.notice = None;
             changed = true;
         }
-        // The marquee steps on its OWN 100 ms clock, not once per redraw: the frame-callback loop
-        // redraws at the display rate, and stepping the title every frame would scroll it far too
-        // fast. Only skins with text.bmp render a marquee, and the collapsed strip shows none.
+        // The marquee steps on its OWN 100 ms clock, not once per redraw: the visualizer timer
+        // redraws up to ~60 times a second, and stepping the title every frame would scroll it
+        // far too fast. Only skins with text.bmp render a marquee; the collapsed strip shows none.
         if self.state.scroll_title
             && !self.state.shade
             && self.skin.text.is_some()
@@ -1285,23 +1278,10 @@ impl App {
         }
     }
 
-    /// A compositor frame callback: the display is ready for the next frame. Step the clock, marquee
-    /// and visualizer and redraw. The redraw re-arms the next frame callback while still animating,
-    /// so this self-sustains at the display's refresh rate; when playback stops it does not re-arm
-    /// and the timer takes over the (settling) visualizer.
-    fn on_frame(&mut self) {
-        self.frame_pending = false;
-        if !self.configured {
-            return;
-        }
-        self.step_clock_and_marquee();
-        self.step_vis();
-        self.redraw();
-    }
 
-    /// Redraw-timer tick: keeps the clock and marquee moving, and either drives the settling
-    /// visualizer directly (when not animating, since there are no frame callbacks then) or just
-    /// re-arms the frame-callback loop (when animating). Returns the next timer delay.
+    /// Redraw-timer tick: keeps the clock and marquee moving and paces the visualizer, live at
+    /// the refresh-rate cadence while playing, settling to baseline after a stop. Returns the
+    /// next timer delay.
     fn tick(&mut self) -> Duration {
         let external = (self.external_source)();
         let external_pending = external.pending;
@@ -1325,23 +1305,17 @@ impl App {
             self.sync_playlist_clock();
         }
         let delay = if self.animating() {
-            // The frame-callback loop renders the visualizer. Kick it off (or restart it if it
-            // stalled) with a redraw, which re-arms the callback; otherwise just poll again soon.
-            if changed || !self.frame_pending {
-                self.redraw();
-            }
+            // The timer IS the visualizer's pacemaker: advance it from live samples and redraw at
+            // the user's refresh-rate cadence. Compositor frame callbacks are deliberately not
+            // used: their delivery is throttled or dropped at the compositor's whim (occlusion,
+            // focus), which stalled the animation to a crawl.
+            self.step_vis();
+            self.redraw();
             frame_fallback(self.state.vis.refresh_rate)
         } else {
-            // Not animating, so we neither hold nor want a frame callback. Clear the in-flight flag:
-            // if a requested callback was dropped (surface minimized/occluded while it was playing)
-            // it would otherwise latch `true` forever and, once playback resumed, both re-arm paths
-            // (guarded by `!frame_pending`) could never request another callback, permanently
-            // freezing the visualizer. A late stray callback that still arrives is harmless: it just
-            // redraws once without re-arming.
-            self.frame_pending = false;
-            // Not playing, so no frame callbacks. When STOPPED the visualizer settles to baseline
-            // (step_vis advances with silence and reports the change); when merely PAUSED it stays
-            // frozen. The clock and marquee keep moving regardless, and the paused clock blinks.
+            // Not playing. When STOPPED the visualizer settles to baseline (step_vis advances
+            // with silence and reports the change); when merely PAUSED it stays frozen. The clock
+            // and marquee keep moving regardless, and the paused clock blinks.
             let vis_changed = self.step_vis();
             let blink_changed = self.step_blink();
             if changed || vis_changed || blink_changed {
@@ -1414,17 +1388,8 @@ impl App {
         // upscales each skin pixel to a 2x2 block on the way through.
         xubamp_render::write_bgra_scaled(&self.fb, scale, canvas);
 
-        // Own the surface handle so setting `frame_pending` below does not clash with a borrow of
-        // `self.window`.
         let surface = self.window.wl_surface().clone();
         surface.damage_buffer(0, 0, w as i32, h as i32);
-        // While the visualizer is animating, ask to be woken for the next frame so it renders at the
-        // display's refresh rate. Guarded so exactly one callback is in flight; the callback and the
-        // commit below are what make it fire.
-        if self.animating() && !self.frame_pending {
-            surface.frame(&self.qh, surface.clone());
-            self.frame_pending = true;
-        }
         buffer.attach_to(&surface).expect("attach buffer");
         surface.commit();
     }
@@ -1644,6 +1609,15 @@ impl App {
             fb,
             position,
         );
+    }
+
+    /// Pop the per-track context menu (right-click on a playlist row).
+    fn open_playlist_track_menu_at(&mut self, position: panes::Point) {
+        let model = menu::playlist_track_menu();
+        let mut interaction = menu::MenuInteraction::default();
+        interaction.open(&model);
+        let fb = menu::compose(&model, &interaction, &self.menu_theme());
+        self.open_popup_menu(PopupOwner::Main, model, interaction, fb, position);
     }
 
     /// Pop the Visualization submenu standalone (the clutterbar's V button).
@@ -1948,6 +1922,11 @@ impl App {
             }
             // Everything else mutates the player, so route it to the application layer with the
             // current selection (as display-row indices) attached.
+            menu::ClassicMenuAction::PlaylistPlaySelected => {
+                if let Some(&row) = self.playlist_state.selected.iter().min() {
+                    (self.on_command)(hit::Command::PlayIndex(row));
+                }
+            }
             menu::ClassicMenuAction::PlaylistRemoveSelected => {
                 self.request_playlist(PlaylistRequest::RemoveSelected(self.selected_rows()));
             }
@@ -2397,6 +2376,7 @@ impl App {
                             pl.resize = None;
                             pl.title_last_click = None;
                         }
+                        self.playlist_state.scrollbar_pressed = true;
                         self.playlist_state.set_scroll_from_y(y, width, height);
                         self.redraw_playlist();
                     }
@@ -2539,6 +2519,9 @@ impl App {
                     // A release that completed a title-bar double-click (without becoming a drag)
                     // toggles the shade strip now.
                     toggle_shade = std::mem::take(&mut pl.shade_on_release);
+                }
+                if std::mem::take(&mut self.playlist_state.scrollbar_pressed) {
+                    self.redraw_playlist();
                 }
                 if toggle_shade {
                     self.toggle_playlist_shade();
@@ -3257,13 +3240,11 @@ impl CompositorHandler for App {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
+        _: &wl_surface::WlSurface,
         _: u32,
     ) {
-        // Only the main window drives the frame-callback (visualizer) loop; the playlist is static.
-        if surface == self.window.wl_surface() {
-            self.on_frame();
-        }
+        // The visualizer is timer-paced (see `tick`), so frame callbacks are unused: pacing off
+        // compositor callbacks stalled whenever the compositor throttled or dropped one.
     }
     fn surface_enter(
         &mut self,
@@ -3484,13 +3465,37 @@ impl PointerHandler for App {
                         y: equalizer.position.y + y,
                     })
                 } else {
-                    self.playlist
+                    let on_playlist = self
+                        .playlist
                         .as_ref()
                         .filter(|playlist| event.surface == playlist.surface)
-                        .map(|playlist| panes::Point {
-                            x: playlist.position.x + x,
-                            y: playlist.position.y + y,
+                        .map(|playlist| {
+                            (playlist.position, playlist.width, playlist.height)
+                        });
+                    if let Some((position, pw, ph)) = on_playlist {
+                        // Right-click on a track row selects it (keeping a multi-selection that
+                        // already contains it) and pops the per-track menu instead.
+                        let over_list = !self.playlist_state.shade
+                            && x < pw - xubamp_skin::sprites::PLEDIT_RIGHT_TILE.w;
+                        if let Some(row) =
+                            over_list.then(|| self.playlist_state.row_at(x, y, ph)).flatten()
+                        {
+                            self.playlist_state.click_select(row);
+                            self.redraw_playlist();
+                            self.close_popup_menu();
+                            self.open_playlist_track_menu_at(panes::Point {
+                                x: position.x + x,
+                                y: position.y + y,
+                            });
+                            continue;
+                        }
+                        Some(panes::Point {
+                            x: position.x + x,
+                            y: position.y + y,
                         })
+                    } else {
+                        None
+                    }
                 };
                 if let Some(position) = position {
                     self.close_popup_menu();
@@ -3626,6 +3631,17 @@ impl PointerHandler for App {
                         self.main_shade_on_release = false;
                         self.toggle_shade();
                     }
+                }
+                PointerEventKind::Axis { vertical, .. } => {
+                    // Wheel over the main window: balance/seek over their controls, volume
+                    // anywhere else (the classic behaviour). Wheel-up is a negative axis value.
+                    let notches = if vertical.discrete != 0 {
+                        -vertical.discrete
+                    } else {
+                        -(vertical.absolute / 15.0).round() as i32
+                    };
+                    let outcome = hit::on_wheel(&mut self.state, x, y, notches);
+                    self.apply(outcome);
                 }
                 PointerEventKind::Leave { .. } => {
                     self.armed_move = None;

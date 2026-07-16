@@ -367,6 +367,11 @@ pub const PLEDIT_H: i32 = 116;
 
 /// The playlist window's fully collapsed height. Its width is preserved while shaded and can still
 /// be resized horizontally.
+/// The playlist scrollbar handle from PLEDIT.BMP: the classic fixed 8x18 thumb, with a
+/// selected (dragged) variant beside it. Cross-checked against Webamp's skinSprites.ts.
+pub const PLEDIT_SCROLL_HANDLE: Rect = Rect::new(52, 53, 8, 18);
+pub const PLEDIT_SCROLL_HANDLE_SELECTED: Rect = Rect::new(61, 53, 8, 18);
+
 pub const PLEDIT_SHADE_H: i32 = 14;
 
 /// Classic Winamp resizes the playlist in whole segments: 25px wider or 29px taller at a time

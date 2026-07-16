@@ -235,6 +235,22 @@ impl Player {
         self.playlist.current().map(Path::to_path_buf)
     }
 
+    /// The current track's display index, for session persistence.
+    pub fn current_index(&self) -> Option<usize> {
+        self.playlist.current_index()
+    }
+
+    /// Select playlist row `index` without touching playback: the session-restore path, so the
+    /// remembered track is highlighted and armed but nothing autoplays on login.
+    pub fn restore_selection(&mut self, index: usize) {
+        let Some((id, _)) = self.playlist.entries().nth(index).map(|(id, p)| (id, p.to_owned()))
+        else {
+            return;
+        };
+        self.playlist.select_track(id);
+        self.stopped = true;
+    }
+
     /// The path of playlist row `index`, if it exists.
     pub fn track_path(&self, index: usize) -> Option<PathBuf> {
         self.playlist.tracks().nth(index).map(Path::to_path_buf)
@@ -557,7 +573,11 @@ impl Player {
             if attempted.len() >= self.playlist.len() {
                 break;
             }
-            let Some(id) = self.playlist.back_candidate(None) else {
+            // Retrace real history first; with none left, original Winamp's shuffle Previous
+            // jumps to a random other track, and the jump is committed like a Back so Next
+            // replays forward from there.
+            let fresh = self.random_back_fresh(&attempted);
+            let Some(id) = self.playlist.back_candidate(fresh) else {
                 break;
             };
             if !attempted.insert(id) {
@@ -578,6 +598,25 @@ impl Player {
             self.stopped = true;
         }
         false
+    }
+
+    /// A random non-current, not-yet-attempted track, the shuffle Previous fallback when there
+    /// is no history left to retrace. `None` on a single-track (or exhausted) list.
+    fn random_back_fresh(&self, attempted: &HashSet<TrackId>) -> Option<TrackId> {
+        let current = self
+            .playlist
+            .current_index()
+            .and_then(|index| self.playlist.track_id(index));
+        let candidates: Vec<TrackId> = self
+            .playlist
+            .entries()
+            .map(|(id, _)| id)
+            .filter(|id| Some(*id) != current && !attempted.contains(id))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(candidates[random_seed() as usize % candidates.len()])
     }
 
     /// Play the playlist track at index `i` (a double-click in the playlist window). Remembers the
@@ -868,14 +907,18 @@ impl Player {
                 // a drained ring. Auto-advance replaces the finished engine before this is read, so
                 // `is_finished` is only true at a real end-of-playlist stop.
                 let finished = h.is_finished();
+                let stopped = self.stopped || finished;
                 Playback {
-                    elapsed: Some(if finished { 0 } else { h.elapsed_secs() }),
-                    position: if finished { Some(0.0) } else { h.position_fraction() },
+                    // A stopped (or naturally finished) deck shows a BLANK clock, like classic
+                    // Winamp: 0:00 after a Stop or a removed track reads as a lie. The seek thumb
+                    // still rests at the start.
+                    elapsed: if stopped { None } else { Some(h.elapsed_secs()) },
+                    position: if stopped { Some(0.0) } else { h.position_fraction() },
                     duration: h.duration_secs(),
                     playing: h.is_playing(),
                     // A naturally finished track reads as stopped (classic "ended" state), so the
                     // status indicator shows stop and the visualizer settles, not a paused freeze.
-                    stopped: self.stopped || finished,
+                    stopped,
                     kbps: h.bitrate_kbps(),
                     khz: h.khz(),
                     channels: h.channels(),
@@ -956,6 +999,76 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].duration_secs, Some(2), "header duration probed");
         assert_eq!(rows[0].duration, "0:02");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shuffle_previous_without_history_offers_a_random_other_track() {
+        let dir = std::env::temp_dir().join(format!("xubamp-prev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = dir.join(format!("t{i}.wav"));
+                write_wav(&p, 48_000, 1);
+                p
+            })
+            .collect();
+        let mut player = Player::new(paths);
+        player.shuffle = true;
+        let current = player
+            .playlist
+            .current_index()
+            .and_then(|i| player.playlist.track_id(i));
+        // With no history, the Previous fallback offers a random track that is never the
+        // current one, and the pool respects already-attempted candidates.
+        let mut attempted = HashSet::new();
+        for _ in 0..64 {
+            if attempted.len() == 2 {
+                break;
+            }
+            let fresh = player.random_back_fresh(&attempted).expect("a candidate");
+            assert_ne!(Some(fresh), current, "never re-picks the current track");
+            attempted.insert(fresh);
+        }
+        assert_eq!(attempted.len(), 2, "both other tracks eventually offered");
+        assert_eq!(
+            player.random_back_fresh(&attempted),
+            None,
+            "exhausted pool offers nothing"
+        );
+        // And the playlist commits such a fresh candidate like a Back: current becomes a
+        // Forward redo, so Next replays forward from the jump.
+        let fresh = *attempted.iter().next().unwrap();
+        assert_eq!(player.playlist.back_candidate(Some(fresh)), Some(fresh));
+        player.playlist.commit_back(fresh).expect("selects the jump");
+        assert_eq!(
+            player.playlist.current_index().and_then(|i| player.playlist.track_id(i)),
+            Some(fresh)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_selection_arms_a_row_without_playing() {
+        let dir = std::env::temp_dir().join(format!("xubamp-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let p = dir.join(format!("t{i}.wav"));
+                write_wav(&p, 48_000, 1);
+                p
+            })
+            .collect();
+        let mut player = Player::new(paths.clone());
+        player.restore_selection(2);
+        assert_eq!(player.current_index(), Some(2));
+        assert_eq!(player.current_path(), Some(paths[2].clone()));
+        let pb = player.playback();
+        assert!(pb.stopped && !pb.playing, "restored session stays stopped");
+        assert_eq!(pb.elapsed, None, "stopped deck shows a blank clock");
+        // An out-of-range index leaves the selection alone.
+        player.restore_selection(99);
+        assert_eq!(player.current_index(), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

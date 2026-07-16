@@ -95,6 +95,9 @@ pub struct PlaybackSettings {
     pub sort_on_load: bool,
     /// Stop at the end of a track instead of advancing to the next one.
     pub manual_advance: bool,
+    /// The current track's playlist position when the last session ended, so reopening restores
+    /// the same selection from the session playlist file.
+    pub session_track: u32,
 }
 
 impl Default for PlaybackSettings {
@@ -106,6 +109,7 @@ impl Default for PlaybackSettings {
             read_titles_on_load: true,
             sort_on_load: false,
             manual_advance: false,
+            session_track: 0,
         }
     }
 }
@@ -408,6 +412,10 @@ impl Settings {
                     key,
                     &mut warnings,
                 ),
+                "playback.session_track" => match value.parse::<u32>() {
+                    Ok(v) => settings.playback.session_track = v,
+                    Err(_) => bad("expected an unsigned integer", &mut warnings),
+                },
                 "visualization.mode" => match value {
                     "spectrum" => settings.visualization.mode = VisualizationMode::Spectrum,
                     "oscilloscope" => settings.visualization.mode = VisualizationMode::Oscilloscope,
@@ -600,6 +608,11 @@ impl Settings {
             &mut out,
             "playback.manual_advance",
             self.playback.manual_advance,
+        );
+        line(
+            &mut out,
+            "playback.session_track",
+            self.playback.session_track,
         );
         line(
             &mut out,
@@ -987,6 +1000,7 @@ mod tests {
         s.playback.read_titles_on_load = false;
         s.playback.sort_on_load = true;
         s.playback.manual_advance = true;
+        s.playback.session_track = 7;
         s.visualization.mode = VisualizationMode::Oscilloscope;
         s.visualization.show_peaks = false;
         s.visualization.analyzer_style = AnalyzerStyle::Fire;

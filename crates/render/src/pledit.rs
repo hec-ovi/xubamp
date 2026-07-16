@@ -117,6 +117,8 @@ pub enum Region {
 const SCROLLBAR_RIGHT: i32 = 15;
 const SCROLLBAR_W: i32 = 8;
 const SCROLLBAR_MIN_THUMB: i32 = 8;
+/// The classic thumb is a fixed 8x18 cap (the skin ships exactly that sprite), not proportional.
+const SCROLLBAR_THUMB_H: i32 = 18;
 
 /// The scrollbar track rectangle (x, y, w, h) for the current window size.
 fn scrollbar_track(width: i32, height: i32) -> (i32, i32, i32, i32) {
@@ -159,8 +161,7 @@ pub fn scrollbar_thumb_rect(state: &PlState, width: i32, height: i32) -> Option<
         return None;
     }
     let (x, y, w, h) = scrollbar_track(width, height);
-    let thumb_h = (((visible as f32 / total as f32) * h as f32).round() as i32)
-        .clamp(SCROLLBAR_MIN_THUMB, h.max(SCROLLBAR_MIN_THUMB));
+    let thumb_h = SCROLLBAR_THUMB_H.min(h).max(SCROLLBAR_MIN_THUMB);
     let travel = (h - thumb_h).max(0);
     let offset = ((state.scroll.clamp(0.0, 100.0) / 100.0) * travel as f32).round() as i32;
     Some((x, y + offset, w, thumb_h))
@@ -212,6 +213,8 @@ pub struct PlState {
     pub pressed_title: Option<TitleButton>,
     /// Whichever bottom cluster button stays depressed while its popup menu is open.
     pub pressed_menu: Option<BottomButton>,
+    /// Whether the scrollbar thumb is being dragged, so it draws its selected sprite.
+    pub scrollbar_pressed: bool,
     /// The live playback clock for the bottom-bar mini time, in whole seconds, already in the
     /// main window's selected elapsed/remaining representation. `None` draws nothing (nothing
     /// loaded, or the paused blink's hidden beat). Fed by the platform layer each tick.
@@ -543,7 +546,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
     draw_running_time(&mut fb, state, &colors, w, h);
     draw_mini_time(&mut fb, state, &colors, w, h);
     draw_rows(&mut fb, state, &colors, h, list_w);
-    draw_scrollbar(&mut fb, state, &colors, w, h);
+    draw_scrollbar(&mut fb, skin, state, &colors, w, h);
     fb
 }
 
@@ -699,13 +702,14 @@ fn draw_fallback_expanded(
     draw_running_time(fb, state, colors, w, h);
     draw_mini_time(fb, state, colors, w, h);
     draw_rows(fb, state, colors, h, list_w);
-    draw_scrollbar(fb, state, colors, w, h);
+    draw_scrollbar(fb, skin, state, colors, w, h);
 }
 
 /// Draw the scrollbar thumb over the right edge when the list overflows, as a bevelled cap so the
 /// grab target is obvious. Nothing is drawn when everything fits.
 fn draw_scrollbar(
     fb: &mut Framebuffer,
+    skin: &Skin,
     state: &PlState,
     colors: &xubamp_skin::pledit::PlEdit,
     width: i32,
@@ -714,6 +718,18 @@ fn draw_scrollbar(
     let Some((x, y, w, h)) = scrollbar_thumb_rect(state, width, height) else {
         return;
     };
+    // The skin ships the classic 8x18 handle (with a dragged variant); draw it when the sheet is
+    // present, clipped to a short track.
+    if let Some(sheet) = &skin.pledit {
+        let mut sprite = if state.scrollbar_pressed {
+            sprites::PLEDIT_SCROLL_HANDLE_SELECTED
+        } else {
+            sprites::PLEDIT_SCROLL_HANDLE
+        };
+        sprite.h = sprite.h.min(h);
+        blit(fb, sheet, sprite, x, y);
+        return;
+    }
     fill_rect(fb, x, y, w, h, colors.selected_bg);
     // A one-pixel light top/left and the darker list background on the bottom/right reads as a
     // raised cap against the recessed track.
@@ -1091,6 +1107,53 @@ mod tests {
         assert_eq!(
             region_at(&shaded, w, sprites::PLEDIT_SHADE_H, -1, 7),
             Region::None
+        );
+    }
+
+    #[test]
+    fn scrollbar_thumb_uses_the_skin_handle_and_its_dragged_variant() {
+        const GREEN: [u8; 4] = [0, 255, 0, 255];
+        const YELLOW: [u8; 4] = [255, 255, 0, 255];
+        // A pledit sheet: normal handle cell GREEN, selected cell YELLOW.
+        let mut sheet = solid_sheet(300, 120, [200, 0, 0, 255]);
+        let mut paint = |x0: u32, x1: u32, c: [u8; 4]| {
+            for y in 53..71u32 {
+                for x in x0..x1 {
+                    let o = ((y * 300 + x) * 4) as usize;
+                    sheet.rgba[o..o + 4].copy_from_slice(&c);
+                }
+            }
+        };
+        paint(52, 60, GREEN);
+        paint(61, 69, YELLOW);
+        let skin = Skin {
+            pledit: Some(sheet),
+            ..Default::default()
+        };
+        let rows: Vec<Row> = (0..40)
+            .map(|i| Row {
+                title: format!("{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let state = PlState {
+            rows,
+            ..Default::default()
+        };
+        let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
+        let (tx, ty, _, th) = scrollbar_thumb_rect(&state, w, h).expect("overflow shows a thumb");
+        assert_eq!(th, 18, "the classic handle is a fixed 8x18 cap");
+        let fb = compose(&skin, &state, w, h);
+        assert_eq!(px(&fb, tx as u32 + 3, ty as u32 + 3), GREEN, "skin handle");
+        let dragged = PlState {
+            scrollbar_pressed: true,
+            ..state
+        };
+        let fb = compose(&skin, &dragged, w, h);
+        assert_eq!(
+            px(&fb, tx as u32 + 3, ty as u32 + 3),
+            YELLOW,
+            "dragged handle uses the selected cell"
         );
     }
 

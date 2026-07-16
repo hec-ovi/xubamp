@@ -194,6 +194,8 @@ pub enum ClassicMenuAction {
     /// Preferences: pick a directory to add as an Audio Library root (no menu item; a portal
     /// request routed through the same channel as Load Skin).
     LibraryAddDirectory,
+    /// Play the first selected playlist row (the per-track context menu's Play).
+    PlaylistPlaySelected,
     PlaylistRemoveSelected,
     PlaylistRemoveAll,
     PlaylistCrop,
@@ -391,6 +393,17 @@ pub fn playlist_add_menu() -> Menu<ClassicMenuAction> {
         MenuItem::action("Directory...", ClassicMenuAction::PlaylistAddDirectory),
         MenuItem::action("File...", ClassicMenuAction::PlaylistAddFile),
         MenuItem::action("Library", ClassicMenuAction::PlaylistAddLibrary),
+    ])
+}
+
+/// The per-track context menu: right-clicking a playlist row selects it and pops this.
+pub fn playlist_track_menu() -> Menu<ClassicMenuAction> {
+    Menu::new(vec![
+        MenuItem::action("Play", ClassicMenuAction::PlaylistPlaySelected),
+        MenuItem::action("File Info", ClassicMenuAction::PlaylistFileInfo).with_shortcut("Alt+3"),
+        MenuItem::separator(),
+        MenuItem::action("Remove Selected", ClassicMenuAction::PlaylistRemoveSelected),
+        MenuItem::action("Crop", ClassicMenuAction::PlaylistCrop),
     ])
 }
 
@@ -607,10 +620,12 @@ impl MenuInteraction {
 
     /// Open at the first enabled, non-separator root item. Empty/all-disabled menus still open but
     /// have no selection.
-    pub fn open<A>(&mut self, menu: &Menu<A>) {
+    /// Open with NO highlighted row, like a native mouse-opened popup: focus appears only on
+    /// hover or the first keyboard navigation (Down selects the first item, Up the last).
+    pub fn open<A>(&mut self, _menu: &Menu<A>) {
         self.open = true;
         self.pressed = None;
-        self.selection = first_focusable(menu).into_iter().collect();
+        self.selection.clear();
     }
 
     pub fn close(&mut self) {
@@ -1584,7 +1599,13 @@ mod tests {
         let menu = interaction_menu();
         let mut state = MenuInteraction::default();
         state.open(&menu);
-        assert_eq!(state.selected_path(), [0]);
+        assert_eq!(
+            state.selected_path(),
+            [0usize; 0],
+            "a fresh popup shows no highlighted row"
+        );
+        assert_eq!(state.key(&menu, MenuKey::Down), MenuOutcome::Redraw);
+        assert_eq!(state.selected_path(), [0], "first Down lands on the first item");
         assert_eq!(state.key(&menu, MenuKey::Down), MenuOutcome::Redraw);
         assert_eq!(
             state.selected_path(),

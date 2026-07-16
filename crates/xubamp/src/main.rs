@@ -482,6 +482,13 @@ fn write_playlist(
     std::fs::write(dest, text).map_err(|error| format!("cannot write {}: {error}", dest.display()))
 }
 
+/// The session playlist sidecar: the same directory as the settings file. Written on exit and
+/// read back on an argument-less start, so closing the player never loses the playlist.
+#[cfg(feature = "audio")]
+fn session_playlist_path(settings_path: &Path) -> PathBuf {
+    settings_path.with_file_name("session.m3u8")
+}
+
 /// The player's Options-page behaviours as persisted.
 #[cfg(feature = "audio")]
 fn player_options_from(settings: &xubamp_config::Settings) -> player::PlayerOptions {
@@ -724,13 +731,26 @@ fn main() {
         use std::rc::Rc;
 
         let (portal_launcher, mut portal_receiver) = portal_actions::bridge();
-        let tracks: Vec<std::path::PathBuf> =
-            media_args.iter().map(std::path::PathBuf::from).collect();
+        // CLI tracks start a fresh playlist and autoplay. With no arguments, the previous
+        // session's playlist comes back from its sidecar file, selected but stopped, so opening
+        // the player never blasts audio uninvited.
+        let session_playlist = settings_path.as_deref().map(session_playlist_path);
+        let restoring = media_args.is_empty();
+        let tracks: Vec<std::path::PathBuf> = if restoring {
+            session_playlist
+                .as_deref()
+                .filter(|path| path.exists())
+                .and_then(|path| load_playlist_paths(path).ok())
+                .unwrap_or_default()
+        } else {
+            media_args.iter().map(std::path::PathBuf::from).collect()
+        };
         let equalizer = xubamp_audio::EqSettings {
             enabled: settings.equalizer.enabled,
             preamp_db: settings.equalizer.preamp_db,
             bands_db: settings.equalizer.bands_db,
         };
+        let session_track = settings.playback.session_track as usize;
         let player = Rc::new(RefCell::new(player::Player::with_settings_and_options(
             tracks,
             settings.playback.shuffle,
@@ -740,7 +760,11 @@ fn main() {
             player_options_from(&settings),
         )));
         let settings = Rc::new(RefCell::new(settings));
-        player.borrow_mut().start(); // begin the first track
+        if restoring {
+            player.borrow_mut().restore_selection(session_track);
+        } else {
+            player.borrow_mut().start(); // begin the first track
+        }
 
         let on_command = {
             let player = Rc::clone(&player);
@@ -1033,6 +1057,24 @@ fn main() {
         );
         if let Ok(session) = result.as_ref() {
             apply_ui_session(&mut settings.borrow_mut(), *session);
+        }
+        // The playlist survives close/reopen: write it (and the current row) beside the settings.
+        settings.borrow_mut().playback.session_track =
+            player.borrow().current_index().unwrap_or(0) as u32;
+        if let Some(session_file) = session_playlist.as_deref() {
+            let items: Vec<_> = player
+                .borrow()
+                .playlist_entries()
+                .into_iter()
+                .map(|(_, path)| xubamp_audio::playlist_file::PlaylistEntry {
+                    title: Some(track_title(&path.to_string_lossy())),
+                    duration_secs: None,
+                    path,
+                })
+                .collect();
+            if let Err(error) = write_playlist(session_file, &items) {
+                eprintln!("xubamp: cannot save the session playlist: {error}");
+            }
         }
         // Equalizer sliders update live audio continuously, but the final state and pane layout
         // reach disk once when the event loop exits rather than once per pointer-motion event.

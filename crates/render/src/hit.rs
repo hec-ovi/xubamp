@@ -919,6 +919,35 @@ pub fn on_key(state: &mut UiState, key: KeyPress, is_repeat: bool) -> Outcome {
     }
 }
 
+/// Balance change per wheel notch, in -100..=100 units.
+const BALANCE_WHEEL_STEP: i32 = 5;
+
+/// Handle mouse-wheel motion at window-local (`x`, `y`), `notches` positive for wheel-up.
+/// Over the balance slider the wheel pans; over the seek bar it seeks 5s per notch; anywhere
+/// else (including the volume slider) it steps the volume, the classic whole-window behaviour.
+pub fn on_wheel(state: &mut UiState, x: i32, y: i32, notches: i32) -> Outcome {
+    if notches == 0 {
+        return Outcome::default();
+    }
+    match region_at(state.shade, x, y) {
+        Region::Balance => {
+            let balance = (state.balance as i32 + notches * BALANCE_WHEEL_STEP).clamp(-100, 100);
+            if balance == state.balance as i32 {
+                return Outcome::default();
+            }
+            state.balance = balance as i8;
+            Outcome {
+                command: Some(Command::Balance(state.balance)),
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Position => seek_key(state, notches as f32 * SEEK_STEP_SECS),
+        Region::None => Outcome::default(),
+        _ => volume_key(state, notches * VOLUME_STEP),
+    }
+}
+
 /// A shuffle/repeat toggle shortcut: once per press, auto-repeats swallowed.
 fn mode_key(is_repeat: bool, m: ModeButton) -> Outcome {
     if is_repeat {
@@ -2170,6 +2199,30 @@ mod tests {
                 "{ch} held emits nothing on repeat"
             );
         }
+    }
+
+    #[test]
+    fn wheel_steps_volume_balance_and_seek_by_region() {
+        let mut s = UiState {
+            volume: 50,
+            duration: Some(100),
+            elapsed: Some(50),
+            position: Some(0.5),
+            ..Default::default()
+        };
+        // Over the volume slider (and anywhere else on the body): volume steps.
+        let out = on_wheel(&mut s, sprites::VOLUME_X + 5, sprites::VOLUME_Y + 5, 1);
+        assert_eq!(out.command, Some(Command::Volume(52)));
+        let out = on_wheel(&mut s, 137, 45, -1);
+        assert_eq!(out.command, Some(Command::Volume(50)), "body wheels volume");
+        // Over the balance slider: pan.
+        let out = on_wheel(&mut s, sprites::BALANCE_X + 5, sprites::BALANCE_Y + 5, -2);
+        assert_eq!(out.command, Some(Command::Balance(-10)));
+        // Over the seek bar: a relative 5s seek per notch.
+        let out = on_wheel(&mut s, sprites::POSBAR_X + 5, sprites::POSBAR_Y + 5, 1);
+        assert_eq!(out.command, Some(Command::Seek(0.55)), "50s + 5s of 100s");
+        // Outside the window: nothing.
+        assert_eq!(on_wheel(&mut s, -1, -1, 1), Outcome::default());
     }
 
     #[test]

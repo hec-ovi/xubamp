@@ -192,6 +192,33 @@ pub const KHZ_X: i32 = 156;
 pub const KHZ_Y: i32 = 43;
 pub const KHZ_DIGITS: usize = 2;
 
+/// The clutterbar: the vertical O/A/I/D/V button column on the main window's left edge, at
+/// (10,22), 8x43, from TITLEBAR.BMP. The normal art is at source (304,0); the "disabled" blank
+/// strip (drawn when the user hides the clutterbar) at (312,0). Each button has a selected
+/// (lit/pressed) cell drawn at its own window slot. Coordinates cross-checked against Webamp's
+/// skinSprites.ts and main-window.css.
+pub const CLUTTER_X: i32 = 10;
+pub const CLUTTER_Y: i32 = 22;
+pub const CLUTTER_BG: Placement = Placement::new(Rect::new(304, 0, 8, 43), CLUTTER_X, CLUTTER_Y);
+pub const CLUTTER_BG_DISABLED: Placement =
+    Placement::new(Rect::new(312, 0, 8, 43), CLUTTER_X, CLUTTER_Y);
+/// Window rects (x, y, w, h) of the five buttons, in O/A/I/D/V order.
+pub const CLUTTER_BUTTONS: [(i32, i32, i32, i32); 5] = [
+    (CLUTTER_X, 25, 8, 8), // O: options menu
+    (CLUTTER_X, 33, 8, 7), // A: always on top
+    (CLUTTER_X, 40, 8, 7), // I: file info
+    (CLUTTER_X, 47, 8, 8), // D: double size
+    (CLUTTER_X, 55, 8, 7), // V: visualization menu
+];
+/// The selected (lit/pressed) sprite of each button, parallel to [`CLUTTER_BUTTONS`].
+pub const CLUTTER_SELECTED: [Placement; 5] = [
+    Placement::new(Rect::new(304, 47, 8, 8), CLUTTER_X, 25),
+    Placement::new(Rect::new(312, 55, 8, 7), CLUTTER_X, 33),
+    Placement::new(Rect::new(320, 62, 8, 7), CLUTTER_X, 40),
+    Placement::new(Rect::new(328, 69, 8, 8), CLUTTER_X, 47),
+    Placement::new(Rect::new(336, 77, 8, 7), CLUTTER_X, 55),
+];
+
 /// The play/pause/stop status indicator (`playpaus.bmp`, 42x9). The three 9x9 status glyphs sit
 /// at source columns 0 (play), 9 (pause), and 18 (stop) and draw at (26,28), left of the time
 /// display. The 3px-wide work-indicator columns sit at source x=36 (idle) and x=39 (busy) and

@@ -71,6 +71,9 @@ const MARQUEE_TICK: Duration = Duration::from_millis(100);
 /// the classic Winamp paused blink.
 const BLINK_TICK: Duration = Duration::from_millis(600);
 
+/// How long a marquee notice (e.g. the always-on-top explanation) stays before the title returns.
+const NOTICE_DURATION: Duration = Duration::from_secs(2);
+
 /// Timer backstop for the visualizer while animating. The frame-callback loop (see
 /// [`App::draw`]/[`App::on_frame`]) normally drives it at the display's refresh rate, but the timer
 /// re-arms and redraws the loop at this cadence too, so if the compositor throttles or drops the
@@ -595,6 +598,7 @@ pub fn run(
         shade: pane_layout.main_shaded,
         time_display: runtime.ui_options.time_display,
         scroll_title: runtime.ui_options.scroll_title,
+        double_size: runtime.ui_options.double_size,
         vis: visualization,
         ..Default::default()
     };
@@ -693,6 +697,7 @@ pub fn run(
         vis_samples: vec![0.0; FFT_N],
         last_marquee: Instant::now(),
         last_blink: Instant::now(),
+        notice_until: None,
         qh: qh.clone(),
         frame_pending: false,
         playing: false,
@@ -777,6 +782,8 @@ struct App {
     last_marquee: Instant,
     /// When the paused blink last toggled, so it beats on its own ~600ms wall clock.
     last_blink: Instant,
+    /// When the current marquee notice expires and the title takes the strip back.
+    notice_until: Option<Instant>,
     /// The compositor, kept so a cursor surface can be created when the pointer is set up.
     compositor: CompositorState,
     /// Positions the playlist and equalizer as child panes of the main toplevel.
@@ -984,6 +991,8 @@ impl App {
         let old_main = self.main_rect();
         let old_equalizer = self.equalizer_rect();
         self.double_size = on;
+        // Mirror into the render state so the clutterbar's D stays lit while doubled.
+        self.state.double_size = on;
         let new_main = self.main_rect();
 
         self.equalizer_position =
@@ -1070,7 +1079,39 @@ impl App {
                 hit::WindowToggle::Equalizer => self.toggle_equalizer(),
             }
         }
+        if let Some(b) = outcome.clutter {
+            let scale = self.scale();
+            match b {
+                hit::ClutterButton::Options => {
+                    // Pop the options menu just right of the bar, like the O button always did.
+                    self.open_main_menu_at(panes::Point {
+                        x: (xubamp_skin::sprites::CLUTTER_X + 8) * scale,
+                        y: xubamp_skin::sprites::CLUTTER_Y * scale,
+                    });
+                }
+                hit::ClutterButton::AlwaysOnTop => {
+                    // Wayland gives clients no say in stacking; tell the user where the real
+                    // control lives instead of silently doing nothing.
+                    self.show_notice("ALWAYS ON TOP: USE YOUR COMPOSITOR (SUPER+RIGHT-CLICK)");
+                }
+                hit::ClutterButton::FileInfo => self.open_file_info(FileInfoQuery::Current),
+                hit::ClutterButton::DoubleSize => self.set_double_size(!self.double_size),
+                hit::ClutterButton::Visualization => {
+                    self.open_visualization_menu_at(panes::Point {
+                        x: (xubamp_skin::sprites::CLUTTER_X + 8) * scale,
+                        y: (xubamp_skin::sprites::CLUTTER_Y + 33) * scale,
+                    });
+                }
+            }
+        }
         self.sync_preferences_from_ui();
+    }
+
+    /// Show a short-lived notice in the marquee (2 seconds), replacing the title.
+    fn show_notice(&mut self, notice: &str) {
+        self.state.notice = Some(notice.to_owned());
+        self.notice_until = Some(Instant::now() + NOTICE_DURATION);
+        self.redraw();
     }
 
     fn sync_preferences_from_ui(&mut self) {
@@ -1167,6 +1208,12 @@ impl App {
         self.playing = pb.playing;
         self.stopped = pb.stopped;
         let mut changed = hit::on_tick(&mut self.state, pb);
+        // Expire a marquee notice so the title takes the strip back.
+        if self.notice_until.is_some_and(|until| Instant::now() >= until) {
+            self.notice_until = None;
+            self.state.notice = None;
+            changed = true;
+        }
         // The marquee steps on its OWN 100 ms clock, not once per redraw: the frame-callback loop
         // redraws at the display rate, and stepping the title every frame would scroll it far too
         // fast. Only skins with text.bmp render a marquee, and the collapsed strip shows none.
@@ -1575,6 +1622,31 @@ impl App {
             fb,
             position,
         );
+    }
+
+    /// Pop the Visualization submenu standalone (the clutterbar's V button).
+    fn open_visualization_menu_at(&mut self, position: panes::Point) {
+        let model = menu::visualization_menu(menu::MainMenuState {
+            main_window_open: true,
+            equalizer_open: self.equalizer.is_some(),
+            playlist_open: self.playlist.is_some(),
+            repeat: self.state.repeat_on,
+            shuffle: self.state.shuffle_on,
+            double_size: self.double_size,
+            time_display: match self.state.time_display {
+                hit::TimeDisplay::Elapsed => menu::TimeDisplay::Elapsed,
+                hit::TimeDisplay::Remaining => menu::TimeDisplay::Remaining,
+            },
+            vis_mode: self.state.vis.mode,
+            analyzer_style: self.state.vis.analyzer_style,
+            band_width: self.state.vis.band_width,
+            osc_style: self.state.vis.osc_style,
+            show_peaks: self.state.vis.show_peaks,
+        });
+        let mut interaction = menu::MenuInteraction::default();
+        interaction.open(&model);
+        let fb = menu::compose(&model, &interaction, &self.menu_theme());
+        self.open_popup_menu(PopupOwner::Main, model, interaction, fb, position);
     }
 
     fn open_main_menu_at(&mut self, position: panes::Point) {

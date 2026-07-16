@@ -331,8 +331,9 @@ pub fn main_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
 }
 
 /// The Visualization submenu: the mode plus the classic analyzer, oscilloscope, band-width, and
-/// peak options, each reflecting the current setting as a radio/check.
-fn visualization_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
+/// peak options, each reflecting the current setting as a radio/check. Public because the
+/// clutterbar's V button opens it as a standalone popup.
+pub fn visualization_menu(state: MainMenuState) -> Menu<ClassicMenuAction> {
     let analyzer = Menu::new(vec![
         MenuItem::action("Normal", ClassicMenuAction::SetAnalyzerStyle(AnalyzerStyle::Normal))
             .with_mark(ItemMark::Radio(state.analyzer_style == AnalyzerStyle::Normal)),

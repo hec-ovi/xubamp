@@ -136,6 +136,30 @@ pub const TRANSPORT_ORDER: [Transport; 6] = [
     Transport::Eject,
 ];
 
+/// The clutterbar's five buttons, top to bottom (the O/A/I/D/V column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClutterButton {
+    /// O: pop the options (main) menu.
+    Options,
+    /// A: always-on-top. Wayland gives clients no say in stacking, so this shows a notice.
+    AlwaysOnTop,
+    /// I: the file-info box for the current track.
+    FileInfo,
+    /// D: toggle double-size mode (lit while on).
+    DoubleSize,
+    /// V: pop the visualization menu.
+    Visualization,
+}
+
+/// The five buttons in [`sprites::CLUTTER_BUTTONS`] order.
+pub const CLUTTER_ORDER: [ClutterButton; 5] = [
+    ClutterButton::Options,
+    ClutterButton::AlwaysOnTop,
+    ClutterButton::FileInfo,
+    ClutterButton::DoubleSize,
+    ClutterButton::Visualization,
+];
+
 /// The transport status shown by the classic indicator (from `playpaus.bmp`) left of the clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlayStatus {
@@ -168,6 +192,8 @@ pub enum Region {
     Toggle(WindowToggle),
     /// The shuffle or repeat mode button.
     Mode(ModeButton),
+    /// One of the clutterbar's O/A/I/D/V buttons.
+    Clutter(ClutterButton),
     /// Inside the window but not over any interactive element. Pressing here starts a window
     /// move, like the title bar, so the whole dead surface drags; unlike the title bar it does
     /// not participate in the double-click windowshade toggle.
@@ -293,6 +319,11 @@ pub fn hit_test(x: i32, y: i32) -> Region {
     if in_button(&sprites::REPEAT_OFF, x, y) {
         return Region::Mode(ModeButton::Repeat);
     }
+    for (&(bx, by, bw, bh), id) in sprites::CLUTTER_BUTTONS.iter().zip(CLUTTER_ORDER) {
+        if in_rect(x, y, bx, by, bw, bh) {
+            return Region::Clutter(id);
+        }
+    }
     if y < TITLEBAR_H {
         return Region::TitleBar;
     }
@@ -387,6 +418,17 @@ pub struct UiState {
     pub repeat_on: bool,
     /// The shuffle/repeat mode button currently held (drawn pressed), or `None`.
     pub pressed_mode: Option<ModeButton>,
+    /// Whether the clutterbar (the O/A/I/D/V column) is enabled. Off draws the blank strip and
+    /// its area becomes draggable body. Classic default is on.
+    pub show_clutterbar: bool,
+    /// The clutterbar button currently held (drawn with its selected sprite), or `None`.
+    pub pressed_clutter: Option<ClutterButton>,
+    /// Whether double-size mode is on, so the clutterbar's D stays lit. The platform layer owns
+    /// the actual scaling; this mirrors it for composition.
+    pub double_size: bool,
+    /// A short-lived notice shown in the marquee instead of the title (e.g. why always-on-top
+    /// is unavailable). The platform layer sets and expires it.
+    pub notice: Option<String>,
     /// Whether the MM:SS clock shows elapsed time or a remaining-time countdown.
     pub time_display: TimeDisplay,
     /// The transport status, for the classic play/pause/stop indicator left of the clock.
@@ -452,6 +494,10 @@ impl Default for UiState {
             shuffle_on: false,
             repeat_on: false,
             pressed_mode: None,
+            show_clutterbar: true,
+            pressed_clutter: None,
+            double_size: false,
+            notice: None,
             time_display: TimeDisplay::Elapsed,
             status: PlayStatus::Stopped,
             blink_hidden: false,
@@ -563,6 +609,8 @@ pub struct Outcome {
     /// A window action requested by a title-bar button (close, minimize, ...), for the platform
     /// layer to carry out. Distinct from `command`, which drives the audio engine.
     pub window: Option<TitleButton>,
+    /// A clutterbar action fired by a completed click, for the platform layer to carry out.
+    pub clutter: Option<ClutterButton>,
     /// A request to toggle (open/close) the equalizer or playlist window, for the platform layer.
     pub toggle: Option<WindowToggle>,
     /// Whether UI state changed and the window should be recomposed and redrawn.
@@ -662,6 +710,20 @@ pub fn on_press(state: &mut UiState, x: i32, y: i32) -> Outcome {
         }
         Region::Mode(m) => {
             state.pressed_mode = Some(m);
+            Outcome {
+                redraw: true,
+                ..Default::default()
+            }
+        }
+        Region::Clutter(b) => {
+            // A disabled clutterbar is blank, inert chrome: its area drags like the body.
+            if !state.show_clutterbar {
+                return Outcome {
+                    start_move: true,
+                    ..Default::default()
+                };
+            }
+            state.pressed_clutter = Some(b);
             Outcome {
                 redraw: true,
                 ..Default::default()
@@ -778,6 +840,15 @@ pub fn on_release(state: &mut UiState, x: i32, y: i32) -> Outcome {
             ..Default::default()
         };
     }
+    if let Some(b) = state.pressed_clutter.take() {
+        // A clutterbar action fires only if released over the same button.
+        let fired = region_at(shade, x, y) == Region::Clutter(b);
+        return Outcome {
+            clutter: fired.then_some(b),
+            redraw: true,
+            ..Default::default()
+        };
+    }
     match state.pressed.take() {
         Some(b) => {
             let fired = region_at(shade, x, y) == Region::Transport(b);
@@ -801,7 +872,8 @@ pub fn on_leave(state: &mut UiState) -> bool {
     let title = state.pressed_title.take().is_some();
     let toggle = state.pressed_toggle.take().is_some();
     let mode = state.pressed_mode.take().is_some();
-    transport || title || toggle || mode
+    let clutter = state.pressed_clutter.take().is_some();
+    transport || title || toggle || mode || clutter
 }
 
 /// Volume change per Up/Down key, in 0..=100 units. Webamp steps by 1 and real Winamp 2.x by a
@@ -1109,6 +1181,47 @@ mod tests {
         assert!(on_tick(&mut s, pb));
         assert_eq!(s.status, PlayStatus::Playing);
         assert!(!s.blink_hides(), "leaving pause clears the hidden phase");
+    }
+
+    #[test]
+    fn clutterbar_buttons_hit_arm_and_fire_on_matching_release() {
+        // Centers of the five buttons map to their ids.
+        for (&(bx, by, bw, bh), id) in sprites::CLUTTER_BUTTONS.iter().zip(CLUTTER_ORDER) {
+            assert_eq!(
+                hit_test(bx + bw / 2, by + bh / 2),
+                Region::Clutter(id),
+                "{id:?}"
+            );
+        }
+        // Left of the bar is the body; the bar column above the first button too.
+        assert_eq!(hit_test(sprites::CLUTTER_X - 1, 30), Region::Body);
+        assert_eq!(hit_test(sprites::CLUTTER_X, 23), Region::Body);
+
+        let mut s = UiState::default();
+        let (bx, by, ..) = sprites::CLUTTER_BUTTONS[3]; // D
+        let press = on_press(&mut s, bx + 2, by + 2);
+        assert!(press.redraw && !press.start_move);
+        assert_eq!(s.pressed_clutter, Some(ClutterButton::DoubleSize));
+        // Releasing elsewhere cancels; releasing on the button fires.
+        let cancelled = on_release(&mut s, 200, 100);
+        assert_eq!(cancelled.clutter, None);
+        on_press(&mut s, bx + 2, by + 2);
+        let fired = on_release(&mut s, bx + 2, by + 2);
+        assert_eq!(fired.clutter, Some(ClutterButton::DoubleSize));
+        assert_eq!(s.pressed_clutter, None);
+    }
+
+    #[test]
+    fn a_disabled_clutterbar_is_draggable_chrome() {
+        let mut s = UiState {
+            show_clutterbar: false,
+            ..Default::default()
+        };
+        let (bx, by, ..) = sprites::CLUTTER_BUTTONS[0];
+        let out = on_press(&mut s, bx + 2, by + 2);
+        assert!(out.start_move, "the blank strip drags like the body");
+        assert!(!out.title_band);
+        assert_eq!(s.pressed_clutter, None);
     }
 
     #[test]

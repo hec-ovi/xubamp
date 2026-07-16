@@ -111,6 +111,21 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
                 .unwrap();
             blit_placement(&mut fb, titlebar, sprites::TITLE_BUTTONS_PRESSED[idx]);
         }
+        // The clutterbar: the dedicated column art when enabled (with the held button's selected
+        // cell, and D lit while double-size is on), else the blank disabled strip.
+        if state.show_clutterbar {
+            blit_placement(&mut fb, titlebar, sprites::CLUTTER_BG);
+            if let Some(b) = state.pressed_clutter {
+                let idx = hit::CLUTTER_ORDER.iter().position(|&c| c == b).unwrap();
+                blit_placement(&mut fb, titlebar, sprites::CLUTTER_SELECTED[idx]);
+            }
+            if state.double_size && state.pressed_clutter != Some(hit::ClutterButton::DoubleSize)
+            {
+                blit_placement(&mut fb, titlebar, sprites::CLUTTER_SELECTED[3]);
+            }
+        } else {
+            blit_placement(&mut fb, titlebar, sprites::CLUTTER_BG_DISABLED);
+        }
     }
     if let Some(cbuttons) = &skin.cbuttons {
         for ((normal, pressed), id) in sprites::CBUTTONS
@@ -158,13 +173,15 @@ pub fn compose_main_window(skin: &Skin, state: &hit::UiState) -> Framebuffer {
     // "Balance: Center"/"Balance: 12% Left"), matching classic Winamp (verified against Webamp's
     // marqueeUtils). Skins without text.bmp (the built-in default) show no marquee here.
     if let Some(text) = &skin.text {
-        match state.dragging {
-            Some(hit::Slider::Volume) => {
+        match (&state.dragging, &state.notice) {
+            (Some(hit::Slider::Volume), _) => {
                 marquee::draw(&mut fb, text, &format!("Volume: {}%", state.volume), 0);
             }
-            Some(hit::Slider::Balance) => {
+            (Some(hit::Slider::Balance), _) => {
                 marquee::draw(&mut fb, text, &balance_readout(state.balance), 0);
             }
+            // A short-lived platform notice takes the strip over from the title.
+            (_, Some(notice)) => marquee::draw(&mut fb, text, notice, 0),
             _ => marquee::draw(
                 &mut fb,
                 text,
@@ -924,6 +941,80 @@ mod tests {
             assert_eq!(px(2, y), &[0, 255, 0, 255], "green block left column");
             assert_eq!(px(3, y), &[0, 255, 0, 255], "green block right column");
         }
+    }
+
+    #[test]
+    fn clutterbar_draws_its_art_lit_d_and_disabled_strip() {
+        use xubamp_skin::sprites::{CLUTTER_BUTTONS, CLUTTER_X, CLUTTER_Y};
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        const YELLOW: [u8; 4] = [255, 255, 0, 255];
+        // A titlebar sheet: the clutterbar art region (x 304..312) GREEN, the disabled strip
+        // (312..320) BLUE, the selected cells (304..344, y 44+) YELLOW.
+        let mut titlebar = solid(344, 87, RED);
+        let mut paint = |x0: u32, x1: u32, y0: u32, y1: u32, c: [u8; 4]| {
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let o = ((y * 344 + x) * 4) as usize;
+                    titlebar.rgba[o..o + 4].copy_from_slice(&c);
+                }
+            }
+        };
+        paint(304, 312, 0, 43, GREEN);
+        paint(312, 320, 0, 43, BLUE);
+        paint(304, 344, 44, 87, YELLOW);
+        let skin = Skin {
+            main: Some(solid(275, 116, RED)),
+            titlebar: Some(titlebar),
+            ..Default::default()
+        };
+
+        let on = compose_main_window(&skin, &hit::UiState::default());
+        assert_eq!(
+            px(&on, CLUTTER_X as u32 + 3, CLUTTER_Y as u32 + 1),
+            GREEN,
+            "enabled bar shows the column art"
+        );
+
+        let doubled = compose_main_window(
+            &skin,
+            &hit::UiState {
+                double_size: true,
+                ..Default::default()
+            },
+        );
+        let (dx, dy, ..) = CLUTTER_BUTTONS[3];
+        assert_eq!(
+            px(&doubled, dx as u32 + 3, dy as u32 + 3),
+            YELLOW,
+            "D stays lit while double-size is on"
+        );
+
+        let pressed = compose_main_window(
+            &skin,
+            &hit::UiState {
+                pressed_clutter: Some(hit::ClutterButton::Options),
+                ..Default::default()
+            },
+        );
+        let (ox, oy, ..) = CLUTTER_BUTTONS[0];
+        assert_eq!(
+            px(&pressed, ox as u32 + 3, oy as u32 + 3),
+            YELLOW,
+            "a held button shows its selected cell"
+        );
+
+        let off = compose_main_window(
+            &skin,
+            &hit::UiState {
+                show_clutterbar: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            px(&off, CLUTTER_X as u32 + 3, CLUTTER_Y as u32 + 1),
+            BLUE,
+            "disabled bar shows the blank strip"
+        );
     }
 
     #[test]

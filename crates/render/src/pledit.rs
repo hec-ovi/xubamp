@@ -16,7 +16,18 @@ use crate::{blit, Framebuffer};
 /// with no leading zero, seconds always two digits. There is no hours field, matching the classic
 /// playlist readout.
 fn mmss(total_secs: u32) -> String {
-    format!("{}:{:02}", total_secs / 60, total_secs % 60)
+    if total_secs >= 3600 {
+        // An hour or more reads as H:MM:SS, like the classic playlist readout; a five-digit
+        // minute count both misleads and overflows the bottom bar.
+        format!(
+            "{}:{:02}:{:02}",
+            total_secs / 3600,
+            (total_secs / 60) % 60,
+            total_secs % 60
+        )
+    } else {
+        format!("{}:{:02}", total_secs / 60, total_secs % 60)
+    }
 }
 
 /// The bottom-bar running-time readout: `selected/total`, where the left side sums the durations of
@@ -572,9 +583,18 @@ fn draw_running_time(
     width: i32,
     height: i32,
 ) {
-    let text = running_time_message(state);
+    let mut text = running_time_message(state);
     let right = width - LIST_BUTTON_RIGHT - BOTTOM_BUTTON_W - 5;
-    let x = right - font::text_width(&text) as i32;
+    // The readout may not run left over the skin's baked bottom-bar art. When the whole
+    // selected/total line cannot fit its slot (a huge playlist on a narrow window), show the
+    // total alone.
+    let slot_left = MISC_BUTTON_X + BOTTOM_BUTTON_W + 6;
+    if right - (font::text_width(&text) as i32) < slot_left {
+        if let Some((_, total)) = text.rsplit_once('/') {
+            text = total.to_owned();
+        }
+    }
+    let x = (right - font::text_width(&text) as i32).max(slot_left);
     let y = height - BOTTOM_BUTTON_BOTTOM - BOTTOM_BUTTON_H + 5;
     font::draw_text(
         &mut fb.rgba,

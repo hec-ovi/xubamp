@@ -63,6 +63,12 @@ pub fn run_loop(
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
+    // Ask for ~11ms quanta (512 frames at the requested rate). PipeWire otherwise batches this
+    // stream at whatever quantum the graph settles on (often 2048-8192 frames), and the
+    // visualizer's sample tap then only refreshes a few times a second, which reads as a
+    // slideshow no matter how fast the UI repaints. A latency REQUEST, so the graph may still
+    // choose differently; playback correctness never depends on it.
+    let latency = format!("512/{request_rate}");
     let stream = pw::stream::StreamRc::new(
         core,
         "xubamp",
@@ -71,6 +77,7 @@ pub fn run_loop(
             *pw::keys::MEDIA_CATEGORY => "Playback",
             *pw::keys::MEDIA_ROLE => "Music",
             *pw::keys::AUDIO_CHANNELS => "2",
+            *pw::keys::NODE_LATENCY => latency.as_str(),
         },
     )?;
 

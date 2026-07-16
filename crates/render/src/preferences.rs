@@ -267,6 +267,9 @@ pub struct ControlInfo {
     pub checked: Option<bool>,
     /// Present only for sliders.
     pub range: Option<RangeInfo>,
+    /// Slider only: replaces the numeric readout under the track ("35fps"); an empty string
+    /// hides the readout (the classic falloff sliders show only Slow/Fast).
+    pub value_text: Option<String>,
     pub focused: bool,
 }
 
@@ -435,6 +438,7 @@ impl PreferencesState {
                 selected: section == self.section,
                 checked: None,
                 range: None,
+                value_text: None,
                 focused: self.focus == ControlId::Section(section),
             });
         }
@@ -456,6 +460,7 @@ impl PreferencesState {
             selected: false,
             checked: Some(checked),
             range: None,
+            value_text: None,
             focused: self.focus == id,
         };
         let slider = |id, label: &str, y, height, value| ControlInfo {
@@ -477,6 +482,7 @@ impl PreferencesState {
                 maximum,
                 step: 1,
             }),
+            value_text: None,
             focused: self.focus == id,
         };
 
@@ -501,120 +507,181 @@ impl PreferencesState {
                         maximum: SHUFFLE_MORPH_RATE_MAX,
                         step: 1,
                     }),
+                    value_text: None,
                     focused: self.focus == ControlId::ShuffleMorphRate,
                 });
             }
             Section::Visualization => {
-                controls.push(check(
+                // Mirrors the classic Winamp 2.9x "Built-in visualization options" dialog:
+                // horizontal mode radios with the fps-labelled refresh slider, the spectrum
+                // options (styles, Peaks, thin/thick bands) beside the oscilloscope styles, and
+                // the two Slow/Fast falloff sliders.
+                let mode_y = content.y + 52;
+                let radio = |id, label: &str, rx, ry, rw| ControlInfo {
+                    id,
+                    role: ControlRole::RadioButton,
+                    label: label.into(),
+                    rect: Rect {
+                        x: rx,
+                        y: ry,
+                        width: rw,
+                        height: CONTROL_H,
+                    },
+                    enabled: true,
+                    selected: false,
+                    checked: Some(match id {
+                        ControlId::VisualizationSpectrum => {
+                            self.model.visualization_mode == VisualizationMode::Spectrum
+                        }
+                        ControlId::VisualizationOscilloscope => {
+                            self.model.visualization_mode == VisualizationMode::Oscilloscope
+                        }
+                        _ => self.model.visualization_mode == VisualizationMode::Off,
+                    }),
+                    range: None,
+                    value_text: None,
+                    focused: self.focus == id,
+                };
+                controls.push(radio(
                     ControlId::VisualizationSpectrum,
                     "Spectrum analyzer",
-                    content.y + 50,
-                    self.model.visualization_mode == VisualizationMode::Spectrum,
-                    ControlRole::RadioButton,
+                    x,
+                    mode_y,
+                    150,
                 ));
-                controls.push(check(
+                controls.push(radio(
                     ControlId::VisualizationOscilloscope,
-                    "Oscilloscope",
-                    content.y + 76,
-                    self.model.visualization_mode == VisualizationMode::Oscilloscope,
-                    ControlRole::RadioButton,
+                    "Oscilliscope",
+                    x + 158,
+                    mode_y,
+                    110,
                 ));
-                controls.push(check(
+                controls.push(radio(
                     ControlId::VisualizationOff,
                     "Off",
-                    content.y + 102,
-                    self.model.visualization_mode == VisualizationMode::Off,
-                    ControlRole::RadioButton,
+                    x + 276,
+                    mode_y,
+                    60,
                 ));
-                let y0 = content.y + 126;
-                let refresh_label = format!(
-                    "Refresh rate ({} fps)",
-                    crate::vis::refresh_fps(self.model.visualization_refresh_rate)
-                );
-                controls.push(slider(
+                let mut refresh = slider(
                     ControlId::VisualizationRefreshRate,
-                    &refresh_label,
-                    y0,
+                    "Refresh rate",
+                    content.y + 92,
                     36,
                     self.model.visualization_refresh_rate,
+                );
+                refresh.rect.x = x + 92;
+                refresh.rect.width = (control_width - 92).max(1);
+                refresh.value_text = Some(format!(
+                    "{}fps",
+                    crate::vis::refresh_fps(self.model.visualization_refresh_rate)
                 ));
+                controls.push(refresh);
+
+                // Left column: spectrum analyzer options, in the original order.
+                let col_w = 180;
+                let left_y = content.y + 172;
                 controls.push(check(
                     ControlId::VisualizationAnalyzerNormal,
-                    "Normal analyzer",
-                    y0 + 42,
+                    "Normal style",
+                    left_y,
                     self.model.visualization_analyzer_style == AnalyzerStyle::Normal,
                     ControlRole::RadioButton,
                 ));
                 controls.push(check(
                     ControlId::VisualizationAnalyzerFire,
-                    "Fire analyzer",
-                    y0 + 66,
+                    "Fire style",
+                    left_y + 24,
                     self.model.visualization_analyzer_style == AnalyzerStyle::Fire,
                     ControlRole::RadioButton,
                 ));
                 controls.push(check(
                     ControlId::VisualizationAnalyzerLine,
-                    "Line analyzer",
-                    y0 + 90,
+                    "Line style",
+                    left_y + 48,
                     self.model.visualization_analyzer_style == AnalyzerStyle::Line,
                     ControlRole::RadioButton,
                 ));
                 controls.push(check(
                     ControlId::VisualizationShowPeaks,
-                    "Show spectrum peaks",
-                    y0 + 114,
+                    "Peaks",
+                    left_y + 72,
                     self.model.visualization_show_peaks,
                     ControlRole::CheckBox,
                 ));
                 controls.push(check(
-                    ControlId::VisualizationBandThick,
-                    "Thick bands",
-                    y0 + 138,
-                    self.model.visualization_band_width == BandWidth::Thick,
-                    ControlRole::RadioButton,
-                ));
-                controls.push(check(
                     ControlId::VisualizationBandThin,
                     "Thin bands",
-                    y0 + 162,
+                    left_y + 96,
                     self.model.visualization_band_width == BandWidth::Thin,
                     ControlRole::RadioButton,
                 ));
-                controls.push(slider(
-                    ControlId::VisualizationBarFalloff,
-                    "Analyzer falloff (slow to fast)",
-                    y0 + 192,
-                    36,
-                    self.model.visualization_bar_falloff,
-                ));
-                controls.push(slider(
-                    ControlId::VisualizationPeakFalloff,
-                    "Peaks falloff (slow to fast)",
-                    y0 + 234,
-                    36,
-                    self.model.visualization_peak_falloff,
-                ));
                 controls.push(check(
+                    ControlId::VisualizationBandThick,
+                    "Thick bands",
+                    left_y + 120,
+                    self.model.visualization_band_width == BandWidth::Thick,
+                    ControlRole::RadioButton,
+                ));
+                // The left-column controls above are full width by default; narrow them so the
+                // oscilloscope column is reachable.
+                for control in controls.iter_mut().rev().take(6) {
+                    control.rect.width = col_w;
+                }
+
+                // Right column: oscilloscope styles (classic wording).
+                let right_x = x + col_w + 24;
+                controls.push(radio(
                     ControlId::VisualizationOscDots,
                     "Dot scope",
-                    y0 + 280,
-                    self.model.visualization_osc_style == OscStyle::Dots,
-                    ControlRole::RadioButton,
+                    right_x,
+                    left_y,
+                    col_w,
                 ));
-                controls.push(check(
+                controls.push(radio(
                     ControlId::VisualizationOscLines,
                     "Line scope",
-                    y0 + 304,
-                    self.model.visualization_osc_style == OscStyle::Lines,
-                    ControlRole::RadioButton,
+                    right_x,
+                    left_y + 24,
+                    col_w,
                 ));
-                controls.push(check(
+                controls.push(radio(
                     ControlId::VisualizationOscSolid,
                     "Solid scope",
-                    y0 + 328,
-                    self.model.visualization_osc_style == OscStyle::Solid,
-                    ControlRole::RadioButton,
+                    right_x,
+                    left_y + 48,
+                    col_w,
                 ));
+                // The scope radios carry the mode-radio checked closure; fix their state.
+                for (control, style) in controls.iter_mut().rev().take(3).rev().zip([
+                    OscStyle::Dots,
+                    OscStyle::Lines,
+                    OscStyle::Solid,
+                ]) {
+                    control.checked = Some(self.model.visualization_osc_style == style);
+                }
+
+                // The two classic falloff sliders (Slow/Fast only, no numeric readout).
+                let mut analyzer_falloff = slider(
+                    ControlId::VisualizationBarFalloff,
+                    "Analyzer falloff",
+                    content.y + 336,
+                    36,
+                    self.model.visualization_bar_falloff,
+                );
+                analyzer_falloff.rect.width = 220;
+                analyzer_falloff.value_text = Some(String::new());
+                controls.push(analyzer_falloff);
+                let mut peaks_falloff = slider(
+                    ControlId::VisualizationPeakFalloff,
+                    "Peaks falloff",
+                    content.y + 396,
+                    36,
+                    self.model.visualization_peak_falloff,
+                );
+                peaks_falloff.rect.width = 220;
+                peaks_falloff.value_text = Some(String::new());
+                controls.push(peaks_falloff);
             }
             Section::Options => {
                 controls.push(check(
@@ -738,6 +805,7 @@ impl PreferencesState {
                         selected: self.library_selected == Some(index),
                         checked: None,
                         range: None,
+                        value_text: None,
                         focused: self.focus == id,
                     });
                 }
@@ -1485,7 +1553,13 @@ fn draw_page_static_adwaita(
             atext(fb, font, content.x + 18, content.y + 34, "Shuffle morph rate", BODY_PX, dim);
         }
         Section::Visualization => {
-            atext(fb, font, content.x + 18, content.y + 32, "Visualization mode", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 8, "Built-in visualization options", BODY_PX, p.fg);
+            atext(fb, font, content.x + 18, content.y + 30, "Visualization mode", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 100, "Refresh rate:", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 148, "Spectrum analyzer options", BODY_PX, dim);
+            atext(fb, font, content.x + 18 + 204, content.y + 148, "Oscilliscope options", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 318, "Analyzer falloff:", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 378, "Peaks falloff:", BODY_PX, dim);
         }
         Section::Options => {
             atext(fb, font, content.x + 18, content.y + 32, "Read titles on", BODY_PX, dim);
@@ -1594,9 +1668,14 @@ fn draw_slider_adwaita(fb: &mut Framebuffer, c: &ControlInfo, p: &Palette, font:
     atext(fb, font, c.rect.x, labels_y, "Slow", BODY_PX, p.dim_fg);
     let fast_w = font.text_width("Fast", BODY_PX) as i32;
     atext(fb, font, c.rect.x + c.rect.width - fast_w, labels_y, "Fast", BODY_PX, p.dim_fg);
-    let value = range.value.to_string();
-    let vw = font.text_width(&value, BODY_PX) as i32;
-    atext(fb, font, c.rect.x + (c.rect.width - vw) / 2, labels_y, &value, BODY_PX, p.fg);
+    let value = match &c.value_text {
+        Some(text) => text.clone(),
+        None => range.value.to_string(),
+    };
+    if !value.is_empty() {
+        let vw = font.text_width(&value, BODY_PX) as i32;
+        atext(fb, font, c.rect.x + (c.rect.width - vw) / 2, labels_y, &value, BODY_PX, p.fg);
+    }
     if c.focused {
         adwaita::draw_focus_ring(fb, tx - 2, ty - 2, tsize + 4, tsize + 4, (tsize + 4) / 2, p);
     }
@@ -1700,13 +1779,13 @@ fn draw_page_static(fb: &mut Framebuffer, state: &PreferencesState, content: Rec
             );
         }
         Section::Visualization => {
-            draw_text(
-                fb,
-                content.x + 18,
-                content.y + 32,
-                "Visualization mode",
-                DIM,
-            );
+            draw_text(fb, content.x + 18, content.y + 8, "Built-in visualization options", TEXT);
+            draw_text(fb, content.x + 18, content.y + 30, "Visualization mode", DIM);
+            draw_text(fb, content.x + 18, content.y + 100, "Refresh rate:", DIM);
+            draw_text(fb, content.x + 18, content.y + 148, "Spectrum analyzer options", DIM);
+            draw_text(fb, content.x + 18 + 204, content.y + 148, "Oscilliscope options", DIM);
+            draw_text(fb, content.x + 18, content.y + 318, "Analyzer falloff:", DIM);
+            draw_text(fb, content.x + 18, content.y + 378, "Peaks falloff:", DIM);
         }
         Section::Options => {
             draw_text(fb, content.x + 18, content.y + 32, "Read titles on", DIM);
@@ -1862,9 +1941,14 @@ fn draw_slider(fb: &mut Framebuffer, control: &ControlInfo, pressed: bool) {
     draw_text(fb, control.rect.x, labels_y, "Slow", DIM);
     let fast_x = control.rect.x + control.rect.width - font::text_width("Fast") as i32;
     draw_text(fb, fast_x, labels_y, "Fast", DIM);
-    let value = range.value.to_string();
-    let value_x = control.rect.x + (control.rect.width - font::text_width(&value) as i32) / 2;
-    draw_text(fb, value_x, labels_y, &value, TEXT);
+    let value = match &control.value_text {
+        Some(text) => text.clone(),
+        None => range.value.to_string(),
+    };
+    if !value.is_empty() {
+        let value_x = control.rect.x + (control.rect.width - font::text_width(&value) as i32) / 2;
+        draw_text(fb, value_x, labels_y, &value, TEXT);
+    }
     if control.focused {
         focus_rect(fb, inset(control.rect, 1), DARK);
     }
@@ -1992,6 +2076,7 @@ fn button_info(
         selected: false,
         checked: None,
         range: None,
+        value_text: None,
         focused: focus == id,
     }
 }

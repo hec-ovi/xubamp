@@ -8,8 +8,8 @@
   <description>
     <p>
       xubamp is a native Wayland audio player for Ubuntu 26.04. It decodes
-      MP3 and WAV files, sends audio to PipeWire, and renders classic Winamp
-      skin archives.
+      MP3, WAV, FLAC, and Ogg Vorbis files, sends audio to PipeWire, and
+      renders classic Winamp skin archives.
     </p>
   </description>
   <developer id="io.github.hec_ovi">
@@ -24,6 +24,9 @@
     <mediatype>audio/mpeg</mediatype>
     <mediatype>audio/x-wav</mediatype>
     <mediatype>audio/wav</mediatype>
+    <mediatype>audio/flac</mediatype>
+    <mediatype>audio/x-flac</mediatype>
+    <mediatype>audio/ogg</mediatype>
   </provides>
   <categories>
     <category>AudioVideo</category>

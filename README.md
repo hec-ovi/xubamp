@@ -13,17 +13,19 @@ Winamp 2.9x did a lot with almost nothing: a 275x116 bitmap UI, a software blitt
 - Loads classic Winamp 2.x skins (`.wsz`) and renders the main, equalizer, and playlist windows pixel for pixel; skins switch at runtime from the menu or Preferences.
 - Playback of MP3, WAV, FLAC, and Ogg Vorbis through PipeWire, with a Bluetooth-safe gapless seek.
 - Transport (play, pause, stop, previous, next, eject), a dragged seek bar, volume and balance sliders (the value shows in the marquee while you drag), elapsed/remaining clock with the classic paused blink, the play/pause/stop indicator, kbps/kHz/mono/stereo readouts, and a scrolling marquee showing the tagged "N. Artist - Title (M:SS)" (ID3v2, Vorbis comments, RIFF INFO; file name when untagged).
-- Spectrum and oscilloscope visualizer with the classic options: analyzer styles (normal/fire/line), thick or thin bands, peaks and falloff speeds, oscilloscope styles, refresh rate. Click the panel to cycle the mode.
+- Spectrum and oscilloscope visualizer, a faithful port of the XMMS/Audacious classic analyzer (log bands, 40 dB range, the five falloff speeds, frame-rate-independent physics), with the classic options: analyzer styles (normal/fire/line), thick or thin bands, peaks, falloff speeds, and a 10-70 fps refresh rate. Click the panel to cycle the mode.
 - The 10-band equalizer with preamp, the 17 classic presets, EQF load/save, +12/0/-12 db flatten labels, and its own windowshade strip.
 - Shuffle and repeat, with Previous/Next that retrace the real play order, so Previous still works under shuffle.
-- The playlist editor: click to select (Ctrl and Shift extend), double-click to play, per-track durations and the selected/total readout, a live current-track clock, working ADD/REM/SEL/MISC/LIST clusters (including `.m3u`/`.pls` save and load and an Audio Library scan), a draggable scrollbar, resize grip, and a windowshade strip.
+- The playlist editor: click to select (Ctrl and Shift extend), double-click to play, a right-click per-track menu (Play, File Info, Remove, Crop), per-track durations and the selected/total readout, a live current-track clock, clickable mini transport, working ADD/REM/SEL/MISC/LIST clusters (including `.m3u`/`.pls` save and load and an Audio Library scan), a skinned draggable scrollbar, resize grip, and a windowshade strip.
+- The playlist survives close and reopen: it is written beside the settings on exit and restored (same current track, stopped) on the next argument-less start.
 - Windowshade mode on all three panes; the main strip shows the title, mini clock, mini seek bar, and mini transport.
 - Double-size mode (Ctrl+D, the menu, or the clutterbar D) doubles the main window and equalizer.
-- The clutterbar: O pops the menu, I the file info box, D double size, V the visualization menu.
+- The clutterbar: O pops the menu, A shows the always-on-top notice (see Wayland notes), I the file info box, D double size, V the visualization menu.
 - A file info box (playlist MISC, Alt+3, or clutterbar I) showing the stream facts and an editable ID3v1 tag form for MP3s.
 - Native GNOME-styled (Adwaita, light and dark) menus, Preferences, Jump-to-file, and file info dialogs; everything else is skin-rendered.
 - Preferences pages: Shuffle morph rate, Options (read titles on load/play, sort on load, manual advance, title conversions), Visualization, Display (time mode, double size, title scroll, clutterbar, playlist numbers, snap distance), Audio Library roots, and Skins.
-- Classic hotkeys: `z x c v b` transport, `r s` repeat/shuffle, `l` open files, arrows for volume and seek, `j` jump, `Ctrl+T` time mode, `Ctrl+D` double size, `Ctrl+P` preferences, `Alt+3` file info, Del/Ctrl+A in the playlist.
+- Classic hotkeys: `z x c v b` transport, `r s` repeat/shuffle, `l` open files, arrows for volume and seek, `j` jump (searching every tag, not just the shown title), `Ctrl+T` time mode, `Ctrl+D` double size, `Ctrl+P` preferences, `Alt+3` file info, Del/Ctrl+A in the playlist.
+- Mouse wheel: volume anywhere on the main window, pan over the balance slider, 5s seeks over the position bar, list scroll in the playlist.
 - Every window drags from any free surface, not just the 14px title strip.
 
 No album art, no media library view, no modern chrome, on purpose. Add URL (network streaming) is not implemented; its menu item is disabled.

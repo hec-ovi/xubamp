@@ -179,7 +179,10 @@ in the repo and git history, nothing important lives only in chat.
       the timer keeps the clock/marquee moving, kicks off the loop, and settles the visualizer when
       playback stops.
   - (i) done: the main-window visualizer (spectrum analyzer, oscilloscope, off), cycled by clicking
-    the panel. The realtime callback taps the post-gain output into a wait-free scope ring
+    the panel. (Superseded 2026-07-16: the analyzer/oscilloscope pipeline is now a port of the
+    XMMS/Audacious classic-skins visualizer with a 512-sample `1-0.85cos` window, and the
+    animation is timer-paced at the refresh-rate setting; the frame-callback pacing and the
+    Webamp-derived spectrum below are historical.) The realtime callback taps the post-gain output into a wait-free scope ring
     (`SharedState::push_scope`, a lock-free ring of atomics, downmixed mono, no allocation) that the
     UI reads (`read_scope`); `render::vis` holds the pure DSP and drawing: a hand-rolled radix-2 FFT
     (no external crate) with a Hann window, a log-frequency dB-scaled spectrum mapped to 75 columns
@@ -268,9 +271,9 @@ in the repo and git history, nothing important lives only in chat.
 
 ## Landed since the last phase note (see git log for detail)
 
-- Playlist (PLEDIT) window: a second Wayland toplevel, tiled from `pledit.bmp`, resizable by the
-  bottom-right grip (renders the exact compositor size, so minimize/restore is stable), size
-  remembered across close/reopen. List interactions verified against Webamp: click-select,
+- Playlist (PLEDIT) window: tiled from `pledit.bmp`, resizable by the bottom-right grip, size
+  remembered across close/reopen. (Since the pane rework it is a `wl_subsurface` child of the
+  main toplevel, not a second toplevel, so it docks and edge-snaps.) List interactions verified against Webamp: click-select,
   Ctrl-toggle, Shift-range, empty-click clears, double-click plays, mouse-wheel scroll.
 - Shuffle and repeat buttons; balance slider (with a volume-sheet fallback for skins without
   `balance.bmp`); the volume/balance value shown in the marquee while dragging.
@@ -280,7 +283,8 @@ in the repo and git history, nothing important lives only in chat.
   clock catches up, so a held arrow no longer jitters back and forth.
 - Jump to file (`J`): a standalone dialog (third toplevel) with a search field, a found/total
   counter, a filtered results list, and Jump/Close buttons; does not touch the playlist. Replaced
-  the earlier in-place incremental search.
+  the earlier in-place incremental search. (Since 0.2.1 the filter matches every metadata field,
+  artist/album/composer/genre/year/comment/file name, not just the shown title.)
 
 ## Landed in the polish round (2026-07-16, see git log for detail)
 

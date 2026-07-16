@@ -63,23 +63,27 @@ A Cargo workspace, one job per crate. Crates appear as their phase is built.
 - `audio`: decode + output engine. Producer thread, lock-free ring, PipeWire output,
   decoder dispatch, resample to a fixed internal format, next-track prefetch.
 - `dsp`: 10-band peaking-biquad equalizer plus preamp, and EQF/.q1 preset I/O. Pure.
-- `vis`: spectrum FFT and oscilloscope, fed from a post-EQ sample tap.
-- `playlist`: the playlist model and `.m3u`/`.pls` read and write. Pure.
 - `config`: preferences and session persistence. Pure over an injected path.
-- `mpris`: MPRIS service (media keys, desktop media widget) and the GlobalShortcuts
-  portal session, over D-Bus.
+- `library`: audio-path classification and directory scans.
+- `portal`: XDG desktop portals (file choosers, color scheme) over D-Bus.
 - `xubamp` (present): the binary. State machine, event loop, and the glue that wires
   the crates together.
 
+As built, two planned crates folded into their consumers instead: the visualizer is
+`render::vis` (the FFT and drawing are pure render work) and the playlist model plus
+`.m3u`/`.pls` I/O live in `audio` (`playlist.rs`, `playlist_file.rs`). An `mpris` crate
+(media keys over D-Bus) remains unbuilt.
+
 ## Data flow
 
-Open a file, it enters the `playlist` model. The `audio` producer thread demuxes and
-decodes a chunk, applies preamp and the `dsp` EQ, writes interleaved f32 to the PCM
-ring (and a tagged copy to the `vis` ring), and the realtime callback copies the PCM
-ring into the PipeWire buffer. In parallel the UI thread reads transport and EQ state,
-reads the `vis` ring at the current playback position for the spectrum and scope, and
-blits sprites into the `wl_shm` buffer, then damages and commits. Pointer and keyboard
-events hit-test in 1x surface-local coordinates, mutate state, and signal the producer
+Open a file, it enters the playlist model (`audio::playlist`). The `audio` producer
+thread demuxes and decodes a chunk, applies preamp and the `dsp` EQ, and writes
+interleaved f32 to the PCM ring; the realtime callback copies the PCM ring into the
+PipeWire buffer and taps its post-gain output into a wait-free scope ring. In parallel
+the UI thread reads transport and EQ state, reads the newest scope-ring window for the
+spectrum and oscilloscope (`render::vis`), and blits sprites into the `wl_shm` buffer,
+then damages and commits. Pointer and keyboard events hit-test in skin-space
+coordinates, mutate state, and signal the producer
 thread on seek.
 
 ## Wayland strategy
@@ -187,7 +191,7 @@ during the render-diff pass in a later phase.
 ## Phase 3 plan: audio engine
 
 New crate `crates/audio` (`xubamp-audio`): decode plus channel-map plus resample plus
-PipeWire output. EQ (`dsp`) and the visualizer (`vis`) stay separate later crates.
+PipeWire output. The EQ stayed its own crate (`dsp`); the visualizer became `render::vis`.
 
 Dependencies: `symphonia` 0.5 (wav/pcm/mp3, pure Rust); then `pipewire` (FFI to
 libpipewire), `rtrb` (wait-free SPSC ring), `bytemuck`, `crossbeam-channel`; `rubato` for

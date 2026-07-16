@@ -162,8 +162,8 @@ Depends: $depends
 Recommends: xdg-desktop-portal-gtk | xdg-desktop-portal-backend
 Homepage: https://github.com/hec-ovi/xubamp
 Description: native Wayland audio player with classic skin support
- xubamp decodes MP3 and WAV audio, sends it to PipeWire, and renders
- classic Winamp skin archives on Wayland.
+ xubamp decodes MP3, WAV, FLAC, and Ogg Vorbis audio, sends it to
+ PipeWire, and renders classic Winamp skin archives on Wayland.
 EOF
 
 (

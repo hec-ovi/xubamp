@@ -1,6 +1,6 @@
 .TH XUBAMP 1 "2026-07-16" "xubamp 0.2.1" "User Commands"
 .SH NAME
-xubamp \- play MP3 and WAV files in a native Wayland player
+xubamp \- play MP3, WAV, FLAC, and Ogg Vorbis files in a native Wayland player
 .SH SYNOPSIS
 .B xubamp
 .RI [ skin ]
@@ -15,9 +15,12 @@ Arguments are classified by filename extension. The first
 or
 .B .zip
 argument selects the skin. Every
-.B .mp3
+.BR .mp3 ,
+.BR .wav ,
+.BR .flac ,
+.BR .ogg ,
 and
-.B .wav
+.B .oga
 argument is added to the playlist in command-line order. Unrecognized
 arguments are ignored. If no skin is selected, xubamp uses its built-in skin.
 .SH ENVIRONMENT

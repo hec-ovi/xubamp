@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/skin", "crates/render", "crates/wl", "crates/audio", "crates/dsp", "crates/config", "crates/library", "crates/portal", "crates/xubamp"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.96"
 license = "GPL-2.0-or-later"

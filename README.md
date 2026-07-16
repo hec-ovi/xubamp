@@ -2,6 +2,15 @@
 
 A from-scratch, native-Wayland reimplementation of the classic Winamp 2.9x player, built for one target: Ubuntu 26.04. No Wine, no XWayland, no widget toolkit. One 4.4 MB binary in a 1.5 MB deb that depends on libc, libgcc, PipeWire, and xkbcommon.
 
+## Install
+
+Download the latest deb from [Releases](https://github.com/hec-ovi/xubamp/releases/latest), then:
+
+    sudo apt install ./xubamp_*_amd64.deb
+    xubamp song.mp3
+
+amd64, Ubuntu 26.04. It starts on a built-in clean-room skin; point it at any classic `.wsz` on the command line (`xubamp skin.wsz *.mp3`) or switch at runtime from Preferences. No skins ship with it (see License).
+
 ## Showcase
 
 Classic `.wsz` skins, loaded at runtime:
@@ -32,15 +41,6 @@ File info with editable ID3v1 tags:
 
 ![File info](docs/gifs/file-info.gif)
 
-## Install
-
-Download the deb from [Releases](https://github.com/hec-ovi/xubamp/releases), then:
-
-    sudo apt install ./xubamp_*_amd64.deb
-    xubamp song.mp3
-
-amd64 only for now. It starts on a built-in clean-room skin; point it at any classic `.wsz` on the command line (`xubamp skin.wsz *.mp3`) or switch at runtime from Preferences. No skins ship with it (see License).
-
 ## What works
 
 - Classic `.wsz` skins rendered pixel for pixel: main window, equalizer, resizable playlist, windowshade modes on all three, double-size mode (Ctrl+D).
@@ -62,7 +62,11 @@ Out of scope: X11, other compositors or distros, Windows, macOS. Tuned for Ubunt
 
 ## Why
 
-Winamp 2.9x did a lot with almost nothing: a 275x116 bitmap UI, a software blitter, instant startup on 2003 hardware. Reproducing that today should come out smaller, not heavier. The existing routes either emulate (Wine) or carry a toolkit and X11 history (Audacious, QMMP); xubamp draws the skin bitmaps straight into Wayland shared memory.
+I kept hitting the same walls with the players I tried. Strawberry makes the classic hotkeys complicated to set up, and my muscle memory presses B for next and J to jump to a track, so I fought it constantly. Audacious had trouble with moving its window on Wayland. And I wanted something genuinely lightweight. Winamp 2.9x did a lot with almost nothing: a 275x116 bitmap UI, a software blitter, instant startup on 2003 hardware. Reproducing that today should come out smaller, not heavier, so xubamp draws the skin bitmaps straight into Wayland shared memory with no toolkit in between.
+
+Playing the same library, xubamp sits at 47 MB across 7 threads; Strawberry at 206 MB across 67:
+
+![xubamp 47 MB and 7 threads vs Strawberry 206 MB and 67 threads](docs/images/memory-vs-strawberry.png)
 
 ## Wayland notes
 

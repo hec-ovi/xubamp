@@ -1,3 +1,13 @@
+xubamp (0.1.3-1) resolute; urgency=medium
+
+  * The spectrum analyzer and oscilloscope are a faithful port of the
+    classic XMMS/Audacious visualizer: log-band integration, 40 dB
+    range, the five classic falloff speeds with accelerating peaks,
+    correct normal/fire/line styles (line paints the whole bar in one
+    color), gapless thin bands, and the classic scope scale and colors.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Wed, 16 Jul 2026 20:00:00 +0000
+
 xubamp (0.1.2-1) resolute; urgency=medium
 
   * Visualization refresh slider uses the classic fps scale (10 fps up

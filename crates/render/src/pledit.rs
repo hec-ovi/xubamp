@@ -589,7 +589,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
         }
     }
 
-    draw_running_time(&mut fb, state, &colors, w, h);
+    draw_running_time(&mut fb, skin, state, &colors, w, h);
     draw_mini_time(&mut fb, skin, state, &colors, w, h);
     draw_rows(&mut fb, state, &colors, h, list_w);
     draw_scrollbar(&mut fb, skin, state, &colors, w, h);
@@ -613,8 +613,13 @@ fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
 /// left of the LIST cluster (7px into the right-anchored bottom section, 10px below its top),
 /// left-anchored like the original. Text that cannot fit before the LIST cluster falls back to
 /// the total alone, then truncates, so it never paints over the skin's baked art.
+///
+/// Winamp draws this readout with the 5x6 `text.bmp` glyphs (Webamp's `CharacterString`), which
+/// leave a pixel of recess above and below. The built-in 5x7 font is a pixel too tall for the
+/// 8px recess, so it is only the fallback for skins with no TEXT sheet.
 fn draw_running_time(
     fb: &mut Framebuffer,
+    skin: &Skin,
     state: &PlState,
     colors: &xubamp_skin::pledit::PlEdit,
     width: i32,
@@ -624,6 +629,25 @@ fn draw_running_time(
     let x = width - RUNTIME_RIGHT;
     let y = height - RUNTIME_BOTTOM;
     let max_w = RUNTIME_RIGHT - LIST_BUTTON_RIGHT - BOTTOM_BUTTON_W - 6;
+    if let Some(sheet) = &skin.text {
+        let cells_w = |text: &str| text.chars().count() as i32 * textfont::ADVANCE;
+        if cells_w(&text) > max_w {
+            if let Some((_, total)) = text.rsplit_once('/') {
+                text = total.to_owned();
+            }
+            while !text.is_empty() && cells_w(&text) > max_w {
+                text.pop();
+            }
+        }
+        let mut cx = x;
+        for ch in text.chars() {
+            if let Some(cell) = textfont::cell(ch) {
+                blit(fb, sheet, cell, cx, y);
+            }
+            cx += textfont::ADVANCE;
+        }
+        return;
+    }
     if font::text_width(&text) as i32 > max_w {
         if let Some((_, total)) = text.rsplit_once('/') {
             text = total.to_owned();
@@ -793,7 +817,7 @@ fn draw_fallback_expanded(
     );
     draw_fallback_title_buttons(fb, state, w);
     draw_fallback_bottom_buttons(fb, state, w, h, colors);
-    draw_running_time(fb, state, colors, w, h);
+    draw_running_time(fb, skin, state, colors, w, h);
     draw_mini_time(fb, skin, state, colors, w, h);
     draw_rows(fb, state, colors, h, list_w);
     draw_scrollbar(fb, skin, state, colors, w, h);
@@ -1463,6 +1487,71 @@ mod tests {
         assert_eq!(running_time_message(&state), "0:00/2:00", "unknown counts as zero");
         state.selected = vec![0];
         assert_eq!(running_time_message(&state), "1:30/2:00");
+    }
+
+    #[test]
+    fn running_time_uses_the_six_pixel_text_bmp_glyphs_clear_of_the_recess_border() {
+        // A text.bmp-shaped sheet whose every glyph pixel carries the marker 128 in the blue
+        // channel, so readout pixels are identifiable in the composed frame.
+        let (tw, th) = (155u32, 18u32);
+        let skin = Skin {
+            text: Some(Image {
+                width: tw,
+                height: th,
+                rgba: [7u8, 9, 128, 255]
+                    .iter()
+                    .copied()
+                    .cycle()
+                    .take((tw * th * 4) as usize)
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        // No clock, so the only text.bmp consumer drawing here is the running-time readout.
+        let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
+        let fb = compose(&skin, &PlState::default(), w, h);
+        let marked: Vec<(i32, i32)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let o = ((y as u32 * fb.width + x as u32) * 4) as usize;
+                fb.rgba[o..o + 3] == [7, 9, 128]
+            })
+            .collect();
+        assert!(!marked.is_empty(), "the readout drew text.bmp cells");
+        let top = marked.iter().map(|&(_, y)| y).min().unwrap();
+        let bottom = marked.iter().map(|&(_, y)| y).max().unwrap();
+        assert_eq!(top, h - RUNTIME_BOTTOM, "readout keeps its classic slot");
+        assert_eq!(
+            bottom,
+            h - RUNTIME_BOTTOM + textfont::CELL_H - 1,
+            "6px glyphs stop a pixel short of where the 7px font touched the recess border"
+        );
+        let left = marked.iter().map(|&(x, _)| x).min().unwrap();
+        assert_eq!(left, w - RUNTIME_RIGHT);
+
+        // A skin with no TEXT sheet keeps the built-in-font fallback.
+        let colors = PlEdit {
+            normal: Rgb::new(250, 250, 250),
+            normal_bg: Rgb::new(0, 0, 0),
+            ..PlEdit::default()
+        };
+        let plain = compose(
+            &Skin {
+                pledit_colors: Some(colors),
+                ..Default::default()
+            },
+            &PlState::default(),
+            w,
+            h,
+        );
+        let lit = (0..font::GLYPH_H as i32).any(|dy| {
+            (0..40).any(|dx| {
+                let (x, y) = (w - RUNTIME_RIGHT + dx, h - RUNTIME_BOTTOM + dy);
+                let o = ((y as u32 * plain.width + x as u32) * 4) as usize;
+                plain.rgba[o..o + 3] == [250, 250, 250]
+            })
+        });
+        assert!(lit, "no TEXT sheet falls back to the built-in font");
     }
 
     #[test]

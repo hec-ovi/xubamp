@@ -1,3 +1,17 @@
+xubamp (0.2.0-1) resolute; urgency=medium
+
+  * Visualization preferences match the original Winamp 2.9x dialog
+    exactly: layout, wording, fps-labelled refresh slider, and
+    Slow/Fast falloff sliders.
+  * The playback stream requests 512-frame quanta so the analyzer and
+    oscilloscope receive fresh audio every frame; combined with the
+    ported classic falloff physics this restores the original dancing
+    speed.
+  * Playlist totals over an hour read H:MM:SS, never overflow the
+    bottom bar, and the bitmap font gained the missing '/' glyph.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Wed, 16 Jul 2026 22:00:00 +0000
+
 xubamp (0.1.3-1) resolute; urgency=medium
 
   * The spectrum analyzer and oscilloscope are a faithful port of the

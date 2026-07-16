@@ -55,6 +55,9 @@ pub struct Player {
     /// row's duration and the selected/total running time without decoding. Filled as tracks are
     /// added; a path that has no header length simply stays absent (shown blank).
     durations: HashMap<PathBuf, u32>,
+    /// Tag-derived display names (`Artist - Title`), keyed by path, probed alongside the
+    /// durations. A path with no usable tags stays absent and shows its file stem instead.
+    names: HashMap<PathBuf, String>,
 }
 
 impl Player {
@@ -71,6 +74,7 @@ impl Player {
             shuffle_cycle: ShuffleCycle::from_entropy(),
             equalizer: EqSettings::default(),
             durations: HashMap::new(),
+            names: HashMap::new(),
         };
         player.append_paths(tracks);
         player.shuffle_cycle.anchor(&player.playlist);
@@ -110,8 +114,9 @@ impl Player {
         self.playlist.extend(accepted)
     }
 
-    /// Header-probe any not-yet-known paths and cache their lengths for the playlist display. Errors
-    /// and headerless files are simply skipped, so one bad file never blocks the rest.
+    /// Header-probe any not-yet-known paths and cache their lengths and tag names for the playlist
+    /// and marquee. Errors, headerless, and tagless files are simply skipped, so one bad file never
+    /// blocks the rest.
     fn probe_durations(&mut self, paths: &[PathBuf]) {
         for path in paths {
             if !self.durations.contains_key(path) {
@@ -119,7 +124,23 @@ impl Player {
                     self.durations.insert(path.clone(), secs);
                 }
             }
+            if !self.names.contains_key(path) {
+                if let Some(name) = xubamp_audio::decode::probe_tags(path)
+                    .and_then(|tags| tags.display_name())
+                {
+                    self.names.insert(path.clone(), name);
+                }
+            }
         }
+    }
+
+    /// A track's display name: its tag-derived `Artist - Title` when the file carries tags, else
+    /// the file stem, Winamp's classic fallback.
+    fn display_name(&self, path: &Path) -> String {
+        self.names
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| track_title(&path.to_string_lossy()))
     }
 
     /// Replace the playlist with supported local audio paths, preserving player-wide modes,
@@ -681,8 +702,8 @@ impl Player {
         }
     }
 
-    /// The playlist rows (numbered file stems; durations arrive once tracks are probed) and the
-    /// index of the currently-playing track, for the playlist window to render.
+    /// The playlist rows (numbered tag names or file stems; durations arrive once tracks are
+    /// probed) and the index of the currently-playing track, for the playlist window to render.
     pub fn playlist_view(&self) -> (Vec<pledit::Row>, Option<usize>) {
         let rows = self
             .playlist
@@ -691,7 +712,7 @@ impl Player {
             .map(|(i, path)| {
                 let duration_secs = self.durations.get(path).copied();
                 pledit::Row {
-                    title: format!("{}. {}", i + 1, track_title(&path.to_string_lossy())),
+                    title: format!("{}. {}", i + 1, self.display_name(path)),
                     duration: duration_secs.map(fmt_mmss).unwrap_or_default(),
                     duration_secs,
                 }
@@ -700,12 +721,19 @@ impl Player {
         (rows, self.playlist.current_index())
     }
 
-    /// The current track's marquee title (its file stem), or empty when nothing is loaded.
+    /// The current track's marquee title in the classic Winamp format
+    /// `N. Artist - Title (M:SS)`: the 1-based playlist number, the tag name (or file-stem
+    /// fallback), and the track length when its header carries one. Empty when nothing is loaded.
     pub fn title(&self) -> String {
-        self.playlist
-            .current()
-            .map(|p| track_title(&p.to_string_lossy()))
-            .unwrap_or_default()
+        let Some(path) = self.playlist.current() else {
+            return String::new();
+        };
+        let number = self.playlist.current_index().map_or(0, |i| i + 1);
+        let name = self.display_name(path);
+        match self.durations.get(path) {
+            Some(&secs) => format!("{}. {} ({})", number, name, fmt_mmss(secs)),
+            None => format!("{number}. {name}"),
+        }
     }
 
     /// A clock + track-info snapshot for the window's redraw tick.
@@ -796,6 +824,59 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].duration_secs, Some(2), "header duration probed");
         assert_eq!(rows[0].duration, "0:02");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Splice a RIFF INFO LIST chunk (IART + INAM) into a `write_wav` file, in front of its data
+    /// chunk (byte 36 of the fixed header layout), so tag probing has something to read.
+    fn tag_wav(path: &Path, artist: &str, title: &str) {
+        fn info_entry(id: &[u8; 4], text: &str) -> Vec<u8> {
+            let mut z = text.as_bytes().to_vec();
+            z.push(0);
+            if z.len() % 2 == 1 {
+                z.push(0);
+            }
+            let mut e = id.to_vec();
+            e.extend_from_slice(&(z.len() as u32).to_le_bytes());
+            e.extend_from_slice(&z);
+            e
+        }
+        let mut wav = std::fs::read(path).unwrap();
+        let mut list = b"INFO".to_vec();
+        list.extend_from_slice(&info_entry(b"IART", artist));
+        list.extend_from_slice(&info_entry(b"INAM", title));
+        let mut chunk = b"LIST".to_vec();
+        chunk.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        chunk.extend_from_slice(&list);
+        wav.splice(36..36, chunk);
+        let riff_len = (wav.len() - 8) as u32;
+        wav[4..8].copy_from_slice(&riff_len.to_le_bytes());
+        std::fs::write(path, wav).unwrap();
+    }
+
+    #[test]
+    fn marquee_and_rows_use_tag_names_with_the_classic_format() {
+        let dir = std::env::temp_dir().join(format!("xubamp-tags-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tagged = dir.join("tagged.wav");
+        write_wav(&tagged, 48_000, 2);
+        tag_wav(&tagged, "Aphex Twin", "Xtal");
+        let plain = dir.join("plain stem.wav");
+        write_wav(&plain, 48_000, 3);
+
+        let player = Player::new(vec![tagged, plain]);
+        assert_eq!(
+            player.title(),
+            "1. Aphex Twin - Xtal (0:02)",
+            "marquee: number, tag name, and length"
+        );
+        let (rows, current) = player.playlist_view();
+        assert_eq!(current, Some(0));
+        assert_eq!(rows[0].title, "1. Aphex Twin - Xtal");
+        assert_eq!(
+            rows[1].title, "2. plain stem",
+            "tagless file falls back to its stem"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

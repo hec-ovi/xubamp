@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xubamp_audio::decode::Source;
+use xubamp_audio::decode::{probe_tags, Source, TrackTags};
 
 /// Write a 16-bit PCM stereo WAV of a 440 Hz sine (dependency-free RIFF).
 fn write_wav_s16_stereo(path: &Path, rate: u32, frames: u32) {
@@ -61,6 +61,98 @@ fn decodes_generated_wav() {
     assert!(first.unwrap().abs() < 0.02, "a sine starts near zero");
     assert!(peak > 0.5, "real signal present, peak {peak}");
     std::fs::remove_file(&path).ok();
+}
+
+/// An ID3v2.3 tag block carrying a TPE1 (artist) and TIT2 (title) text frame, byte-exact per the
+/// spec: a 10-byte header with a syncsafe size, then plain big-endian-sized frames whose text
+/// payloads start with a 0x00 (Latin-1) encoding byte.
+fn id3v2_block(artist: &str, title: &str) -> Vec<u8> {
+    fn frame(id: &[u8; 4], text: &str) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(id);
+        f.extend_from_slice(&(text.len() as u32 + 1).to_be_bytes());
+        f.extend_from_slice(&[0, 0]); // frame flags
+        f.push(0); // Latin-1 text encoding
+        f.extend_from_slice(text.as_bytes());
+        f
+    }
+    let mut body = frame(b"TPE1", artist);
+    body.extend_from_slice(&frame(b"TIT2", title));
+    let mut tag = Vec::new();
+    tag.extend_from_slice(b"ID3");
+    tag.extend_from_slice(&[3, 0, 0]); // v2.3, no flags
+    let size = body.len() as u32;
+    // Syncsafe: 7 bits per byte, high bit clear.
+    tag.extend_from_slice(&[
+        ((size >> 21) & 0x7f) as u8,
+        ((size >> 14) & 0x7f) as u8,
+        ((size >> 7) & 0x7f) as u8,
+        (size & 0x7f) as u8,
+    ]);
+    tag.extend_from_slice(&body);
+    tag
+}
+
+#[test]
+fn probes_id3v2_tags_on_an_mp3() {
+    let fixture: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.mp3");
+    let mp3 = std::fs::read(&fixture).unwrap();
+    let mut tagged = id3v2_block("Aphex Twin", "Xtal");
+    tagged.extend_from_slice(&mp3);
+    let path = std::env::temp_dir().join("xubamp_probe_tags_test.mp3");
+    std::fs::write(&path, tagged).unwrap();
+
+    let tags = probe_tags(&path).expect("tagged MP3 probes");
+    assert_eq!(tags.artist.as_deref(), Some("Aphex Twin"));
+    assert_eq!(tags.title.as_deref(), Some("Xtal"));
+    assert_eq!(tags.display_name().as_deref(), Some("Aphex Twin - Xtal"));
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn probes_riff_info_tags_on_a_wav_and_reads_empty_tags_as_none() {
+    // A WAV with a LIST INFO chunk (IART artist + INAM title) appended after the data chunk.
+    let plain = std::env::temp_dir().join("xubamp_probe_tags_plain.wav");
+    write_wav_s16_stereo(&plain, 48000, 480);
+    let tags = probe_tags(&plain).expect("a plain WAV still probes");
+    assert_eq!(tags, TrackTags::default(), "no tags reads as empty");
+    assert_eq!(tags.display_name(), None, "empty tags fall back to the name");
+
+    fn info_entry(id: &[u8; 4], text: &str) -> Vec<u8> {
+        let mut z = text.as_bytes().to_vec();
+        z.push(0); // NUL terminator
+        if z.len() % 2 == 1 {
+            z.push(0); // RIFF chunks are word-aligned
+        }
+        let mut e = id.to_vec();
+        e.extend_from_slice(&(z.len() as u32).to_le_bytes());
+        e.extend_from_slice(&z);
+        e
+    }
+    let mut wav = std::fs::read(&plain).unwrap();
+    let mut list = b"INFO".to_vec();
+    list.extend_from_slice(&info_entry(b"IART", "Boards of Canada"));
+    list.extend_from_slice(&info_entry(b"INAM", "Roygbiv"));
+    let mut chunk = b"LIST".to_vec();
+    chunk.extend_from_slice(&(list.len() as u32).to_le_bytes());
+    chunk.extend_from_slice(&list);
+    // The reader collects INFO while walking chunks toward `data`, so the LIST goes between the
+    // fmt chunk (ends at byte 36 of this fixed-layout file) and the data chunk.
+    wav.splice(36..36, chunk);
+    let riff_len = (wav.len() - 8) as u32;
+    wav[4..8].copy_from_slice(&riff_len.to_le_bytes());
+    let tagged = std::env::temp_dir().join("xubamp_probe_tags_info.wav");
+    std::fs::write(&tagged, wav).unwrap();
+
+    let tags = probe_tags(&tagged).expect("tagged WAV probes");
+    assert_eq!(tags.artist.as_deref(), Some("Boards of Canada"));
+    assert_eq!(tags.title.as_deref(), Some("Roygbiv"));
+    assert_eq!(
+        tags.display_name().as_deref(),
+        Some("Boards of Canada - Roygbiv")
+    );
+    std::fs::remove_file(&plain).ok();
+    std::fs::remove_file(&tagged).ok();
 }
 
 #[test]

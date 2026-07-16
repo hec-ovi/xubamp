@@ -9,7 +9,7 @@ use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, StandardTagKey, Tag};
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
@@ -59,6 +59,80 @@ pub fn probe_duration_secs(path: &Path) -> Option<u32> {
     let frames = track.codec_params.n_frames?;
     let rate = u64::from(track.codec_params.sample_rate?);
     (rate > 0).then(|| (frames / rate) as u32)
+}
+
+/// Artist and title read from a file's embedded tags. Both fields are `None` when the file
+/// carries no usable tag, so the caller falls back to the file name, like classic Winamp.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackTags {
+    pub artist: Option<String>,
+    pub title: Option<String>,
+}
+
+impl TrackTags {
+    /// The classic display name: `Artist - Title` when both tags are present, either alone
+    /// otherwise, `None` when the tags carry nothing (caller falls back to the file name).
+    pub fn display_name(&self) -> Option<String> {
+        match (&self.artist, &self.title) {
+            (Some(artist), Some(title)) => Some(format!("{artist} - {title}")),
+            (None, Some(title)) => Some(title.clone()),
+            (Some(artist), None) => Some(artist.clone()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Header-only tag probe: read the artist and title from a file's metadata without decoding any
+/// audio. Covers an ID3v2 block preceding MP3 frames (surfaced by the probe), and container-level
+/// metadata (Vorbis comments in Ogg/FLAC, RIFF INFO in WAV). Returns `None` when the file cannot
+/// be opened or probed; a readable file with no tags yields empty [`TrackTags`].
+pub fn probe_tags(path: &Path) -> Option<TrackTags> {
+    let file = File::open(path).ok()?;
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut probed = symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .ok()?;
+    let mut tags = TrackTags::default();
+    // Metadata found by the probe outside the container (an ID3v2 block before MP3 frames).
+    if let Some(metadata) = probed.metadata.get() {
+        if let Some(revision) = metadata.current() {
+            collect_tags(revision.tags(), &mut tags);
+        }
+    }
+    // Container-carried metadata (Vorbis comments, RIFF INFO). The first source wins so a
+    // dedicated leading tag block is not overridden by a weaker container field.
+    if let Some(revision) = probed.format.metadata().current() {
+        collect_tags(revision.tags(), &mut tags);
+    }
+    Some(tags)
+}
+
+/// Fold a metadata revision's tags into `out`, keeping the first non-empty artist and title.
+fn collect_tags(read: &[Tag], out: &mut TrackTags) {
+    for tag in read {
+        let slot = match tag.std_key {
+            Some(StandardTagKey::Artist) => &mut out.artist,
+            Some(StandardTagKey::TrackTitle) => &mut out.title,
+            _ => continue,
+        };
+        if slot.is_none() {
+            let value = tag.value.to_string();
+            // RIFF INFO strings carry their NUL terminator (and pad byte) into the value.
+            let trimmed = value.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+            if !trimmed.is_empty() {
+                *slot = Some(trimmed.to_owned());
+            }
+        }
+    }
 }
 
 impl Source {
@@ -173,3 +247,4 @@ impl Source {
         Ok(seeked.actual_ts)
     }
 }
+

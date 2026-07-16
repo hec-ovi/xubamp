@@ -1,3 +1,21 @@
+xubamp (0.1.0-1) resolute; urgency=medium
+
+  * Tag-aware display: ID3v2/Vorbis/RIFF tags feed the classic
+    "N. Artist - Title (M:SS)" marquee and the playlist rows.
+  * Play/pause/stop indicator with the classic paused blink; the
+    windowshade strip gains the song title and transport feedback.
+  * Playlist: live current-track clock, per-track durations, working
+    bottom clusters, Audio Library scans.
+  * Double-size mode (Ctrl+D), an interactive clutterbar, and a file
+    info box with an editable ID3v1 tag form.
+  * Preferences: Options, full Visualization, Display, and a working
+    Audio Library page; options act on the live player.
+  * Windows drag from any free surface; a quick click-then-drag no
+    longer toggles windowshade instead of dragging.
+  * New hotkeys: R, S, L, Ctrl+D, Alt+3.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Wed, 16 Jul 2026 12:00:00 +0000
+
 xubamp (0.0.1-1) resolute; urgency=medium
 
   * Package xubamp for Ubuntu 26.04.

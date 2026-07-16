@@ -1,0 +1,54 @@
+# Flatpak manifest draft (not yet built or submitted).
+#
+# Flathub targets (July 2026): runtime org.freedesktop.Platform 25.08 (current
+# recommended branch, released Aug 2025) with the rust-stable SDK extension.
+# Cargo needs pregenerated offline sources because Flathub builders have no
+# network: generate generated-sources.json with flatpak-cargo-generator from
+# https://github.com/flatpak/flatpak-builder-tools against Cargo.lock, then
+# reference it in sources below.
+#
+# Local test build:
+#   flatpak install flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08 \
+#     org.freedesktop.Sdk.Extension.rust-stable//25.08
+#   python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flatpak/generated-sources.json
+#   flatpak-builder --user --install --force-clean build-dir packaging/flatpak/io.github.hec_ovi.xubamp.yml
+#
+# Submission note: Flathub's policy forbids AI-generated or AI-opened submission
+# pull requests. Review and adapt this file yourself, test the build locally, and
+# open the PR against the flathub/flathub `new-pr` branch personally.
+app-id: io.github.hec_ovi.xubamp
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: xubamp
+finish-args:
+  # Native Wayland client; no X11 fallback exists in the app.
+  - --socket=wayland
+  # Native PipeWire client (not pipewire-pulse).
+  - --filesystem=xdg-run/pipewire-0
+  # Playlists reference files by path after the portal chooser returns, and
+  # skins/music can live anywhere under the home directory.
+  - --filesystem=home:ro
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/xubamp/cargo
+modules:
+  - name: xubamp
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --features audio,keyboard -p xubamp
+      - install -Dm755 target/release/xubamp /app/bin/xubamp
+      - install -Dm644 packaging/xubamp.desktop /app/share/applications/io.github.hec_ovi.xubamp.desktop
+      - desktop-file-edit --set-key=Icon --set-value=io.github.hec_ovi.xubamp /app/share/applications/io.github.hec_ovi.xubamp.desktop
+      - install -Dm644 packaging/io.github.hec_ovi.xubamp.metainfo.xml /app/share/metainfo/io.github.hec_ovi.xubamp.metainfo.xml
+      - install -Dm644 icons/128x128.png /app/share/icons/hicolor/128x128/apps/io.github.hec_ovi.xubamp.png
+      - install -Dm644 icons/256x256.png /app/share/icons/hicolor/256x256/apps/io.github.hec_ovi.xubamp.png
+      - install -Dm644 icons/xubamp.svg /app/share/icons/hicolor/scalable/apps/io.github.hec_ovi.xubamp.svg
+    sources:
+      - type: git
+        url: https://github.com/hec-ovi/xubamp.git
+        tag: v0.2.5
+      - generated-sources.json

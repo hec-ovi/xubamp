@@ -1,0 +1,68 @@
+# Snap recipe draft (not yet built or pushed to the store).
+#
+# Targets (July 2026): base core26 is built from Ubuntu 26.04 LTS, the same
+# platform xubamp is tuned for. Strict confinement with the wayland and
+# audio-playback plugs (audio-playback auto-connects and fronts the system
+# audio service; the snap bundles the PipeWire client libraries it links).
+#
+# Local build and test:
+#   cd packaging/snap && snapcraft
+#   sudo snap install ./xubamp_*.snap --dangerous
+#   snap connections xubamp   # verify wayland/audio-playback are connected
+#
+# Store publishing needs a one-time name registration (Ubuntu One account):
+#   snapcraft login
+#   snapcraft register xubamp
+#   snapcraft upload --release=stable xubamp_*.snap
+name: xubamp
+base: core26
+version: '0.2.5'
+summary: Classic Winamp 2.9x-style player, native Wayland, in Rust
+description: |
+  A from-scratch reimplementation of the classic Winamp 2.9x player for
+  Ubuntu 26.04. Renders classic .wsz skins pixel for pixel, plays MP3, WAV,
+  FLAC, and Ogg Vorbis through PipeWire, and ships the 10-band equalizer,
+  playlist editor, and the XMMS-style spectrum analyzer and oscilloscope.
+  No Wine, no XWayland, no widget toolkit.
+grade: stable
+confinement: strict
+platforms:
+  amd64:
+
+apps:
+  xubamp:
+    command: bin/xubamp
+    plugs:
+      - wayland
+      - audio-playback
+      - home
+      - removable-media
+    environment:
+      # The skin renderer and portals resolve config under XDG dirs, which
+      # snapd already remaps into the snap's private area.
+      XDG_DATA_DIRS: $SNAP/usr/share:$XDG_DATA_DIRS
+
+parts:
+  xubamp:
+    plugin: rust
+    source: ../..
+    rust-path: ["crates/xubamp"]
+    rust-features: [audio, keyboard]
+    build-packages:
+      - pkg-config
+      - libpipewire-0.3-dev
+      - libxkbcommon-dev
+    stage-packages:
+      - libpipewire-0.3-0t64
+      - libxkbcommon0
+    organize:
+      bin/xubamp: bin/xubamp
+  desktop-files:
+    plugin: dump
+    source: ../..
+    stage:
+      - packaging/xubamp.desktop
+      - icons/256x256.png
+    organize:
+      packaging/xubamp.desktop: meta/gui/xubamp.desktop
+      icons/256x256.png: meta/gui/xubamp.png

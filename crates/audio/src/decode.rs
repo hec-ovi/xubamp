@@ -114,10 +114,14 @@ pub fn probe_stream_info(path: &Path) -> Option<StreamInfo> {
 
 /// Artist and title read from a file's embedded tags. Both fields are `None` when the file
 /// carries no usable tag, so the caller falls back to the file name, like classic Winamp.
+/// `all_text` collects EVERY textual tag value the file carries (album, album artist, composer,
+/// genre, year, comment, ...), for search.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrackTags {
     pub artist: Option<String>,
     pub title: Option<String>,
+    /// Every textual tag value, space-joined and capped, so a search can match any metadata.
+    pub all_text: String,
 }
 
 impl TrackTags {
@@ -167,21 +171,38 @@ pub fn probe_tags(path: &Path) -> Option<TrackTags> {
     Some(tags)
 }
 
-/// Fold a metadata revision's tags into `out`, keeping the first non-empty artist and title.
+/// The `all_text` cap: enough for every ordinary tag, small enough that a pathological comment
+/// (embedded lyrics, base64 blobs) cannot bloat a 5000-track session.
+const ALL_TEXT_CAP: usize = 1024;
+
+/// Fold a metadata revision's tags into `out`: the first non-empty artist and title fill their
+/// slots, and every textual value joins the search text.
 fn collect_tags(read: &[Tag], out: &mut TrackTags) {
+    use symphonia::core::meta::Value;
     for tag in read {
+        // Binary/flag values (cover art, indicators) carry no searchable text.
+        if matches!(tag.value, Value::Binary(_) | Value::Flag) {
+            continue;
+        }
+        let value = tag.value.to_string();
+        // RIFF INFO strings carry their NUL terminator (and pad byte) into the value.
+        let trimmed = value.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+        if trimmed.is_empty() {
+            continue;
+        }
+        if out.all_text.len() + trimmed.len() < ALL_TEXT_CAP {
+            if !out.all_text.is_empty() {
+                out.all_text.push(' ');
+            }
+            out.all_text.push_str(trimmed);
+        }
         let slot = match tag.std_key {
             Some(StandardTagKey::Artist) => &mut out.artist,
             Some(StandardTagKey::TrackTitle) => &mut out.title,
             _ => continue,
         };
         if slot.is_none() {
-            let value = tag.value.to_string();
-            // RIFF INFO strings carry their NUL terminator (and pad byte) into the value.
-            let trimmed = value.trim_matches(|c: char| c.is_whitespace() || c == '\0');
-            if !trimmed.is_empty() {
-                *slot = Some(trimmed.to_owned());
-            }
+            *slot = Some(trimmed.to_owned());
         }
     }
 }

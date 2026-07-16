@@ -58,6 +58,9 @@ pub struct Player {
     /// Tag-derived display names (`Artist - Title`), keyed by path, probed alongside the
     /// durations. A path with no usable tags stays absent and shows its file stem instead.
     names: HashMap<PathBuf, String>,
+    /// Lowercased searchable text per path: every tag value (artist, album, composer, genre,
+    /// year, comment, ...) plus the file name, for the Jump dialog.
+    search: HashMap<PathBuf, String>,
     /// The classic Options-page behaviours.
     options: PlayerOptions,
 }
@@ -107,6 +110,7 @@ impl Player {
             equalizer: EqSettings::default(),
             durations: HashMap::new(),
             names: HashMap::new(),
+            search: HashMap::new(),
             options: PlayerOptions::default(),
         };
         player.append_paths(tracks);
@@ -188,11 +192,20 @@ impl Player {
                     self.durations.insert(path.clone(), secs);
                 }
             }
-            if !self.names.contains_key(path) {
-                if let Some(name) = xubamp_audio::decode::probe_tags(path)
-                    .and_then(|tags| tags.display_name())
-                {
-                    self.names.insert(path.clone(), name);
+            if !self.names.contains_key(path) && !self.search.contains_key(path) {
+                if let Some(tags) = xubamp_audio::decode::probe_tags(path) {
+                    if let Some(name) = tags.display_name() {
+                        self.names.insert(path.clone(), name);
+                    }
+                    if !tags.all_text.is_empty() {
+                        let mut haystack = tags.all_text.to_lowercase();
+                        let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+                        if let Some(name) = name {
+                            haystack.push(' ');
+                            haystack.push_str(&name);
+                        }
+                        self.search.insert(path.clone(), haystack);
+                    }
                 }
             }
         }
@@ -261,6 +274,7 @@ impl Player {
     pub fn refresh_metadata(&mut self, path: &Path) {
         self.durations.remove(path);
         self.names.remove(path);
+        self.search.remove(path);
         self.probe_durations(std::slice::from_ref(&path.to_path_buf()));
     }
 
@@ -875,6 +889,11 @@ impl Player {
                     },
                     duration: duration_secs.map(fmt_mmss).unwrap_or_default(),
                     duration_secs,
+                    search: self.search.get(path).cloned().unwrap_or_else(|| {
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().to_lowercase())
+                            .unwrap_or_default()
+                    }),
                 }
             })
             .collect();

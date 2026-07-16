@@ -52,6 +52,9 @@ pub fn running_time_message(state: &PlState) -> String {
 pub struct Row {
     pub title: String,
     pub duration: String,
+    /// Lowercased searchable metadata (every tag value plus the file name), for the Jump
+    /// dialog. Not drawn anywhere; empty is fine.
+    pub search: String,
     /// Track length in seconds, for the bottom-bar selected/total readout. The player fills it
     /// from a header-only probe when tracks are added (or on first play, when the read-titles
     /// preference defers it); `None` means the header carried no length.
@@ -1228,8 +1231,7 @@ mod tests {
             (0..n)
                 .map(|i| Row {
                     title: format!("{i}"),
-                    duration: String::new(),
-                    duration_secs: None,
+                    ..Default::default()
                 })
                 .collect()
         }
@@ -1298,18 +1300,17 @@ mod tests {
             rows: vec![
                 Row {
                     title: "a".into(),
-                    duration: String::new(),
                     duration_secs: Some(90),
+                    ..Default::default()
                 },
                 Row {
                     title: "b".into(),
-                    duration: String::new(),
                     duration_secs: Some(30),
+                    ..Default::default()
                 },
                 Row {
                     title: "c".into(),
-                    duration: String::new(),
-                    duration_secs: None,
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -1423,6 +1424,7 @@ mod tests {
                 title: "1. current song".into(),
                 duration: "3:21".into(),
                 duration_secs: Some(201),
+                ..Default::default()
             }],
             current: Some(0),
             ..Default::default()
@@ -1527,8 +1529,7 @@ mod tests {
         (0..n)
             .map(|i| Row {
                 title: format!("track {i}"),
-                duration: String::new(),
-                duration_secs: None,
+                ..Default::default()
             })
             .collect()
     }

@@ -58,7 +58,8 @@ pub struct JumpState {
 
 impl JumpState {
     /// Original playlist indices of the rows matching the query: every whitespace-separated token
-    /// must appear in the title (case-insensitive). An empty query matches everything.
+    /// must appear in the shown title OR any of the track's metadata (artist, album, composer,
+    /// genre, year, comment, file name, ...), case-insensitive. An empty query matches everything.
     pub fn matches(&self) -> Vec<usize> {
         let tokens: Vec<String> = self.query.split_whitespace().map(str::to_lowercase).collect();
         self.rows
@@ -66,7 +67,9 @@ impl JumpState {
             .enumerate()
             .filter(|(_, r)| {
                 let title = r.title.to_lowercase();
-                tokens.iter().all(|t| title.contains(t))
+                tokens
+                    .iter()
+                    .all(|t| title.contains(t) || r.search.contains(t.as_str()))
             })
             .map(|(i, _)| i)
             .collect()
@@ -351,9 +354,38 @@ mod tests {
 
     fn state(titles: &[&str]) -> JumpState {
         JumpState {
-            rows: titles.iter().map(|t| Row { title: (*t).into(), duration: String::new(), duration_secs: None }).collect(),
+            rows: titles.iter().map(|t| Row { title: (*t).into(), ..Default::default() }).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn filter_also_matches_hidden_metadata() {
+        let mut state = JumpState::default();
+        state.rows = vec![
+            Row {
+                title: "1. Aphex Twin - Xtal".into(),
+                search: "aphex twin xtal selected ambient works 85-92 ambient 1992 xtal.mp3"
+                    .into(),
+                ..Default::default()
+            },
+            Row {
+                title: "2. Boards of Canada - Roygbiv".into(),
+                search: "boards of canada roygbiv music has the right to children 1998".into(),
+                ..Default::default()
+            },
+        ];
+        // An album word matches even though no row title contains it.
+        state.set_query("ambient works".into(), JUMP_H);
+        assert_eq!(state.matches(), [0]);
+        // A year finds its track.
+        state.set_query("1998".into(), JUMP_H);
+        assert_eq!(state.matches(), [1]);
+        // Tokens may mix shown title and hidden metadata.
+        state.set_query("boards children".into(), JUMP_H);
+        assert_eq!(state.matches(), [1]);
+        state.set_query("nowhere".into(), JUMP_H);
+        assert!(state.matches().is_empty());
     }
 
     #[test]

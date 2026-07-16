@@ -282,21 +282,40 @@ in the repo and git history, nothing important lives only in chat.
   counter, a filtered results list, and Jump/Close buttons; does not touch the playlist. Replaced
   the earlier in-place incremental search.
 
+## Landed in the polish round (2026-07-16, see git log for detail)
+
+- Input: every window (main, EQ, playlist) drags from any dead surface, and the title-bar
+  double-click shade toggle fires on release, so a quick click-then-drag no longer eats the drag.
+- Metadata: header-only tag probe (ID3v2 / Vorbis comments / RIFF INFO) feeding the classic
+  `N. Artist - Title (M:SS)` marquee and playlist rows; file-name stem stays the fallback.
+- Display: play/pause/stop indicator with the 3px work column (`playpaus.bmp`, geometric glyphs
+  on the built-in skin) and the classic paused blink of the clock (600ms beat, all clocks).
+- Shade: the main strip now shows the song title (clipped, static) and the baked mini transport
+  gets pressed feedback.
+- Playlist: a live current-track mini clock in the bottom bar (elapsed/remaining aware, shares
+  the paused blink, click toggles the mode).
+- Double-size: real 2x for main + EQ (Ctrl+D, menu, prefs, clutterbar D): nearest-neighbour
+  upload, halved pointer math, scaled menu anchors, attachment-preserving pane re-dock.
+- Clutterbar: O/A/I/D/V is interactive (menu, notice, file info, double size, vis menu), with a
+  Preferences toggle that swaps in the disabled strip.
+- File info box: native-styled toplevel with stream facts and an editable ID3v1 form (MP3 tail
+  write, round-trip tested); opens from MISC, Alt+3, or clutterbar I.
+- Preferences: new Options page (read titles on load/play, sort on load, manual advance, title
+  conversions), full Visualization page (styles, bands, peaks, three speed sliders), Display page
+  (clutterbar, playlist numbers, snap px), and a working Audio Library page (portal chooser,
+  persisted roots, ADD > Library scan honoring recurse). Sliders share one generalized range path.
+- Keys: r/s repeat/shuffle, l open-file, Alt+3 file info (Ctrl+D landed with double-size).
+- Menu: the impossible Main Window toggle is gone; ADD > URL is honestly disabled.
+
 ## Next
 
-- Equalizer: the EQ window (`eqmain.bmp`/`eq_ex.bmp` are present in skins) plus the 10-band DSP.
-- Windowshade (compact) mode for the main window (the 2nd title-bar button), and the options/main
-  menu. More keyboard bindings once their targets exist (r/s repeat/shuffle, l open-file, window
-  toggles, Ctrl+D double-size).
-- Window docking/snapping and restoring a window's position are blocked by Wayland (a client cannot
-  set its toplevel position); the faithful route is compositing docked panes as subsurfaces of one
-  window, which is a larger rework.
-- Formats: FLAC and Ogg Vorbis (Symphonia is built with wav+pcm+mp3 today); `.m3u`/`.pls` files.
+- Add URL (network streaming): policy and implementation are an open question (see FINDINGS).
 - Audio follow-up: reviving a fully finished, drained track via Play can reactivate the stream over
   an empty ring (a brief underrun); keep it fed with silence at end-of-track, or stage-then-
-  reactivate on the revive, so it stays Bluetooth-safe. Polish: pause-blink, click-to-toggle
-  remaining-time, a center detent on the balance slider, button drag-off un-press. Plus an authored
-  default skin (the built-in default ships no volume/balance/text/posbar sheets or viscolor.txt).
+  reactivate on the revive, so it stays Bluetooth-safe.
+- Polish: a center detent on the balance slider; an authored default skin (the built-in default
+  ships no volume/balance/text/posbar sheets); skinned cursors; dim-inactive-titlebars.
+- ID3v2 writing (the file info box edits only the ID3v1 tail today).
 
 ## Working rules
 

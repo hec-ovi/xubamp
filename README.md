@@ -2,7 +2,7 @@
 
 A from-scratch, native-Wayland reimplementation of the classic Winamp 2.9x player, built for one target only: Ubuntu 26.04.
 
-It plays music. The main window renders a `.wsz` skin pixel for pixel, with working transport, a seek bar, volume and balance, the spectrum/oscilloscope visualizer, a resizable playlist window, and the classic hotkeys. MP3 and WAV decode through Symphonia and play over PipeWire. The 10-band equalizer is the main piece still to come. Build order and design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the running log is in [docs/PROGRESS.md](docs/PROGRESS.md).
+It plays music. The main window renders a `.wsz` skin pixel for pixel, with working transport, seek bar, volume and balance, the spectrum/oscilloscope visualizer, the 10-band equalizer, a resizable playlist window, and the classic hotkeys. MP3, WAV, FLAC, and Ogg Vorbis decode through Symphonia and play over PipeWire. Build order and design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the running log is in [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## Why
 
@@ -10,16 +10,23 @@ Winamp 2.9x did a lot with almost nothing: a 275x116 bitmap UI, a software blitt
 
 ## What works
 
-- Loads classic Winamp 2.x skins (`.wsz`) and renders the main window pixel for pixel.
-- Playback of MP3 and WAV through PipeWire, with a Bluetooth-safe gapless seek.
-- Transport (play, pause, stop, previous, next), a dragged seek bar, volume and balance sliders (the value shows in the marquee while you drag), a running-time display, and the scrolling song-title marquee.
-- Spectrum and oscilloscope visualizer; click it to cycle the mode.
+- Loads classic Winamp 2.x skins (`.wsz`) and renders the main, equalizer, and playlist windows pixel for pixel; skins switch at runtime from the menu or Preferences.
+- Playback of MP3, WAV, FLAC, and Ogg Vorbis through PipeWire, with a Bluetooth-safe gapless seek.
+- Transport (play, pause, stop, previous, next, eject), a dragged seek bar, volume and balance sliders (the value shows in the marquee while you drag), elapsed/remaining clock with the classic paused blink, the play/pause/stop indicator, kbps/kHz/mono/stereo readouts, and a scrolling marquee showing the tagged "N. Artist - Title (M:SS)" (ID3v2, Vorbis comments, RIFF INFO; file name when untagged).
+- Spectrum and oscilloscope visualizer with the classic options: analyzer styles (normal/fire/line), thick or thin bands, peaks and falloff speeds, oscilloscope styles, refresh rate. Click the panel to cycle the mode.
+- The 10-band equalizer with preamp, the 17 classic presets, EQF load/save, +12/0/-12 db flatten labels, and its own windowshade strip.
 - Shuffle and repeat, with Previous/Next that retrace the real play order, so Previous still works under shuffle.
-- A separate playlist window: click to select (Ctrl and Shift extend), double-click to play, mouse-wheel scroll, resize by the bottom-right grip, and it remembers its size across close and reopen.
-- A separate "Jump to file" dialog on `J`: type to filter the tracks, Enter or a double-click plays the pick, and it leaves the playlist untouched.
-- Classic hotkeys: `z x c v b` for the transport, arrow keys for volume and seek, `J` to jump.
+- The playlist editor: click to select (Ctrl and Shift extend), double-click to play, per-track durations and the selected/total readout, a live current-track clock, working ADD/REM/SEL/MISC/LIST clusters (including `.m3u`/`.pls` save and load and an Audio Library scan), a draggable scrollbar, resize grip, and a windowshade strip.
+- Windowshade mode on all three panes; the main strip shows the title, mini clock, mini seek bar, and mini transport.
+- Double-size mode (Ctrl+D, the menu, or the clutterbar D) doubles the main window and equalizer.
+- The clutterbar: O pops the menu, I the file info box, D double size, V the visualization menu.
+- A file info box (playlist MISC, Alt+3, or clutterbar I) showing the stream facts and an editable ID3v1 tag form for MP3s.
+- Native GNOME-styled (Adwaita, light and dark) menus, Preferences, Jump-to-file, and file info dialogs; everything else is skin-rendered.
+- Preferences pages: Shuffle morph rate, Options (read titles on load/play, sort on load, manual advance, title conversions), Visualization, Display (time mode, double size, title scroll, clutterbar, playlist numbers, snap distance), Audio Library roots, and Skins.
+- Classic hotkeys: `z x c v b` transport, `r s` repeat/shuffle, `l` open files, arrows for volume and seek, `j` jump, `Ctrl+T` time mode, `Ctrl+D` double size, `Ctrl+P` preferences, `Alt+3` file info, Del/Ctrl+A in the playlist.
+- Every window drags from any free surface, not just the 14px title strip.
 
-Still to come: the 10-band equalizer window and DSP, windowshade (collapsed) mode, FLAC and Ogg Vorbis, and `.m3u`/`.pls` playlist files. No album art, no media library, no modern chrome, on purpose.
+No album art, no media library view, no modern chrome, on purpose. Add URL (network streaming) is not implemented; its menu item is disabled.
 
 Out of scope: Windows and macOS, X11, KDE and other compositors, older Ubuntu. This is tuned for Ubuntu 26.04 (GNOME 50, Mutter, Wayland, PipeWire) and nothing else. Targeting one platform is what keeps it small.
 
@@ -27,8 +34,8 @@ Out of scope: Windows and macOS, X11, KDE and other compositors, older Ubuntu. T
 
 Wayland does not let a client position its own windows or read another window's position, so a couple of things Winamp assumed work differently:
 
-- The playlist and jump-to-file windows are separate top-level windows, placed by the compositor. They cannot magnetically snap or dock to the main window the way Winamp's did, because the protocol forbids a client from setting a window's position. Reopening a window restores its size but not its place. (Compositing the docked panes as subsurfaces of one window is a possible future route; it is a larger change.)
-- Always on top is a manual GNOME action (Super plus right-click, or a shortcut you bind), not an in-app toggle. Mutter does not expose window stacking to applications.
+- The equalizer and playlist panes are child surfaces of the main window, so they dock, edge-snap (threshold configurable in Preferences), and travel with it like the classic cluster. The dialogs (Jump, Preferences, file info) are ordinary top-level windows placed by the compositor.
+- Always on top is a manual GNOME action (Super plus right-click, or a shortcut you bind), not an in-app toggle. Mutter does not expose window stacking to applications, which is why the clutterbar's A button only shows a notice.
 
 ## Layout
 
@@ -38,6 +45,10 @@ A small Cargo workspace, one job per crate:
 - `crates/render` composes each window's framebuffer from the skin and the UI state and owns the hit-testing. Pure and heavily unit-tested.
 - `crates/audio` decodes with Symphonia and plays through PipeWire, feeding a lock-free ring the realtime callback drains (no allocation or locking on the audio thread).
 - `crates/wl` is the native Wayland layer (smithay-client-toolkit): windows, input, and the software blit into shared-memory buffers.
+- `crates/dsp` is the 10-band equalizer filter and the classic preset table.
+- `crates/config` parses and writes the settings file (`~/.config/xubamp/settings.conf`).
+- `crates/library` classifies audio paths and scans directories.
+- `crates/portal` talks to the XDG desktop portals (file choosers, color scheme).
 - `crates/xubamp` is the binary that wires them together.
 
 ## Build

@@ -20,8 +20,8 @@ fn mmss(total_secs: u32) -> String {
 }
 
 /// The bottom-bar running-time readout: `selected/total`, where the left side sums the durations of
-/// the selected rows and the right side sums every row, each as `M:SS`. Unknown row durations count
-/// as zero (the player does not probe lengths yet), so a fresh list reads `0:00/0:00`.
+/// the selected rows and the right side sums every row, each as `M:SS`. A row whose header carried
+/// no length (or whose probing is deferred to first play) counts as zero.
 pub fn running_time_message(state: &PlState) -> String {
     let selected: HashSet<usize> = state.selected.iter().copied().collect();
     let mut sel_secs = 0u32;
@@ -41,9 +41,9 @@ pub fn running_time_message(state: &PlState) -> String {
 pub struct Row {
     pub title: String,
     pub duration: String,
-    /// Track length in seconds when known, for the bottom-bar selected/total readout. Rows created
-    /// from a plain path carry `None` (the player does not probe durations yet); a real probe is a
-    /// later follow-up, at which point the per-row `duration` string can be derived from this too.
+    /// Track length in seconds, for the bottom-bar selected/total readout. The player fills it
+    /// from a header-only probe when tracks are added (or on first play, when the read-titles
+    /// preference defers it); `None` means the header carried no length.
     pub duration_secs: Option<u32>,
 }
 

@@ -88,7 +88,7 @@ The UI and skin crates build and test on the host with no system libraries. Play
 
 ## Layout
 
-A small Cargo workspace, one job per crate: `skin` (wsz/BMP decode, sprite geometry), `render` (pure framebuffer composition and hit testing, heavily unit-tested), `audio` (Symphonia decode, PipeWire output, lock-free ring into the realtime thread), `wl` (smithay-client-toolkit windows, input, shm blit), `dsp` (equalizer filters and presets), `config` (settings file), `library` (audio path scanning), `portal` (XDG portals), `xubamp` (the binary). Design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), the running log in [docs/PROGRESS.md](docs/PROGRESS.md).
+A small Cargo workspace, one job per crate: `skin` (wsz/BMP decode, sprite geometry), `render` (pure framebuffer composition and hit testing, heavily unit-tested), `audio` (Symphonia decode, PipeWire output, lock-free ring into the realtime thread), `wl` (smithay-client-toolkit windows, input, shm blit), `dsp` (equalizer filters and presets), `config` (settings file), `library` (audio path scanning), `portal` (XDG portals), `xubamp` (the binary). Design notes live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
 

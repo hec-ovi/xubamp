@@ -2398,6 +2398,11 @@ impl App {
                         let display = self.state.time_display.toggled();
                         self.set_time_display(display);
                     }
+                    pledit::Region::MiniTransport(t) => {
+                        // The baked mini transport row drives the same commands as the main
+                        // buttons; like the shade strip, the art has no pressed state.
+                        (self.on_command)(hit::Command::Transport(t));
+                    }
                     pledit::Region::Body => self.playlist_press_row(x, y),
                     pledit::Region::None => {}
                 }

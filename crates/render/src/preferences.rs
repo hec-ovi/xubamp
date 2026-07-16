@@ -516,7 +516,7 @@ impl PreferencesState {
                 // horizontal mode radios with the fps-labelled refresh slider, the spectrum
                 // options (styles, Peaks, thin/thick bands) beside the oscilloscope styles, and
                 // the two Slow/Fast falloff sliders.
-                let mode_y = content.y + 52;
+                let mode_y = content.y + 74;
                 let radio = |id, label: &str, rx, ry, rw| ControlInfo {
                     id,
                     role: ControlRole::RadioButton,
@@ -566,7 +566,7 @@ impl PreferencesState {
                 let mut refresh = slider(
                     ControlId::VisualizationRefreshRate,
                     "Refresh rate",
-                    content.y + 92,
+                    content.y + 112,
                     36,
                     self.model.visualization_refresh_rate,
                 );
@@ -580,7 +580,7 @@ impl PreferencesState {
 
                 // Left column: spectrum analyzer options, in the original order.
                 let col_w = 180;
-                let left_y = content.y + 172;
+                let left_y = content.y + 188;
                 controls.push(check(
                     ControlId::VisualizationAnalyzerNormal,
                     "Normal style",
@@ -665,7 +665,7 @@ impl PreferencesState {
                 let mut analyzer_falloff = slider(
                     ControlId::VisualizationBarFalloff,
                     "Analyzer falloff",
-                    content.y + 336,
+                    content.y + 352,
                     36,
                     self.model.visualization_bar_falloff,
                 );
@@ -675,7 +675,7 @@ impl PreferencesState {
                 let mut peaks_falloff = slider(
                     ControlId::VisualizationPeakFalloff,
                     "Peaks falloff",
-                    content.y + 396,
+                    content.y + 412,
                     36,
                     self.model.visualization_peak_falloff,
                 );
@@ -1553,13 +1553,13 @@ fn draw_page_static_adwaita(
             atext(fb, font, content.x + 18, content.y + 34, "Shuffle morph rate", BODY_PX, dim);
         }
         Section::Visualization => {
-            atext(fb, font, content.x + 18, content.y + 8, "Built-in visualization options", BODY_PX, p.fg);
-            atext(fb, font, content.x + 18, content.y + 30, "Visualization mode", BODY_PX, dim);
-            atext(fb, font, content.x + 18, content.y + 100, "Refresh rate:", BODY_PX, dim);
-            atext(fb, font, content.x + 18, content.y + 148, "Spectrum analyzer options", BODY_PX, dim);
-            atext(fb, font, content.x + 18 + 204, content.y + 148, "Oscilliscope options", BODY_PX, dim);
-            atext(fb, font, content.x + 18, content.y + 318, "Analyzer falloff:", BODY_PX, dim);
-            atext(fb, font, content.x + 18, content.y + 378, "Peaks falloff:", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 30, "Built-in visualization options", BODY_PX, p.fg);
+            atext(fb, font, content.x + 18, content.y + 52, "Visualization mode", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 120, "Refresh rate:", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 164, "Spectrum analyzer options", BODY_PX, dim);
+            atext(fb, font, content.x + 18 + 204, content.y + 164, "Oscilliscope options", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 336, "Analyzer falloff:", BODY_PX, dim);
+            atext(fb, font, content.x + 18, content.y + 396, "Peaks falloff:", BODY_PX, dim);
         }
         Section::Options => {
             atext(fb, font, content.x + 18, content.y + 32, "Read titles on", BODY_PX, dim);
@@ -1779,13 +1779,13 @@ fn draw_page_static(fb: &mut Framebuffer, state: &PreferencesState, content: Rec
             );
         }
         Section::Visualization => {
-            draw_text(fb, content.x + 18, content.y + 8, "Built-in visualization options", TEXT);
-            draw_text(fb, content.x + 18, content.y + 30, "Visualization mode", DIM);
-            draw_text(fb, content.x + 18, content.y + 100, "Refresh rate:", DIM);
-            draw_text(fb, content.x + 18, content.y + 148, "Spectrum analyzer options", DIM);
-            draw_text(fb, content.x + 18 + 204, content.y + 148, "Oscilliscope options", DIM);
-            draw_text(fb, content.x + 18, content.y + 318, "Analyzer falloff:", DIM);
-            draw_text(fb, content.x + 18, content.y + 378, "Peaks falloff:", DIM);
+            draw_text(fb, content.x + 18, content.y + 30, "Built-in visualization options", TEXT);
+            draw_text(fb, content.x + 18, content.y + 52, "Visualization mode", DIM);
+            draw_text(fb, content.x + 18, content.y + 120, "Refresh rate:", DIM);
+            draw_text(fb, content.x + 18, content.y + 164, "Spectrum analyzer options", DIM);
+            draw_text(fb, content.x + 18 + 204, content.y + 164, "Oscilliscope options", DIM);
+            draw_text(fb, content.x + 18, content.y + 336, "Analyzer falloff:", DIM);
+            draw_text(fb, content.x + 18, content.y + 396, "Peaks falloff:", DIM);
         }
         Section::Options => {
             draw_text(fb, content.x + 18, content.y + 32, "Read titles on", DIM);

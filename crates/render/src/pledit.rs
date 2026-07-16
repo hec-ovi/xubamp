@@ -118,6 +118,8 @@ pub enum Region {
     /// The live mini clock in the bottom bar; clicking it toggles elapsed/remaining, like the
     /// main window's clock.
     MiniTime,
+    /// One of the six baked mini transport glyphs in the bottom-right section.
+    MiniTransport(crate::hit::Transport),
     /// The list area proper (rows, and the empty space under the last row).
     Body,
     /// Dead window chrome (the side frames and the bottom bar between its controls). Pressing
@@ -166,6 +168,26 @@ fn in_mini_time(width: i32, height: i32, x: i32, y: i32) -> bool {
 /// section).
 const MINI_TIME_RIGHT: i32 = 84;
 const MINI_TIME_BOTTOM: i32 = 15;
+
+/// The six baked mini transport glyphs (previous, play, pause, stop, next, eject) on the row
+/// under the running-time display. Webamp does not implement them, so the row's geometry is
+/// measured from the classic 2.9x layout: it starts 144px in from the right edge, 14px up from
+/// the bottom, one 9px-wide target per glyph.
+const MINI_TRANSPORT_RIGHT: i32 = 144;
+const MINI_TRANSPORT_BOTTOM: i32 = 14;
+const MINI_TRANSPORT_W: i32 = 9;
+const MINI_TRANSPORT_H: i32 = 10;
+
+/// Which mini transport glyph is at a window-local point, if any.
+fn mini_transport_at(width: i32, height: i32, x: i32, y: i32) -> Option<crate::hit::Transport> {
+    let x0 = width - MINI_TRANSPORT_RIGHT;
+    let y0 = height - MINI_TRANSPORT_BOTTOM;
+    if y < y0 || y >= y0 + MINI_TRANSPORT_H || x < x0 {
+        return None;
+    }
+    let slot = (x - x0) / MINI_TRANSPORT_W;
+    crate::hit::TRANSPORT_ORDER.get(slot as usize).copied()
+}
 
 /// The scrollbar thumb rectangle, or `None` when the list fits and there is nothing to scroll.
 pub fn scrollbar_thumb_rect(state: &PlState, width: i32, height: i32) -> Option<(i32, i32, i32, i32)> {
@@ -288,6 +310,8 @@ pub fn region_at(state: &PlState, width: i32, height: i32, x: i32, y: i32) -> Re
         Region::Scrollbar
     } else if in_mini_time(width, height, x, y) {
         Region::MiniTime
+    } else if let Some(t) = mini_transport_at(width, height, x, y) {
+        Region::MiniTransport(t)
     } else if y < sprites::PLEDIT_TITLE_H {
         Region::TitleBar
     } else if x >= sprites::PLEDIT_LIST_X
@@ -577,8 +601,10 @@ fn darken_rect(fb: &mut Framebuffer, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-/// Draw the `selected/total` running-time readout, right-aligned in the open bottom-bar space just
-/// left of the LIST button, in the playlist's normal text colour.
+/// Draw the `selected/total` running-time readout in its classic slot: the recessed display
+/// left of the LIST cluster (7px into the right-anchored bottom section, 10px below its top),
+/// left-anchored like the original. Text that cannot fit before the LIST cluster falls back to
+/// the total alone, then truncates, so it never paints over the skin's baked art.
 fn draw_running_time(
     fb: &mut Framebuffer,
     state: &PlState,
@@ -587,18 +613,17 @@ fn draw_running_time(
     height: i32,
 ) {
     let mut text = running_time_message(state);
-    let right = width - LIST_BUTTON_RIGHT - BOTTOM_BUTTON_W - 5;
-    // The readout may not run left over the skin's baked bottom-bar art. When the whole
-    // selected/total line cannot fit its slot (a huge playlist on a narrow window), show the
-    // total alone.
-    let slot_left = MISC_BUTTON_X + BOTTOM_BUTTON_W + 6;
-    if right - (font::text_width(&text) as i32) < slot_left {
+    let x = width - RUNTIME_RIGHT;
+    let y = height - RUNTIME_BOTTOM;
+    let max_w = RUNTIME_RIGHT - LIST_BUTTON_RIGHT - BOTTOM_BUTTON_W - 6;
+    if font::text_width(&text) as i32 > max_w {
         if let Some((_, total)) = text.rsplit_once('/') {
             text = total.to_owned();
         }
+        while !text.is_empty() && font::text_width(&text) as i32 > max_w {
+            text.pop();
+        }
     }
-    let x = (right - font::text_width(&text) as i32).max(slot_left);
-    let y = height - BOTTOM_BUTTON_BOTTOM - BOTTOM_BUTTON_H + 5;
     font::draw_text(
         &mut fb.rgba,
         fb.width,
@@ -609,6 +634,12 @@ fn draw_running_time(
         [colors.normal.r, colors.normal.g, colors.normal.b],
     );
 }
+
+/// The running-time display's distance in from the right edge and up from the bottom: 7px into
+/// the classic right-anchored 150px section (Webamp's layout), vertically as verified against
+/// the live skin recess.
+const RUNTIME_RIGHT: i32 = 143;
+const RUNTIME_BOTTOM: i32 = 25;
 
 /// Draw the live mini clock in its classic bottom-bar slot: `MM:SS` of the current track (a
 /// leading minus in remaining mode), in the playlist's current-track colour. Blank when nothing

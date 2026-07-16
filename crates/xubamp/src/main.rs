@@ -986,17 +986,25 @@ fn main() {
                             eprintln!("xubamp: loaded skin {}", path.display());
                             events.push(xubamp_wl::ExternalEvent::SkinLoaded(skin));
                         }
-                        portal_actions::Completion::LibraryRoot(root) => {
+                        portal_actions::Completion::LibraryRoots(roots) => {
                             let mut settings = settings.borrow_mut();
-                            if !settings.library.roots.contains(&root) {
-                                settings.library.roots.push(root.clone());
+                            let mut changed = false;
+                            for root in &roots {
+                                if !settings.library.roots.contains(root) {
+                                    settings.library.roots.push(root.clone());
+                                    changed = true;
+                                }
+                            }
+                            if changed {
                                 if let Some(path) = settings_path.as_deref() {
                                     if let Err(error) = xubamp_config::save(path, &settings) {
                                         eprintln!("xubamp: cannot save library root: {error}");
                                     }
                                 }
                             }
-                            events.push(xubamp_wl::ExternalEvent::LibraryRootChosen(root));
+                            for root in roots {
+                                events.push(xubamp_wl::ExternalEvent::LibraryRootChosen(root));
+                            }
                         }
                         portal_actions::Completion::Error(error) => {
                             eprintln!("xubamp: {error}");
@@ -1185,17 +1193,25 @@ fn main() {
                             eprintln!("xubamp: loaded skin {}", path.display());
                             events.push(xubamp_wl::ExternalEvent::SkinLoaded(skin));
                         }
-                        portal_actions::Completion::LibraryRoot(root) => {
+                        portal_actions::Completion::LibraryRoots(roots) => {
                             let mut settings = settings.borrow_mut();
-                            if !settings.library.roots.contains(&root) {
-                                settings.library.roots.push(root.clone());
+                            let mut changed = false;
+                            for root in &roots {
+                                if !settings.library.roots.contains(root) {
+                                    settings.library.roots.push(root.clone());
+                                    changed = true;
+                                }
+                            }
+                            if changed {
                                 if let Some(path) = settings_path.as_deref() {
                                     if let Err(error) = xubamp_config::save(path, &settings) {
                                         eprintln!("xubamp: cannot save library root: {error}");
                                     }
                                 }
                             }
-                            events.push(xubamp_wl::ExternalEvent::LibraryRootChosen(root));
+                            for root in roots {
+                                events.push(xubamp_wl::ExternalEvent::LibraryRootChosen(root));
+                            }
                         }
                         portal_actions::Completion::Error(error) => eprintln!("xubamp: {error}"),
                     }

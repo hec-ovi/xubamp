@@ -33,8 +33,8 @@ pub(crate) enum Completion {
     PlaylistToLoad(PathBuf),
     /// The user picked a destination to save the current playlist to.
     PlaylistToSave(PathBuf),
-    /// The user picked a directory to add as an Audio Library root.
-    LibraryRoot(PathBuf),
+    /// The user picked one or more directories to add as Audio Library roots.
+    LibraryRoots(Vec<PathBuf>),
     Error(String),
 }
 
@@ -169,27 +169,27 @@ fn execute(request: MenuRequest) -> Result<Option<Completion>, String> {
                 DialogResult::Cancelled => None,
             }),
         MenuRequest::Action(ClassicMenuAction::PlaylistAddDirectory) => chooser
-            .open_directory_blocking(None)
+            .open_directories_blocking(None)
             .map_err(|error| format!("cannot open directory chooser: {error}"))
             .map(|result| match result {
-                DialogResult::Selected(root) => {
-                    let report = xubamp_library::scan(&root, playlist_directory_scan_options());
-                    Some(Completion::AddPaths {
-                        paths: report.tracks,
-                        warnings: report
-                            .errors
-                            .into_iter()
-                            .map(|error| error.to_string())
-                            .collect(),
-                    })
+                DialogResult::Selected(roots) => {
+                    let mut paths = Vec::new();
+                    let mut warnings = Vec::new();
+                    for root in roots {
+                        let report =
+                            xubamp_library::scan(&root, playlist_directory_scan_options());
+                        paths.extend(report.tracks);
+                        warnings.extend(report.errors.into_iter().map(|error| error.to_string()));
+                    }
+                    Some(Completion::AddPaths { paths, warnings })
                 }
                 DialogResult::Cancelled => None,
             }),
         MenuRequest::Action(ClassicMenuAction::LibraryAddDirectory) => chooser
-            .open_directory_blocking(None)
+            .open_directories_blocking(None)
             .map_err(|error| format!("cannot open directory chooser: {error}"))
             .map(|result| match result {
-                DialogResult::Selected(root) => Some(Completion::LibraryRoot(root)),
+                DialogResult::Selected(roots) => Some(Completion::LibraryRoots(roots)),
                 DialogResult::Cancelled => None,
             }),
         MenuRequest::AddLibrary { roots, recurse } => {

@@ -135,28 +135,28 @@ impl FileChooser {
         async_io::block_on(self.open_audio_files(current_folder))
     }
 
-    /// Ask for one directory to scan for supported audio files.
-    pub async fn open_directory(
+    /// Ask for one or more directories to scan for supported audio files.
+    pub async fn open_directories(
         &self,
         current_folder: Option<&Path>,
-    ) -> Result<DialogResult<PathBuf>, Error> {
+    ) -> Result<DialogResult<Vec<PathBuf>>, Error> {
         let request = SelectedFiles::open_file()
-            .title("Add directory to playlist")
+            .title("Add directories to playlist")
             .accept_label("Add")
             .modal(true)
-            .multiple(false)
+            .multiple(true)
             .directory(true);
         let request = self.configure_open_request(request, current_folder)?;
         map_selected(request.send().await.and_then(|request| request.response()))?
-            .map_selected(expect_one_path)
+            .map_selected(expect_nonempty_paths)
     }
 
-    /// Blocking form of [`Self::open_directory`] for a dedicated worker thread.
-    pub fn open_directory_blocking(
+    /// Blocking form of [`Self::open_directories`] for a dedicated worker thread.
+    pub fn open_directories_blocking(
         &self,
         current_folder: Option<&Path>,
-    ) -> Result<DialogResult<PathBuf>, Error> {
-        async_io::block_on(self.open_directory(current_folder))
+    ) -> Result<DialogResult<Vec<PathBuf>>, Error> {
+        async_io::block_on(self.open_directories(current_folder))
     }
 
     /// Ask for one Winamp EQF equalizer preset to load.
@@ -389,6 +389,17 @@ fn validate_audio_path_list(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, Selecti
 
 fn expect_one_path(selected: SelectedFiles) -> Result<PathBuf, Error> {
     expect_one(selected_paths(selected)?).map_err(Error::InvalidSelection)
+}
+
+fn expect_nonempty_paths(selected: SelectedFiles) -> Result<Vec<PathBuf>, Error> {
+    expect_nonempty(selected_paths(selected)?).map_err(Error::InvalidSelection)
+}
+
+fn expect_nonempty(paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, SelectionError> {
+    if paths.is_empty() {
+        return Err(SelectionError::Empty);
+    }
+    Ok(paths)
 }
 
 fn expect_one_eqf_path(selected: SelectedFiles) -> Result<PathBuf, Error> {
@@ -881,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_path_is_required_for_directory_and_eqf_dialogs() {
+    fn exactly_one_path_is_required_for_eqf_and_other_single_file_dialogs() {
         assert_eq!(
             expect_one(Vec::new()),
             Err(SelectionError::ExpectedOne { actual: 0 })
@@ -893,6 +904,15 @@ mod tests {
         assert_eq!(
             expect_one(vec![PathBuf::from("a")]).unwrap(),
             Path::new("a")
+        );
+    }
+
+    #[test]
+    fn directory_dialog_accepts_several_folders_but_not_an_empty_response() {
+        assert_eq!(expect_nonempty(Vec::new()), Err(SelectionError::Empty));
+        assert_eq!(
+            expect_nonempty(vec![PathBuf::from("/music/a"), PathBuf::from("/music/b")]),
+            Ok(vec![PathBuf::from("/music/a"), PathBuf::from("/music/b")])
         );
     }
 

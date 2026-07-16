@@ -279,11 +279,44 @@ impl UiFont {
         None
     }
 
+    /// Resolve a font-face name (as a skin's `pledit.txt` writes it, e.g. `Arial`) through
+    /// fontconfig's `fc-match`, which substitutes a metric-compatible installed face for missing
+    /// Windows ones (Arial usually lands on Liberation Sans). Returns `None` when `fc-match` is
+    /// unavailable or the matched file cannot be parsed as a font.
+    pub fn load_named(name: &str) -> Option<UiFont> {
+        let out = std::process::Command::new("fc-match")
+            .args(["--format=%{file}", name])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8(out.stdout).ok()?;
+        let path = path.trim();
+        if path.is_empty() {
+            return None;
+        }
+        Self::from_bytes(&std::fs::read(path).ok()?)
+    }
+
     /// Total advance width of `text` at `px` pixels-per-em, summed over each glyph's metrics.
     pub fn text_width(&self, text: &str, px: f32) -> f32 {
         text.chars()
             .map(|ch| self.font.metrics(ch, px).advance_width)
             .sum()
+    }
+
+    /// Advance width of a single character at `px` pixels-per-em.
+    pub fn advance(&self, ch: char, px: f32) -> f32 {
+        self.font.metrics(ch, px).advance_width
+    }
+
+    /// Baseline-to-top ascent at `px` pixels-per-em. Falls back to 0.8em when the font exposes no
+    /// horizontal line metrics.
+    pub fn ascent(&self, px: f32) -> f32 {
+        self.font
+            .horizontal_line_metrics(px)
+            .map_or(px * 0.8, |m| m.ascent)
     }
 
     /// Distance between baselines for a single line at `px` pixels-per-em. Falls back to a plain
@@ -331,6 +364,30 @@ mod tests {
 
     const WHITE: [u8; 4] = [255, 255, 255, 255];
     const ACCENT: [u8; 4] = [0x35, 0x84, 0xe4, 255];
+
+    #[test]
+    fn load_named_mirrors_what_fontconfig_matches() {
+        let matched = std::process::Command::new("fc-match")
+            .args(["--format=%{file}", "Arial"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|p| p.trim().to_owned())
+            .filter(|p| !p.is_empty());
+        let font = UiFont::load_named("Arial");
+        match matched {
+            // fc-match produced a file: load_named succeeds exactly when fontdue can parse it.
+            Some(path) => assert_eq!(
+                font.is_some(),
+                std::fs::read(&path)
+                    .ok()
+                    .and_then(|b| UiFont::from_bytes(&b))
+                    .is_some()
+            ),
+            None => assert!(font.is_none(), "no fontconfig means no named font"),
+        }
+    }
 
     #[test]
     fn palettes_share_the_accent_but_differ_in_background() {

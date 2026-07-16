@@ -1,7 +1,8 @@
 //! The playlist editor (PLEDIT) window: composited from `pledit.bmp` tiles in either its expanded,
 //! resizable form or its 14px windowshade form. Pure (returns a `Framebuffer`), like the main
-//! window. Track rows use the clean-room 5x7 font (Winamp uses the skin's system font; we
-//! approximate with our own bitmap font for now) coloured from `pledit.txt`.
+//! window. Track rows use the vector face the skin names in `pledit.txt` (resolved by the caller
+//! into a [`UiFont`]), coloured from the same file; the clean-room 5x7 bitmap font remains the
+//! fallback when no vector font could be loaded.
 
 use std::collections::HashSet;
 
@@ -10,7 +11,13 @@ use xubamp_skin::color::Rgb;
 use xubamp_skin::sprites::{self, Rect};
 use xubamp_skin::{font, textfont, Skin};
 
+use crate::adwaita::UiFont;
 use crate::{blit, Framebuffer};
+
+/// Pixels-per-em for the playlist rows' vector font. Winamp's default playlist font height; at
+/// this size Arial-metric caps run ~7px, the same visual weight as the 5x7 bitmap fallback, and a
+/// full line box fits the fixed 13px row grid.
+const PL_FONT_PX: f32 = 10.0;
 
 /// Format a whole-second count as Winamp's `M:SS` (or `MM:SS`, `MMM:SS` for long values): minutes
 /// with no leading zero, seconds always two digits. There is no hours field, matching the classic
@@ -488,7 +495,13 @@ impl PlState {
 /// Compose the playlist window at `width` x `height`. Expanded geometry is clamped to the classic
 /// minimum; shaded geometry preserves the width but collapses completely to 14px. Incomplete skins
 /// get an opaque clean-room fallback frame instead of an invisible/invalid surface.
-pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebuffer {
+pub fn compose(
+    skin: &Skin,
+    state: &PlState,
+    pl_font: Option<&UiFont>,
+    width: i32,
+    height: i32,
+) -> Framebuffer {
     if state.shade {
         return compose_shade(skin, state, width);
     }
@@ -496,7 +509,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
     let (w, h) = (width.max(sprites::PLEDIT_W), height.max(sprites::PLEDIT_H));
     let mut fb = Framebuffer::new(w as u32, h as u32);
     let colors = skin.pledit_colors.clone().unwrap_or_default();
-    draw_fallback_expanded(&mut fb, skin, state, &colors);
+    draw_fallback_expanded(&mut fb, skin, state, pl_font, &colors);
 
     let Some(sheet) = &skin.pledit else {
         return fb;
@@ -591,7 +604,7 @@ pub fn compose(skin: &Skin, state: &PlState, width: i32, height: i32) -> Framebu
 
     draw_running_time(&mut fb, skin, state, &colors, w, h);
     draw_mini_time(&mut fb, skin, state, &colors, w, h);
-    draw_rows(&mut fb, state, &colors, h, list_w);
+    draw_rows(&mut fb, state, &colors, pl_font, h, list_w);
     draw_scrollbar(&mut fb, skin, state, &colors, w, h);
     fb
 }
@@ -763,7 +776,7 @@ pub fn compose_shade(skin: &Skin, state: &PlState, width: i32) -> Framebuffer {
     } else {
         draw_fallback_title_buttons(&mut fb, state, w);
     }
-    draw_shade_track(&mut fb, state, &colors, w);
+    draw_shade_track(&mut fb, skin, state, &colors, w);
     fb
 }
 
@@ -790,6 +803,7 @@ fn draw_fallback_expanded(
     fb: &mut Framebuffer,
     skin: &Skin,
     state: &PlState,
+    pl_font: Option<&UiFont>,
     colors: &xubamp_skin::pledit::PlEdit,
 ) {
     let (w, h) = (fb.width as i32, fb.height as i32);
@@ -819,7 +833,7 @@ fn draw_fallback_expanded(
     draw_fallback_bottom_buttons(fb, state, w, h, colors);
     draw_running_time(fb, skin, state, colors, w, h);
     draw_mini_time(fb, skin, state, colors, w, h);
-    draw_rows(fb, state, colors, h, list_w);
+    draw_rows(fb, state, colors, pl_font, h, list_w);
     draw_scrollbar(fb, skin, state, colors, w, h);
 }
 
@@ -962,8 +976,12 @@ fn draw_fallback_title_buttons(fb: &mut Framebuffer, state: &PlState, width: i32
     }
 }
 
+/// Draw the shaded strip's `title (duration)` readout. Winamp draws this with the 5x6 `text.bmp`
+/// cells (Webamp's `CharacterString`), not the playlist font, so the sheet takes priority and the
+/// built-in bitmap font only covers skins without one.
 fn draw_shade_track(
     fb: &mut Framebuffer,
+    skin: &Skin,
     state: &PlState,
     colors: &xubamp_skin::pledit::PlEdit,
     width: i32,
@@ -971,6 +989,28 @@ fn draw_shade_track(
     let Some(row) = state.current.and_then(|i| state.rows.get(i)) else {
         return;
     };
+    if let Some(sheet) = &skin.text {
+        let duration_w = row.duration.chars().count() as i32 * textfont::ADVANCE;
+        if !row.duration.is_empty() {
+            let mut cx = width - 30 - duration_w;
+            for ch in row.duration.chars() {
+                if let Some(cell) = textfont::cell(ch) {
+                    blit(fb, sheet, cell, cx, 4);
+                }
+                cx += textfont::ADVANCE;
+            }
+        }
+        let available = (width - 5 - 35 - duration_w).max(0);
+        let max_chars = (available / textfont::ADVANCE).max(0) as usize;
+        let mut cx = 5;
+        for ch in row.title.chars().take(max_chars) {
+            if let Some(cell) = textfont::cell(ch) {
+                blit(fb, sheet, cell, cx, 4);
+            }
+            cx += textfont::ADVANCE;
+        }
+        return;
+    }
     let c = [colors.normal.r, colors.normal.g, colors.normal.b];
     let duration_w = font::text_width(&row.duration) as i32;
     if !row.duration.is_empty() {
@@ -991,11 +1031,13 @@ fn draw_shade_track(
 }
 
 /// Draw the visible track rows over the list area of a window `window_h` px tall whose list content
-/// is `list_w` px wide.
+/// is `list_w` px wide. With a resolved skin font the text keeps its case, like Winamp; without one
+/// the uppercase-only 5x7 bitmap fallback still renders something legible.
 fn draw_rows(
     fb: &mut Framebuffer,
     state: &PlState,
     colors: &xubamp_skin::pledit::PlEdit,
+    pl_font: Option<&UiFont>,
     window_h: i32,
     list_w: i32,
 ) {
@@ -1020,6 +1062,10 @@ fn draw_rows(
             colors.normal
         };
         let c = [rgb.r, rgb.g, rgb.b];
+        if let Some(ui) = pl_font {
+            draw_row_vector(fb, ui, row, y, list_w, rgb);
+            continue;
+        }
         // Right-aligned duration first, so we know how much room the title has.
         let dur_w = if row.duration.is_empty() {
             0
@@ -1043,6 +1089,48 @@ fn draw_rows(
             c,
         );
     }
+}
+
+/// Draw one row with the skin's vector font: right-aligned duration, then the title truncated to
+/// the space left of it. `y` is the bitmap-font text top the row grid hands out; the row box the
+/// selection paints starts 2px above it, and the baseline centres the font's line box in that box.
+fn draw_row_vector(fb: &mut Framebuffer, ui: &UiFont, row: &Row, y: i32, list_w: i32, rgb: Rgb) {
+    let rgba = [rgb.r, rgb.g, rgb.b, 255];
+    let row_top = y - 2;
+    let line = ui.line_height(PL_FONT_PX);
+    let pad = (sprites::PLEDIT_ROW_H as f32 - line) / 2.0;
+    let baseline = row_top + (pad + ui.ascent(PL_FONT_PX)).round() as i32;
+    let dur_w = if row.duration.is_empty() {
+        0
+    } else {
+        let dw = ui.text_width(&row.duration, PL_FONT_PX).ceil() as i32;
+        let dx = sprites::PLEDIT_LIST_X + list_w - dw - 3;
+        ui.draw_text(fb, dx, baseline, &row.duration, PL_FONT_PX, rgba);
+        dw + 4
+    };
+    let avail = (list_w - 2 - dur_w).max(0) as f32;
+    let max_chars = chars_fitting_vector(ui, &row.title, avail);
+    let title: String = row.title.chars().take(max_chars).collect();
+    ui.draw_text(
+        fb,
+        sprites::PLEDIT_LIST_X + 1,
+        baseline,
+        &title,
+        PL_FONT_PX,
+        rgba,
+    );
+}
+
+/// How many leading chars of `text` fit in `avail` px of the vector font at the row size.
+fn chars_fitting_vector(ui: &UiFont, text: &str, avail: f32) -> usize {
+    let mut w = 0.0;
+    for (i, ch) in text.chars().enumerate() {
+        w += ui.advance(ch, PL_FONT_PX);
+        if w > avail {
+            return i;
+        }
+    }
+    text.chars().count()
 }
 
 /// Fill a horizontal band [`x0`, `x1`) at row `y` by repeating `src` from `sheet`, clipping the last
@@ -1116,6 +1204,7 @@ mod tests {
         let fb = compose(
             &skin,
             &PlState::default(),
+            None,
             sprites::PLEDIT_W,
             sprites::PLEDIT_H,
         );
@@ -1140,6 +1229,7 @@ mod tests {
         let fallback = compose(
             &Skin::default(),
             &PlState::default(),
+            None,
             sprites::PLEDIT_W,
             sprites::PLEDIT_H,
         );
@@ -1261,13 +1351,13 @@ mod tests {
         let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
         let (tx, ty, _, th) = scrollbar_thumb_rect(&state, w, h).expect("overflow shows a thumb");
         assert_eq!(th, 18, "the classic handle is a fixed 8x18 cap");
-        let fb = compose(&skin, &state, w, h);
+        let fb = compose(&skin, &state, None, w, h);
         assert_eq!(px(&fb, tx as u32 + 3, ty as u32 + 3), GREEN, "skin handle");
         let dragged = PlState {
             scrollbar_pressed: true,
             ..state
         };
-        let fb = compose(&skin, &dragged, w, h);
+        let fb = compose(&skin, &dragged, None, w, h);
         assert_eq!(
             px(&fb, tx as u32 + 3, ty as u32 + 3),
             YELLOW,
@@ -1294,7 +1384,7 @@ mod tests {
             clock: Some(7),
             ..Default::default()
         };
-        let fb = compose(&skin, &state, w, h);
+        let fb = compose(&skin, &state, None, w, h);
         let lit = (my..my + mh).any(|y| {
             (mx..mx + mw).any(|x| {
                 let o = ((y as u32 * fb.width + x as u32) * 4) as usize;
@@ -1304,7 +1394,7 @@ mod tests {
         assert!(lit, "mini clock glyphs drawn in the Current colour");
 
         // No clock (nothing loaded, or the blink's hidden beat): nothing lit there.
-        let blank = compose(&skin, &PlState::default(), w, h);
+        let blank = compose(&skin, &PlState::default(), None, w, h);
         let lit = (my..my + mh).any(|y| {
             (mx..mx + mw).any(|x| {
                 let o = ((y as u32 * blank.width + x as u32) * 4) as usize;
@@ -1354,7 +1444,7 @@ mod tests {
             clock: Some(75),
             ..Default::default()
         };
-        let fb = compose(&skin, &state, w, h);
+        let fb = compose(&skin, &state, None, w, h);
         let digit = |d: u8| [d + 1, 2, 128, 255];
         assert_eq!(px(&fb, x0 + 7, y), digit(0), "minute tens");
         assert_eq!(px(&fb, x0 + 12, y), digit(1), "minute ones");
@@ -1377,7 +1467,7 @@ mod tests {
             clock_negative: true,
             ..Default::default()
         };
-        let fb = compose(&skin, &negative, w, h);
+        let fb = compose(&skin, &negative, None, w, h);
         assert_eq!(px(&fb, x0 + 1, y), [16, 2, 128, 255], "minus sign at +1");
 
         // Past 99 minutes the third minutes digit grows into the guide's hours space:
@@ -1386,7 +1476,7 @@ mod tests {
             clock: Some(6305),
             ..Default::default()
         };
-        let fb = compose(&skin, &long, w, h);
+        let fb = compose(&skin, &long, None, w, h);
         assert_eq!(px(&fb, x0 + 1, y), digit(1), "minutes hundreds in the hours space");
         assert_eq!(px(&fb, x0 + 7, y), digit(0), "minute tens");
         assert_eq!(px(&fb, x0 + 12, y), digit(5), "minute ones");
@@ -1509,7 +1599,7 @@ mod tests {
         };
         // No clock, so the only text.bmp consumer drawing here is the running-time readout.
         let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
-        let fb = compose(&skin, &PlState::default(), w, h);
+        let fb = compose(&skin, &PlState::default(), None, w, h);
         let marked: Vec<(i32, i32)> = (0..h)
             .flat_map(|y| (0..w).map(move |x| (x, y)))
             .filter(|&(x, y)| {
@@ -1541,6 +1631,7 @@ mod tests {
                 ..Default::default()
             },
             &PlState::default(),
+            None,
             w,
             h,
         );
@@ -1573,6 +1664,7 @@ mod tests {
                 ..Default::default()
             },
             &state,
+            None,
             sprites::PLEDIT_W,
             sprites::PLEDIT_H,
         );
@@ -1617,7 +1709,7 @@ mod tests {
             pressed_title: Some(TitleButton::Shade),
             ..Default::default()
         };
-        let fb = compose(&skin, &state, w, 999);
+        let fb = compose(&skin, &state, None, w, 999);
         assert_eq!(
             (fb.width, fb.height),
             (w as u32, sprites::PLEDIT_SHADE_H as u32),
@@ -1641,7 +1733,7 @@ mod tests {
             pressed_title: Some(TitleButton::Shade),
             ..Default::default()
         };
-        let fb = compose(&skin, &expanded, w, sprites::PLEDIT_H);
+        let fb = compose(&skin, &expanded, None, w, sprites::PLEDIT_H);
         assert_eq!(fb.height, sprites::PLEDIT_H as u32);
         assert_eq!(
             px(&fb, (button_x + 4) as u32, 7),
@@ -1666,6 +1758,7 @@ mod tests {
         let fb = compose(
             &Skin::default(),
             &state,
+            None,
             sprites::PLEDIT_W,
             sprites::PLEDIT_H,
         );
@@ -1705,7 +1798,7 @@ mod tests {
             sprites::PLEDIT_W + sprites::PLEDIT_SEGMENT_W,
             sprites::PLEDIT_H + sprites::PLEDIT_SEGMENT_H,
         );
-        let fb = compose(&skin, &PlState::default(), w, h);
+        let fb = compose(&skin, &PlState::default(), None, w, h);
         assert_eq!(
             (fb.width, fb.height),
             (w as u32, h as u32),
@@ -1925,5 +2018,135 @@ mod tests {
         let before = s.scroll;
         s.scroll_to(s.scroll_offset(h), h);
         assert_eq!(s.scroll, before);
+    }
+
+    /// The pixels of the first row band (the selection box the row grid hands out).
+    fn first_row_band(fb: &Framebuffer) -> Vec<[u8; 4]> {
+        let y0 = (sprites::PLEDIT_LIST_Y - 2) as u32;
+        let mut band = Vec::new();
+        for y in y0..y0 + sprites::PLEDIT_ROW_H as u32 {
+            for x in sprites::PLEDIT_LIST_X as u32..(fb.width - 20) {
+                band.push(px(fb, x, y));
+            }
+        }
+        band
+    }
+
+    fn one_row_state(title: &str) -> PlState {
+        PlState {
+            rows: vec![Row {
+                title: title.to_owned(),
+                duration: "3:21".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rows_keep_their_case_with_the_skin_font() {
+        let Some(ui) = UiFont::load_system() else {
+            return; // no system font on this host; the fallback path is covered elsewhere
+        };
+        let skin = Skin {
+            pledit_colors: Some(PlEdit {
+                normal: Rgb::new(0, 255, 0),
+                normal_bg: Rgb::new(0, 0, 0),
+                ..PlEdit::default()
+            }),
+            ..Default::default()
+        };
+        let (w, h) = (sprites::PLEDIT_W, sprites::PLEDIT_H);
+        let lower = compose(&skin, &one_row_state("abcdef"), Some(&ui), w, h);
+        let upper = compose(&skin, &one_row_state("ABCDEF"), Some(&ui), w, h);
+        assert_ne!(
+            first_row_band(&lower),
+            first_row_band(&upper),
+            "lowercase and uppercase titles rasterize differently with a real font"
+        );
+        // The uppercase-only bitmap fallback cannot tell them apart, which was the bug.
+        let lower_bmp = compose(&skin, &one_row_state("abcdef"), None, w, h);
+        let upper_bmp = compose(&skin, &one_row_state("ABCDEF"), None, w, h);
+        assert_eq!(first_row_band(&lower_bmp), first_row_band(&upper_bmp));
+    }
+
+    #[test]
+    fn vector_rows_color_the_current_track_from_pledit_txt() {
+        let Some(ui) = UiFont::load_system() else {
+            return;
+        };
+        let skin = Skin {
+            pledit_colors: Some(PlEdit {
+                normal: Rgb::new(0, 255, 0),
+                current: Rgb::new(255, 0, 0),
+                normal_bg: Rgb::new(0, 0, 0),
+                ..PlEdit::default()
+            }),
+            ..Default::default()
+        };
+        let mut state = one_row_state("Some Track");
+        state.rows.push(Row {
+            title: "Another Track".to_owned(),
+            duration: "1:00".to_owned(),
+            ..Default::default()
+        });
+        state.current = Some(1);
+        let fb = compose(&skin, &state, Some(&ui), sprites::PLEDIT_W, sprites::PLEDIT_H);
+        // Antialiased coverage blends each glyph toward the black background, so channel
+        // dominance identifies the color: row 0 only ever gains green, row 1 only red.
+        let row0 = first_row_band(&fb);
+        assert!(row0.iter().any(|p| p[1] > 0), "normal row drew green text");
+        assert!(row0.iter().all(|p| p[0] == 0), "no current-color bleed into row 0");
+        let y1 = (sprites::PLEDIT_LIST_Y - 2 + sprites::PLEDIT_ROW_H) as u32;
+        let mut saw_red = false;
+        for y in y1..y1 + sprites::PLEDIT_ROW_H as u32 {
+            for x in sprites::PLEDIT_LIST_X as u32..(fb.width - 20) {
+                let p = px(&fb, x, y);
+                saw_red |= p[0] > 0;
+                assert_eq!(p[1], 0, "no normal-color bleed into the current row");
+            }
+        }
+        assert!(saw_red, "current row drew red text");
+    }
+
+    #[test]
+    fn vector_title_truncates_before_the_duration() {
+        let Some(ui) = UiFont::load_system() else {
+            return;
+        };
+        let long = "m".repeat(400);
+        let fits = chars_fitting_vector(&ui, &long, 100.0);
+        assert!(fits > 0 && fits < 400, "a 100px slot holds some but not 400 'm's");
+        let width_kept = ui.text_width(&long.chars().take(fits).collect::<String>(), PL_FONT_PX);
+        assert!(width_kept <= 100.0, "kept prefix fits the slot");
+        assert_eq!(
+            chars_fitting_vector(&ui, "abc", 1000.0),
+            3,
+            "ample room keeps the whole string"
+        );
+    }
+
+    #[test]
+    fn shade_track_uses_the_text_bmp_cells_when_the_skin_has_them() {
+        let text = solid_sheet(155, 18, [220, 40, 90, 255]); // any TEXT cell blits this color
+        let skin = Skin {
+            text: Some(text),
+            ..Default::default()
+        };
+        let mut state = one_row_state("1. Something");
+        state.current = Some(0);
+        state.shade = true;
+        let fb = compose(&skin, &state, None, sprites::PLEDIT_W, sprites::PLEDIT_H);
+        assert_eq!(
+            px(&fb, 5, 4),
+            [220, 40, 90, 255],
+            "title cells come from the TEXT sheet"
+        );
+        let dur_x = (sprites::PLEDIT_W - 30 - 4 * textfont::ADVANCE) as u32;
+        assert_eq!(
+            px(&fb, dur_x, 4),
+            [220, 40, 90, 255],
+            "duration cells come from the TEXT sheet"
+        );
     }
 }

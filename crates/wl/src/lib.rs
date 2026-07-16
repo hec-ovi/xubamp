@@ -518,6 +518,17 @@ impl JumpWin {
 /// Snap a requested playlist dimension to the classic resize grid: the minimum plus a whole
 /// number of segments, rounding to the nearest segment like Winamp's drag (Webamp's
 /// `Math.round(delta / segment)`), never below the minimum.
+/// Resolve the playlist typeface the skin names in `pledit.txt` through fontconfig, with the
+/// system UI font behind it so lowercase titles still render when fontconfig is missing. `None`
+/// only when neither is available.
+fn resolve_pl_font(skin: &Skin) -> Option<adwaita::UiFont> {
+    let name = skin
+        .pledit_colors
+        .as_ref()
+        .map_or("Arial", |c| c.font.as_str());
+    adwaita::UiFont::load_named(name).or_else(adwaita::UiFont::load_system)
+}
+
 fn snap_playlist_dimension(requested: i32, base: i32, segment: i32) -> i32 {
     let delta = (requested - base).max(0);
     base + (delta + segment / 2) / segment * segment
@@ -637,6 +648,7 @@ pub fn run(
         .insert(loop_handle.clone())
         .expect("failed to insert the Wayland source");
 
+    let pl_font = resolve_pl_font(&skin);
     let mut app = App {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -681,6 +693,7 @@ pub fn run(
         #[cfg(feature = "keyboard")]
         file_info_keyboard_focus: false,
         ui_font: adwaita::UiFont::load_system(),
+        pl_font,
         ui_palette: if runtime.ui_options.dark {
             adwaita::Palette::dark()
         } else {
@@ -869,6 +882,10 @@ struct App {
     /// menus and dialogs natively. `None` on a host with no usable font, where they fall back to the
     /// classic bitmap chrome.
     ui_font: Option<adwaita::UiFont>,
+    /// The playlist rows' font: the face `pledit.txt` names, resolved through fontconfig (refreshed
+    /// on every skin swap), with the system UI font behind it. `None` only when neither resolves,
+    /// where the rows keep the uppercase 5x7 bitmap fallback.
+    pl_font: Option<adwaita::UiFont>,
     /// The Adwaita palette (light or dark) chosen from the desktop color scheme at startup.
     ui_palette: adwaita::Palette,
     /// Latest Ctrl/Shift state, mirrored from `update_modifiers`. Always present (unlike the
@@ -1379,9 +1396,11 @@ impl App {
     }
 
     /// Swap every skin-backed pane as one UI-thread operation. Playback, selection, control state,
-    /// geometry, and shade state live outside `Skin`, so they survive unchanged.
+    /// geometry, and shade state live outside `Skin`, so they survive unchanged. The playlist font
+    /// follows the new skin's `pledit.txt` face.
     fn replace_skin(&mut self, skin: Skin) {
         self.skin = skin;
+        self.pl_font = resolve_pl_font(&self.skin);
         self.redraw();
         self.redraw_equalizer();
         self.redraw_playlist();
@@ -2060,7 +2079,7 @@ impl App {
         // but maps only its 14px strip.
         let ((w, h), _) =
             playlist_configured_size(self.playlist_state.shade, self.pl_size, (None, None));
-        let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
+        let fb = pledit::compose(&self.skin, &self.playlist_state, self.pl_font.as_ref(), w, h);
         let (subsurface, surface) = self
             .subcompositor
             .create_subsurface(self.window.wl_surface().clone(), &self.qh);
@@ -2173,7 +2192,7 @@ impl App {
         let Some((w, h)) = self.playlist.as_ref().map(|pl| (pl.width, pl.height)) else {
             return;
         };
-        let fb = pledit::compose(&self.skin, &self.playlist_state, w, h);
+        let fb = pledit::compose(&self.skin, &self.playlist_state, self.pl_font.as_ref(), w, h);
         let pl = self.playlist.as_mut().unwrap();
         pl.fb = fb;
         pl.present();

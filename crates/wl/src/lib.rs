@@ -131,6 +131,9 @@ pub enum PlaylistRequest {
     Randomize,
     Save,
     Load,
+    /// Permute the whole playlist after a drag-to-reorder step: element `i` is the display index
+    /// (before the move) of the track now shown at row `i`.
+    Reorder(Vec<usize>),
 }
 
 /// The reorderings the MISC > Sort List submenu offers.
@@ -426,6 +429,20 @@ struct PlaylistWin {
     /// Whether a scrollbar-thumb drag is in progress, so motion maps the pointer to the scroll
     /// position until the button is released.
     scrollbar_drag: bool,
+    /// An in-progress row drag (Winamp's drag-to-reorder), armed by a press on a track row.
+    row_drag: Option<RowDrag>,
+}
+
+/// A playlist row drag: every whole row of pointer travel from the press moves the selected
+/// tracks by one position (Webamp's `dragSelected` stepping over its `TRACK_HEIGHT`).
+#[derive(Debug, Clone, Copy)]
+struct RowDrag {
+    /// The window-local y of the press that started the drag.
+    press_y: i32,
+    /// Whole rows of travel already accounted for, so each motion applies only the new delta.
+    /// Follows the pointer even across clamped (impossible) moves, so reversing direction
+    /// responds immediately, like Webamp.
+    applied: i32,
 }
 
 /// Equalizer child-surface resources. The renderer owns all control state; this wrapper only owns
@@ -1318,8 +1335,17 @@ impl App {
         if self.playlist.is_some() {
             let (rows, current) = (self.playlist_source)();
             if rows != self.playlist_state.rows || current != self.playlist_state.current {
+                let track_changed = current != self.playlist_state.current;
                 self.playlist_state.rows = rows;
                 self.playlist_state.current = current;
+                if track_changed {
+                    if let Some(i) = current {
+                        // Follow playback: bring the new current row into view (a no-op when it
+                        // already is). Measured against the remembered expanded height so a
+                        // shaded strip restores scrolled to the right place.
+                        self.playlist_state.scroll_to(i, self.pl_size.1);
+                    }
+                }
                 self.redraw_playlist();
             }
             self.sync_playlist_clock();
@@ -2103,6 +2129,7 @@ impl App {
             shade_on_release: false,
             grip_hover: false,
             scrollbar_drag: false,
+            row_drag: None,
         });
         self.state.pl_open = true;
         self.redraw(); // relight the PL button on the main window
@@ -2455,6 +2482,28 @@ impl App {
                     self.redraw_playlist();
                     return;
                 }
+                // A row drag reorders the selected tracks one position per row of pointer travel,
+                // echoed locally and replayed onto the player. It consumes the motion so it never
+                // also drags the pane or flips hover cursors.
+                if let Some(mut drag) = self.playlist.as_ref().and_then(|pl| pl.row_drag) {
+                    let proposed =
+                        (y - drag.press_y).div_euclid(xubamp_skin::sprites::PLEDIT_ROW_H);
+                    if proposed != drag.applied {
+                        let delta = proposed - drag.applied;
+                        drag.applied = proposed;
+                        if let Some(pl) = &mut self.playlist {
+                            pl.row_drag = Some(drag);
+                        }
+                        if let Some(order) = self.playlist_state.move_selected_by(delta) {
+                            // A drag is not a click: releasing after a move must not make the
+                            // next press count as a double-click play.
+                            self.last_click = None;
+                            self.request_playlist(PlaylistRequest::Reorder(order));
+                            self.redraw_playlist();
+                        }
+                    }
+                    return;
+                }
                 let drag_snapshot = self
                     .playlist
                     .as_ref()
@@ -2550,6 +2599,7 @@ impl App {
                     pl.drag = None;
                     pl.resize = None;
                     pl.scrollbar_drag = false;
+                    pl.row_drag = None;
                     // A release that completed a title-bar double-click (without becoming a drag)
                     // toggles the shade strip now.
                     toggle_shade = std::mem::take(&mut pl.shade_on_release);
@@ -2635,6 +2685,14 @@ impl App {
                     self.playlist_state.ctrl_select(i);
                 } else {
                     self.playlist_state.click_select(i);
+                }
+                // Any row press arms a potential drag-to-reorder; motion across row boundaries
+                // moves the selection, a plain release leaves this unused.
+                if let Some(pl) = &mut self.playlist {
+                    pl.row_drag = Some(RowDrag {
+                        press_y: y,
+                        applied: 0,
+                    });
                 }
                 // A second click on the same row within the double-click window plays it.
                 let now = Instant::now();

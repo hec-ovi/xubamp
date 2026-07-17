@@ -375,6 +375,17 @@ impl Player {
         self.playlist.set_order(order);
     }
 
+    /// Reorder the playlist to a permutation given as display indices (the editor's
+    /// drag-to-reorder): the entry shown at `order[i]` moves to row `i`. Out-of-range indices
+    /// are skipped, and any entries not named keep their order after the named ones.
+    pub fn reorder_indices(&mut self, order: &[usize]) {
+        let ids: Vec<TrackId> = order
+            .iter()
+            .filter_map(|&i| self.playlist.track_id(i))
+            .collect();
+        self.playlist.set_order(&ids);
+    }
+
     /// Reverse the playlist display order (editor "Reverse list").
     pub fn reverse_playlist(&mut self) {
         self.playlist.reverse();
@@ -1305,6 +1316,30 @@ mod tests {
             "the row shows the freshly saved tag"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reorder_indices_permutes_rows_and_current_follows_its_track() {
+        let mut player = Player::new(
+            ["a", "b", "c", "d"]
+                .iter()
+                .map(|n| PathBuf::from(format!("/nowhere/{n}.wav")))
+                .collect(),
+        );
+        assert_eq!(player.playlist_view().1, Some(0), "current starts at a");
+
+        // The drag permutation the playlist editor emits: order[i] is the old display index.
+        player.reorder_indices(&[2, 0, 1, 3]);
+        let (rows, current) = player.playlist_view();
+        let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["1. c", "2. a", "3. b", "4. d"]);
+        assert_eq!(current, Some(1), "current follows the track, not the row number");
+
+        // Out-of-range indices are skipped rather than corrupting the order.
+        player.reorder_indices(&[9, 3, 2, 1, 0]);
+        let (rows, _) = player.playlist_view();
+        assert_eq!(rows[0].title, "1. d");
+        assert_eq!(rows[3].title, "4. c");
     }
 
     #[test]

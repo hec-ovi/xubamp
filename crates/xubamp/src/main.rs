@@ -423,6 +423,7 @@ fn apply_playlist_request(
         P::RemoveDead => player.remove_dead_tracks(),
         P::Reverse => player.reverse_playlist(),
         P::Randomize => player.randomize_playlist(),
+        P::Reorder(order) => player.reorder_indices(&order),
         P::Sort(sort) => {
             let mut entries = player.playlist_entries();
             entries.sort_by(|a, b| {

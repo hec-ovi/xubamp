@@ -471,6 +471,54 @@ impl PlState {
         self.scroll = frac * 100.0;
     }
 
+    /// Move every selected row by `offset` positions (the drag-to-reorder step), clamped so the
+    /// first selected row cannot pass the top nor the last pass the bottom (Winamp's drag, matching
+    /// Webamp's `dragSelected`). Each selected row moves by exactly the clamped offset, preserving
+    /// the gaps of a non-contiguous selection; unselected rows fill the remaining slots in their
+    /// original order (Webamp's `moveSelected`). Selection, anchor, and current follow their rows.
+    ///
+    /// Returns the applied permutation as old display indices in new order (`order[i]` is the row
+    /// previously shown at that index), for the caller to replay onto the player; `None` when
+    /// nothing moved.
+    pub fn move_selected_by(&mut self, offset: i32) -> Option<Vec<usize>> {
+        let len = self.rows.len();
+        self.selected.retain(|&i| i < len);
+        let first = *self.selected.iter().min()?;
+        let last = *self.selected.iter().max()?;
+        let offset = offset.clamp(-(first as i32), (len - 1 - last) as i32);
+        if offset == 0 {
+            return None;
+        }
+        let selected: HashSet<usize> = self.selected.iter().copied().collect();
+        // order[new] = old. Selected rows land at old+offset; the clamp guarantees they all fit,
+        // so the unselected fill (in order) consumes exactly the remaining slots.
+        let mut order = Vec::with_capacity(len);
+        let mut next_unselected = 0usize;
+        for i in 0..len as i32 {
+            let from = i - offset;
+            if from >= 0 && selected.contains(&(from as usize)) {
+                order.push(from as usize);
+            } else {
+                while selected.contains(&next_unselected) {
+                    next_unselected += 1;
+                }
+                order.push(next_unselected);
+                next_unselected += 1;
+            }
+        }
+        let mut inverse = vec![0usize; len];
+        for (new, &old) in order.iter().enumerate() {
+            inverse[old] = new;
+        }
+        self.rows = order.iter().map(|&old| self.rows[old].clone()).collect();
+        for row in &mut self.selected {
+            *row = inverse[*row];
+        }
+        self.anchor = self.anchor.filter(|&a| a < len).map(|a| inverse[a]);
+        self.current = self.current.filter(|&c| c < len).map(|c| inverse[c]);
+        Some(order)
+    }
+
     /// Adjust the scroll so row `i` is visible in a window `window_h` px tall (scrolls the minimum
     /// needed: to the top if above the view, to the bottom if below it, otherwise unchanged).
     pub fn scroll_to(&mut self, i: usize, window_h: i32) {
@@ -2018,6 +2066,99 @@ mod tests {
         let before = s.scroll;
         s.scroll_to(s.scroll_offset(h), h);
         assert_eq!(s.scroll, before);
+    }
+
+    /// The shown titles, to assert on row order after a drag move.
+    fn titles(s: &PlState) -> Vec<&str> {
+        s.rows.iter().map(|r| r.title.as_str()).collect()
+    }
+
+    #[test]
+    fn move_selected_shifts_a_row_and_remaps_selection_current_and_anchor() {
+        let mut s = PlState {
+            rows: rows(4),
+            selected: vec![1],
+            anchor: Some(1),
+            current: Some(2),
+            ..Default::default()
+        };
+        let order = s.move_selected_by(1).expect("the row moves");
+        assert_eq!(order, vec![0, 2, 1, 3], "order[new] = old display index");
+        assert_eq!(titles(&s), ["track 0", "track 2", "track 1", "track 3"]);
+        assert_eq!(s.selected, vec![2], "selection follows the moved row");
+        assert_eq!(s.anchor, Some(2));
+        assert_eq!(s.current, Some(1), "the unselected current row shifted up");
+
+        let order = s.move_selected_by(-2).expect("moves back up");
+        assert_eq!(order, vec![2, 0, 1, 3]);
+        assert_eq!(titles(&s), ["track 1", "track 0", "track 2", "track 3"]);
+        assert_eq!(s.selected, vec![0]);
+        assert_eq!(s.current, Some(2));
+    }
+
+    #[test]
+    fn move_selected_preserves_the_gaps_of_a_noncontiguous_selection() {
+        // Webamp's moveSelected: each selected row moves by exactly the offset; the unselected
+        // rows fill the remaining slots in order.
+        let mut s = PlState {
+            rows: rows(6),
+            selected: vec![0, 2],
+            ..Default::default()
+        };
+        let order = s.move_selected_by(2).expect("both rows move");
+        assert_eq!(order, vec![1, 3, 0, 4, 2, 5]);
+        assert_eq!(
+            titles(&s),
+            ["track 1", "track 3", "track 0", "track 4", "track 2", "track 5"]
+        );
+        let mut selected = s.selected.clone();
+        selected.sort_unstable();
+        assert_eq!(selected, vec![2, 4], "the one-row gap survives the move");
+    }
+
+    #[test]
+    fn move_selected_clamps_at_both_ends_and_ignores_degenerate_input() {
+        // The whole selection block stops at the edges: a huge drag lands the last row at the
+        // bottom, and the top row cannot leave the top.
+        let mut s = PlState {
+            rows: rows(4),
+            selected: vec![1],
+            ..Default::default()
+        };
+        let order = s.move_selected_by(7).expect("clamped, still moves");
+        assert_eq!(order, vec![0, 2, 3, 1], "clamped to the bottom");
+        assert_eq!(s.selected, vec![3]);
+        assert!(s.move_selected_by(1).is_none(), "already at the bottom");
+
+        let mut top = PlState {
+            rows: rows(3),
+            selected: vec![0],
+            ..Default::default()
+        };
+        assert!(top.move_selected_by(-1).is_none(), "cannot pass the top");
+
+        // A selection spanning both ends cannot move either way.
+        let mut span = PlState {
+            rows: rows(3),
+            selected: vec![0, 2],
+            ..Default::default()
+        };
+        assert!(span.move_selected_by(1).is_none());
+        assert!(span.move_selected_by(-1).is_none());
+
+        // No selection, and stale out-of-range selection entries, never move or panic.
+        let mut none = PlState {
+            rows: rows(3),
+            ..Default::default()
+        };
+        assert!(none.move_selected_by(1).is_none());
+        let mut stale = PlState {
+            rows: rows(3),
+            selected: vec![7],
+            ..Default::default()
+        };
+        assert!(stale.move_selected_by(1).is_none());
+        assert!(stale.selected.is_empty(), "stale indices are dropped");
     }
 
     /// The pixels of the first row band (the selection box the row grid hands out).

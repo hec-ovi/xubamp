@@ -552,6 +552,38 @@ fn snap_playlist_dimension(requested: i32, base: i32, segment: i32) -> i32 {
     base + (delta + segment / 2) / segment * segment
 }
 
+/// Explain a failed Wayland connection in terms of what the user can do about it.
+///
+/// xubamp draws by writing pixels into `wl_shm` buffers and talking xdg-shell directly: there is no
+/// toolkit underneath and no X11 code path, so on an X11 login session there is nothing to fall
+/// back to. XWayland does not help either, since it runs X11 clients on Wayland, not the reverse.
+/// The bare "could not find wayland compositor" leaves that entirely unsaid.
+fn no_compositor(error: &str) -> String {
+    // Empty counts as unset: launchers and containers routinely pass `WAYLAND_DISPLAY=` to mean
+    // "no Wayland here", and reading that as a configured display gives exactly the wrong advice.
+    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    session_hint(error, set("WAYLAND_DISPLAY"), set("DISPLAY"))
+}
+
+/// The wording of [`no_compositor`], with the session detection passed in so every branch is
+/// testable.
+fn session_hint(error: &str, wayland: bool, x11: bool) -> String {
+    match (wayland, x11) {
+        (false, true) => format!(
+            "{error}. DISPLAY is set and WAYLAND_DISPLAY is not, so this is an X11 session. \
+             xubamp is a native Wayland client with no X11 backend: choose a Wayland session at \
+             the login screen, or run it inside a nested compositor \
+             (`weston --backend=x11` and start xubamp from its terminal)"
+        ),
+        (false, false) => format!(
+            "{error}. WAYLAND_DISPLAY is not set: xubamp needs a graphical Wayland session, not a \
+             plain terminal or an SSH login"
+        ),
+        _ => format!("{error}. WAYLAND_DISPLAY is set, so the compositor socket it names is \
+             missing or refused the connection"),
+    }
+}
+
 /// One of the three docked panes. They are separate Wayland surfaces (the main `xdg_toplevel` and
 /// two `wl_subsurface` children) laid out in the parent's coordinate space, which is what lets a
 /// pointer grab that started on one be routed to it from another.
@@ -687,7 +719,7 @@ pub fn run(
     pane_layout: PaneLayout,
     runtime: Runtime,
 ) -> Result<SessionState, Box<dyn Error>> {
-    let conn = Connection::connect_to_env()?;
+    let conn = Connection::connect_to_env().map_err(|error| no_compositor(&error.to_string()))?;
     let (globals, event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
@@ -4343,6 +4375,30 @@ mod tests {
     /// The classic playlist height shows 8 rows; scrolled to the end of a 60-row list, the view
     /// starts well past the playing track near the top.
     const H: i32 = xubamp_skin::sprites::PLEDIT_H;
+
+    #[test]
+    fn a_failed_connection_names_the_session_problem() {
+        let raw = "Could not find wayland compositor";
+
+        // An X11 login session: the common case, and the one the bare error explains least.
+        let x11 = session_hint(raw, false, true);
+        assert!(x11.starts_with(raw), "the underlying error is kept");
+        assert!(x11.contains("X11 session"), "names what it found: {x11}");
+        assert!(
+            x11.contains("weston --backend=x11"),
+            "offers a way to run it anyway: {x11}"
+        );
+
+        // A TTY or an SSH login: neither display variable is set.
+        let bare = session_hint(raw, false, false);
+        assert!(bare.contains("WAYLAND_DISPLAY is not set"), "{bare}");
+        assert!(!bare.contains("X11 session"), "nothing to blame X11 for");
+
+        // A Wayland session whose socket is unusable: not a session-type problem at all.
+        let broken = session_hint(raw, true, false);
+        assert!(broken.contains("WAYLAND_DISPLAY is set"), "{broken}");
+        assert!(!broken.contains("login screen"), "{broken}");
+    }
 
     #[test]
     fn a_new_track_scrolls_the_playlist_to_it() {

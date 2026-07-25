@@ -11,6 +11,8 @@ Download the latest deb from [Releases](https://github.com/hec-ovi/xubamp/releas
 
 amd64, Ubuntu 26.04. It starts on a built-in clean-room skin; point it at any classic `.wsz` on the command line (`xubamp skin.wsz *.mp3`) or switch at runtime from Preferences. No skins ship with it (see License).
 
+It needs a Wayland session. There is no X11 backend: xubamp talks xdg-shell and writes its own pixels into `wl_shm` buffers, with no toolkit underneath to provide a second one, and XWayland runs X11 clients on Wayland rather than the other way round. GNOME 50 is Wayland only, and Plasma drops its X11 session in 6.8, so on 26.04 you are almost certainly already there. If you are on an X11 login, pick a Wayland session at the greeter, or run xubamp inside a nested compositor (`sudo apt install weston`, `weston --backend=x11`, then launch xubamp from a terminal inside it).
+
 ## Showcase
 
 Classic `.wsz` skins, loaded at runtime:

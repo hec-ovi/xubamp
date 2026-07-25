@@ -95,9 +95,10 @@ const WHEEL_TRACKS_PER_NOTCH: f32 = 3.0;
 /// visualizer to read each frame.
 type SampleSource = Box<dyn FnMut(&mut [f32])>;
 
-/// Returns the playlist rows and the index of the currently-playing track, polled each tick so the
-/// playlist window follows track changes. The window layer keeps selection/scroll itself.
-type PlaylistSource = Box<dyn FnMut() -> (Vec<pledit::Row>, Option<usize>)>;
+/// Returns the playlist rows plus the index and stable id of the currently-playing track, polled
+/// each tick so the playlist window follows track changes. The window layer keeps selection/scroll
+/// itself.
+type PlaylistSource = Box<dyn FnMut() -> pledit::PlaylistView>;
 
 /// Applies equalizer-specific controls to the player/configuration owner.
 type EqualizerSink = Box<dyn FnMut(equalizer::Command)>;
@@ -210,7 +211,7 @@ impl Runtime {
         equalizer_presets: Vec<equalizer::Preset>,
         playback_source: impl FnMut() -> hit::Playback + 'static,
         sample_source: impl FnMut(&mut [f32]) + 'static,
-        playlist_source: impl FnMut() -> (Vec<pledit::Row>, Option<usize>) + 'static,
+        playlist_source: impl FnMut() -> pledit::PlaylistView + 'static,
     ) -> Self {
         Self {
             on_command: Box::new(on_command),
@@ -551,6 +552,34 @@ fn snap_playlist_dimension(requested: i32, base: i32, segment: i32) -> i32 {
     base + (delta + segment / 2) / segment * segment
 }
 
+/// Merge a polled playlist view into the window's list state, returning whether the window needs a
+/// repaint. `followed` is the id of the track the view last scrolled to, updated in place.
+///
+/// The list scrolls to the playing row only when a DIFFERENT track started, keyed on the track's
+/// stable id rather than its index. The index also moves when rows above the playing track are
+/// removed or reordered, and yanking the list back to the playing song because the user deleted a
+/// row above it is not following playback; the view stays where they left it.
+fn apply_playlist_view(
+    state: &mut pledit::PlState,
+    followed: &mut Option<u64>,
+    view: pledit::PlaylistView,
+    window_h: i32,
+) -> bool {
+    if view.rows == state.rows && view.current == state.current && view.current_id == *followed {
+        return false;
+    }
+    let started = view.current_id.is_some() && view.current_id != *followed;
+    state.rows = view.rows;
+    state.current = view.current;
+    *followed = view.current_id;
+    if started {
+        if let Some(i) = view.current {
+            state.scroll_to(i, window_h);
+        }
+    }
+    true
+}
+
 /// Resolve a requested playlist size into the actual buffer size and the remembered expanded size.
 /// While shaded, only width updates; restoring recovers the pre-shade height. Requested sizes snap
 /// to the classic 25x29 resize segments from the 275x116 base, like the original's chunked resize;
@@ -691,6 +720,7 @@ pub fn run(
             shade: pane_layout.playlist_shaded,
             ..Default::default()
         },
+        playlist_current_id: None,
         pl_size: (
             i32::try_from(pane_layout.playlist_size.0).unwrap_or(i32::MAX),
             i32::try_from(pane_layout.playlist_size.1).unwrap_or(i32::MAX),
@@ -874,6 +904,9 @@ struct App {
     playlist: Option<PlaylistWin>,
     /// The playlist window's content + selection/scroll state; survives close/reopen.
     playlist_state: pledit::PlState,
+    /// Stable id of the track the playlist view last followed. Compared against the polled id to
+    /// tell a new track starting from the current one merely shifting index under a list edit.
+    playlist_current_id: Option<u64>,
     /// The playlist pane's last expanded size, remembered across shade and close/reopen.
     pl_size: (i32, i32),
     /// Last child-surface position, remembered across close/reopen.
@@ -1333,19 +1366,15 @@ impl App {
         let changed = self.step_clock_and_marquee();
         // Keep the playlist window (if open) in sync with the track list and playing track.
         if self.playlist.is_some() {
-            let (rows, current) = (self.playlist_source)();
-            if rows != self.playlist_state.rows || current != self.playlist_state.current {
-                let track_changed = current != self.playlist_state.current;
-                self.playlist_state.rows = rows;
-                self.playlist_state.current = current;
-                if track_changed {
-                    if let Some(i) = current {
-                        // Follow playback: bring the new current row into view (a no-op when it
-                        // already is). Measured against the remembered expanded height so a
-                        // shaded strip restores scrolled to the right place.
-                        self.playlist_state.scroll_to(i, self.pl_size.1);
-                    }
-                }
+            let view = (self.playlist_source)();
+            // Measured against the remembered expanded height so a shaded strip restores scrolled
+            // to the right place.
+            if apply_playlist_view(
+                &mut self.playlist_state,
+                &mut self.playlist_current_id,
+                view,
+                self.pl_size.1,
+            ) {
                 self.redraw_playlist();
             }
             self.sync_playlist_clock();
@@ -3099,9 +3128,8 @@ impl App {
         if self.jump_win.is_some() {
             return;
         }
-        let (rows, _current) = (self.playlist_source)();
         self.jump_state = jump::JumpState {
-            rows,
+            rows: (self.playlist_source)().rows,
             ..Default::default()
         };
         let (w, h) = (jump::JUMP_W, jump::JUMP_H);
@@ -4146,5 +4174,143 @@ mod tests {
         let (shown, remembered) = playlist_configured_size(false, (451, 236), (None, None));
         assert_eq!(shown, (451, 236));
         assert_eq!(remembered, shown);
+    }
+
+    /// `n` numbered rows, like the player publishes them.
+    fn rows(n: usize) -> Vec<pledit::Row> {
+        (0..n)
+            .map(|i| pledit::Row {
+                title: format!("{}. track {i}", i + 1),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// The classic playlist height shows 8 rows; scrolled to the end of a 60-row list, the view
+    /// starts well past the playing track near the top.
+    const H: i32 = xubamp_skin::sprites::PLEDIT_H;
+
+    #[test]
+    fn a_new_track_scrolls_the_playlist_to_it() {
+        let mut state = pledit::PlState::default();
+        let mut followed = None;
+        apply_playlist_view(
+            &mut state,
+            &mut followed,
+            pledit::PlaylistView {
+                rows: rows(60),
+                current: Some(2),
+                current_id: Some(1002),
+            },
+            H,
+        );
+        // Scrolled away to the bottom of the list by hand.
+        state.scroll = 100.0;
+        assert!(state.scroll_offset(H) > 40);
+
+        // Playback advances to track 3: a different id, so the view follows it.
+        let changed = apply_playlist_view(
+            &mut state,
+            &mut followed,
+            pledit::PlaylistView {
+                rows: rows(60),
+                current: Some(3),
+                current_id: Some(1003),
+            },
+            H,
+        );
+        assert!(changed, "a track change repaints");
+        assert_eq!(state.scroll_offset(H), 3, "the playing row is back in view");
+        assert_eq!(followed, Some(1003));
+    }
+
+    #[test]
+    fn deleting_a_row_above_the_playing_track_leaves_the_scroll_alone() {
+        let mut state = pledit::PlState::default();
+        let mut followed = None;
+        apply_playlist_view(
+            &mut state,
+            &mut followed,
+            pledit::PlaylistView {
+                rows: rows(60),
+                current: Some(2),
+                current_id: Some(1002),
+            },
+            H,
+        );
+        state.scroll = 100.0;
+        let before = state.scroll_offset(H);
+        assert!(before > 40, "scrolled far from the playing track");
+
+        // One row above the playing track is removed: same track (same id), one shorter list, and
+        // its index slides from 2 to 1. The view must not jump back to it.
+        let changed = apply_playlist_view(
+            &mut state,
+            &mut followed,
+            pledit::PlaylistView {
+                rows: rows(59),
+                current: Some(1),
+                current_id: Some(1002),
+            },
+            H,
+        );
+        assert!(changed, "the shorter list still repaints");
+        assert_eq!(state.current, Some(1), "the current row followed its track");
+        assert_eq!(
+            state.scroll, 100.0,
+            "the scroll position is the user's, not playback's"
+        );
+        assert!(
+            state.scroll_offset(H) >= before - 1,
+            "the view stayed at the end of the list, not at the playing track"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_view_neither_repaints_nor_scrolls() {
+        let mut state = pledit::PlState::default();
+        let mut followed = None;
+        let view = || pledit::PlaylistView {
+            rows: rows(60),
+            current: Some(2),
+            current_id: Some(1002),
+        };
+        assert!(apply_playlist_view(&mut state, &mut followed, view(), H));
+        state.scroll = 100.0;
+        assert!(
+            !apply_playlist_view(&mut state, &mut followed, view(), H),
+            "polling the same view again is a no-op"
+        );
+        assert_eq!(state.scroll, 100.0);
+    }
+
+    #[test]
+    fn stopping_playback_does_not_scroll() {
+        let mut state = pledit::PlState::default();
+        let mut followed = None;
+        apply_playlist_view(
+            &mut state,
+            &mut followed,
+            pledit::PlaylistView {
+                rows: rows(60),
+                current: Some(2),
+                current_id: Some(1002),
+            },
+            H,
+        );
+        state.scroll = 100.0;
+        let before = state.scroll_offset(H);
+        apply_playlist_view(
+            &mut state,
+            &mut followed,
+            pledit::PlaylistView {
+                rows: rows(60),
+                current: None,
+                current_id: None,
+            },
+            H,
+        );
+        assert_eq!(state.current, None);
+        assert_eq!(state.scroll_offset(H), before, "nothing to follow");
     }
 }

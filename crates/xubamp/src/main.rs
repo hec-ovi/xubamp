@@ -1160,7 +1160,7 @@ fn main() {
         };
         let playback_source = xubamp_render::hit::Playback::default;
         let sample_source = |out: &mut [f32]| out.iter_mut().for_each(|s| *s = 0.0);
-        let playlist_source = || (Vec::new(), None);
+        let playlist_source = xubamp_render::pledit::PlaylistView::default;
         let external_source = {
             let settings = Rc::clone(&settings);
             let settings_path = settings_path.clone();

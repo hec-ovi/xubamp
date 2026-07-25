@@ -68,6 +68,19 @@ pub struct Row {
     pub duration_secs: Option<u32>,
 }
 
+/// What the player publishes to the playlist window on each poll.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PlaylistView {
+    /// One entry per track, in display order.
+    pub rows: Vec<Row>,
+    /// Display index of the playing track, drawn in the `Current` colour.
+    pub current: Option<usize>,
+    /// Stable identity of the playing track. Unlike `current` it does not move when rows above it
+    /// are removed or reordered, so the window can tell a new track starting (worth scrolling to)
+    /// from the same track shifting under a list edit (leave the view where the user put it).
+    pub current_id: Option<u64>,
+}
+
 /// The two buttons at the playlist title bar's right edge. Both expanded and shaded forms use the
 /// same dynamic destination rectangles; only the shade button's pressed sprite changes from
 /// collapse to restore.

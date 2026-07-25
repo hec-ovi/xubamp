@@ -890,7 +890,7 @@ impl Player {
 
     /// The playlist rows (numbered tag names or file stems; durations arrive once tracks are
     /// probed) and the index of the currently-playing track, for the playlist window to render.
-    pub fn playlist_view(&self) -> (Vec<pledit::Row>, Option<usize>) {
+    pub fn playlist_view(&self) -> pledit::PlaylistView {
         let rows = self
             .playlist
             .tracks()
@@ -913,7 +913,11 @@ impl Player {
                 }
             })
             .collect();
-        (rows, self.playlist.current_index())
+        pledit::PlaylistView {
+            rows,
+            current: self.playlist.current_index(),
+            current_id: self.playlist.current_id().map(|id| id.get()),
+        }
     }
 
     /// The current track's marquee title in the classic Winamp format
@@ -1030,7 +1034,7 @@ mod tests {
         let path = dir.join("tone.wav");
         write_wav(&path, 48_000, 2); // ~2 seconds at 48 kHz
         let player = Player::new(vec![path.clone()]);
-        let (rows, _) = player.playlist_view();
+        let rows = player.playlist_view().rows;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].duration_secs, Some(2), "header duration probed");
         assert_eq!(rows[0].duration, "0:02");
@@ -1217,7 +1221,7 @@ mod tests {
             EqSettings::default(),
             options,
         );
-        let (rows, _) = player.playlist_view();
+        let rows = player.playlist_view().rows;
         assert_eq!(rows[0].title, "a song", "sorted, unnumbered");
         assert_eq!(
             rows[1].title, "b track x",
@@ -1230,7 +1234,7 @@ mod tests {
             read_titles_on_load: true,
             ..options
         });
-        let (rows, _) = player.playlist_view();
+        let rows = player.playlist_view().rows;
         assert_eq!(rows[0].duration_secs, Some(1));
         assert_eq!(rows[1].duration_secs, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1279,7 +1283,8 @@ mod tests {
             "1. Aphex Twin - Xtal (0:02)",
             "marquee: number, tag name, and length"
         );
-        let (rows, current) = player.playlist_view();
+        let view = player.playlist_view();
+        let (rows, current) = (view.rows, view.current);
         assert_eq!(current, Some(0));
         assert_eq!(rows[0].title, "1. Aphex Twin - Xtal");
         assert_eq!(
@@ -1296,7 +1301,7 @@ mod tests {
         let path = dir.join("cruel summer.wav");
         write_wav(&path, 48_000, 2);
         let mut player = Player::new(vec![path.clone()]);
-        let (rows, _) = player.playlist_view();
+        let rows = player.playlist_view().rows;
         assert_eq!(rows[0].title, "1. cruel summer", "untagged file shows its stem");
 
         // What the file-info box does on save: write the ID3v1 tag, then refresh the caches.
@@ -1310,7 +1315,7 @@ mod tests {
         )
         .unwrap();
         player.refresh_metadata(&path);
-        let (rows, _) = player.playlist_view();
+        let rows = player.playlist_view().rows;
         assert_eq!(
             rows[0].title, "1. Ace of Base - Cruel Summer",
             "the row shows the freshly saved tag"
@@ -1326,18 +1331,19 @@ mod tests {
                 .map(|n| PathBuf::from(format!("/nowhere/{n}.wav")))
                 .collect(),
         );
-        assert_eq!(player.playlist_view().1, Some(0), "current starts at a");
+        assert_eq!(player.playlist_view().current, Some(0), "current starts at a");
 
         // The drag permutation the playlist editor emits: order[i] is the old display index.
         player.reorder_indices(&[2, 0, 1, 3]);
-        let (rows, current) = player.playlist_view();
+        let view = player.playlist_view();
+        let (rows, current) = (view.rows, view.current);
         let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
         assert_eq!(titles, ["1. c", "2. a", "3. b", "4. d"]);
         assert_eq!(current, Some(1), "current follows the track, not the row number");
 
         // Out-of-range indices are skipped rather than corrupting the order.
         player.reorder_indices(&[9, 3, 2, 1, 0]);
-        let (rows, _) = player.playlist_view();
+        let rows = player.playlist_view().rows;
         assert_eq!(rows[0].title, "1. d");
         assert_eq!(rows[3].title, "4. c");
     }
@@ -1502,7 +1508,7 @@ mod tests {
 
         assert_eq!(added.len(), 3, "video is rejected and duplicates are kept");
         assert_eq!(player.playlist.current_id(), Some(added[0]));
-        assert_eq!(player.playlist_view().1, Some(0));
+        assert_eq!(player.playlist_view().current, Some(0));
         assert_eq!(
             player.playlist.tracks().collect::<Vec<_>>(),
             ["first.mp3", "first.mp3", "second.WAV"].map(Path::new)
@@ -1699,7 +1705,7 @@ mod tests {
         let mut player = Player::new(vec![a.clone(), b.clone()]);
         player.start();
         assert_eq!(
-            player.playlist_view().1,
+            player.playlist_view().current,
             Some(0),
             "starts on the first track"
         );
@@ -1708,7 +1714,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             player.poll();
-            if player.playlist_view().1 == Some(1) {
+            if player.playlist_view().current == Some(1) {
                 break;
             }
             assert!(
@@ -1742,7 +1748,7 @@ mod tests {
         while player.playback().playing && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(player.playlist_view().1, Some(1));
+        assert_eq!(player.playlist_view().current, Some(1));
         assert!(player.playback().stopped);
         assert!(!player.playback().playing);
         assert_eq!(player.playback().elapsed, Some(0));
@@ -1768,7 +1774,7 @@ mod tests {
         while !player.playback().playing && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(player.playlist_view().1, Some(1));
+        assert_eq!(player.playlist_view().current, Some(1));
         assert!(!player.playback().stopped);
         assert!(player.playback().playing);
 
@@ -1797,7 +1803,7 @@ mod tests {
         while player.playback().playing && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(player.playlist_view().1, Some(1));
+        assert_eq!(player.playlist_view().current, Some(1));
         assert!(player.playback().stopped);
         assert!(!player.playback().playing);
         assert_eq!(player.playback().elapsed, Some(0));

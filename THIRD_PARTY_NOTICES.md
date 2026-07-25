@@ -61,6 +61,13 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 The crates.io archives identify upstream commit `6d533f26150953a882a6a111ebd13f0abf7129d5`, which is the commit behind tag `v0.5.5`.
 
+`symphonia-bundle-mp3` is not taken from crates.io. The build redirects it through
+`[patch.crates-io]` to `vendor/symphonia-bundle-mp3`, which is the 0.5.5 crates.io source plus one
+change to `src/layer3/mod.rs` (a granule channel with `part2_3_length == 0` decodes as silence
+instead of failing). `vendor/symphonia-bundle-mp3/PATCHES.md` records the change and
+`vendor/symphonia-bundle-mp3/LICENSE` carries the MPL-2.0 text, so the modified covered files ship
+in source form under MPL-2.0 as the license requires. Upstream's own file headers are unchanged.
+
 A distributor of an executable containing this code must make the corresponding Symphonia source available under MPL-2.0 and tell recipients how to obtain it. Notices in covered source files must be preserved. Modifications to those covered files must also be made available in source form under MPL-2.0. Include a copy of MPL-2.0 with the distribution or provide the license URL above.
 
 Packagers can obtain the exact locked source, including all other Rust dependencies, from the repository root:
@@ -69,7 +76,7 @@ Packagers can obtain the exact locked source, including all other Rust dependenc
 cargo vendor --locked --versioned-dirs vendor
 ```
 
-Archive the six resulting `symphonia*-0.5.5` directories at a durable source URL and put that URL in the product's notice. `Cargo.lock` contains the crates.io checksums used to verify the archives. The upstream source is also available at <https://github.com/pdeljanov/Symphonia/tree/v0.5.5>.
+Archive the five resulting `symphonia*-0.5.5` directories, plus `vendor/symphonia-bundle-mp3` from this repository, at a durable source URL and put that URL in the product's notice. `Cargo.lock` contains the crates.io checksums used to verify the archives. The upstream source is also available at <https://github.com/pdeljanov/Symphonia/tree/v0.5.5>.
 
 ## Locked Rust dependency license families
 

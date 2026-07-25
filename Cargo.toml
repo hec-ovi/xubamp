@@ -2,6 +2,12 @@
 resolver = "2"
 members = ["crates/skin", "crates/render", "crates/wl", "crates/audio", "crates/dsp", "crates/config", "crates/library", "crates/portal", "crates/xubamp"]
 
+# Symphonia's MP3 decoder drops any frame with a digitally silent granule and then cascades that
+# failure to the end of the track, so intros, fades, and whole tail sections go missing. The
+# vendored copy is upstream 0.5.5 plus one hunk; see vendor/symphonia-bundle-mp3/PATCHES.md.
+[patch.crates-io]
+symphonia-bundle-mp3 = { path = "vendor/symphonia-bundle-mp3" }
+
 [workspace.package]
 version = "0.2.7"
 edition = "2021"

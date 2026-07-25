@@ -24,6 +24,18 @@ License: GPL-2+
  On Debian and Ubuntu systems, the complete text of version 2 of the
  GNU General Public License is in /usr/share/common-licenses/GPL-2.
 
+Files: vendor/symphonia-bundle-mp3/*
+Copyright: 2019-2022 The Project Symphonia Developers
+License: MPL-2.0
+ This Source Code Form is subject to the terms of the Mozilla Public
+ License, v. 2.0. If a copy of the MPL was not distributed with this
+ file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ .
+ On Debian and Ubuntu systems, the complete text of the Mozilla Public
+ License version 2.0 is in /usr/share/common-licenses/MPL-2.0.
+Comment: Upstream symphonia-bundle-mp3 0.5.5 with one local change to
+ src/layer3/mod.rs, recorded in vendor/symphonia-bundle-mp3/PATCHES.md.
+
 Files: packaging/licenses/cookie-factory-0.3.3/LICENSE-MIT
 Copyright: 2017-2023 Geoffroy Couprie
 License: MIT

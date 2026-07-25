@@ -178,3 +178,47 @@ fn decodes_mp3_fixture() {
     assert!(frames > 1000, "decoded only {frames} frames");
     assert!(peak > 0.05, "MP3 tone should carry energy, peak {peak}");
 }
+
+#[test]
+fn decodes_an_mp3_whose_silent_part_uses_empty_granules() {
+    // `silence.mp3` is 0.1 s of tone then 0.3 s of exact digital silence. The encoder writes the
+    // silent stretch as granules with `part2_3_length == 0`, which stock symphonia 0.5.5 rejects;
+    // the rejection clears the bit reservoir, so every later frame fails too and the rest of the
+    // file never decodes. `next_interleaved` skips undecodable packets silently, so the frame
+    // count is what catches it: the tail must still be there.
+    let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/silence.mp3");
+    let mut src = Source::open(&path).unwrap();
+
+    let mut frames = 0u64;
+    let mut tone_peak = 0.0f32;
+    let mut tail_peak = 0.0f32;
+    // The tone stops at 0.1 s; leave a frame of slack around the boundary for the encoder's
+    // filter ramp before calling anything "tail".
+    let tone_end = 44100 / 10;
+    let tail_start = tone_end + 1152;
+    while let Some(s) = src.next_interleaved().unwrap() {
+        for (i, frame) in s.chunks_exact(2).enumerate() {
+            let level = frame[0].abs().max(frame[1].abs());
+            let at = frames + i as u64;
+            if at < tone_end {
+                tone_peak = tone_peak.max(level);
+            } else if at >= tail_start {
+                tail_peak = tail_peak.max(level);
+            }
+        }
+        frames += (s.len() / 2) as u64;
+    }
+
+    assert_eq!(src.sample_rate, 44100);
+    assert_eq!(src.channels, 2);
+    // 0.4 s at 44100. Stock symphonia stops after the last frame before the silence (~5760).
+    assert!(
+        frames >= 44100 * 4 / 10,
+        "the silent tail was dropped: decoded {frames} frames of 17640"
+    );
+    assert!(tone_peak > 0.05, "the tone should carry energy, {tone_peak}");
+    assert!(
+        tail_peak < 0.01,
+        "the tail should decode as silence, not noise, peak {tail_peak}"
+    );
+}

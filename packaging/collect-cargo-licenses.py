@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect license files for registry crates linked into the xubamp binary."""
+"""Collect license files for third-party crates linked into the xubamp binary."""
 
 from __future__ import annotations
 
@@ -30,6 +30,25 @@ def metadata(target: str) -> dict:
     return json.loads(subprocess.check_output(command, text=True))
 
 
+def is_third_party(package: dict) -> bool:
+    """Whether a resolved package is somebody else's code that needs its license shipped.
+
+    Registry and git packages declare a `source`. A crate redirected through
+    `[patch.crates-io]` to a path under `vendor/` does not, but it is still third-party source
+    linked into the binary, so it needs the same treatment.
+    """
+    if package["source"] is not None:
+        return True
+    return "vendor" in Path(package["manifest_path"]).parts
+
+
+def local_source(package: dict) -> str:
+    """Manifest column for a package with no registry `source`: where its source lives here."""
+    parts = Path(package["manifest_path"]).parts
+    start = len(parts) - 1 - parts[::-1].index("vendor")
+    return "path+" + "/".join(parts[start:-1])
+
+
 def runtime_registry_packages(data: dict) -> list[dict]:
     packages = {package["id"]: package for package in data["packages"]}
     nodes = {node["id"]: node for node in data["resolve"]["nodes"]}
@@ -56,7 +75,7 @@ def runtime_registry_packages(data: dict) -> list[dict]:
         (
             packages[package_id]
             for package_id in seen
-            if packages[package_id]["source"] is not None
+            if is_third_party(packages[package_id])
         ),
         key=lambda package: (package["name"], package["version"]),
     )
@@ -120,7 +139,7 @@ def main() -> None:
                 package["name"],
                 package["version"],
                 package.get("license") or "not declared",
-                package["source"],
+                package["source"] or local_source(package),
                 ",".join(copied),
             )
         )

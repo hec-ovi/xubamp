@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xubamp_audio::decode::{probe_tags, Source, TrackTags};
+use xubamp_audio::decode::{probe_stream_info, probe_tags, Source, TrackTags};
 
 /// Write a 16-bit PCM stereo WAV of a 440 Hz sine (dependency-free RIFF).
 fn write_wav_s16_stereo(path: &Path, rate: u32, frames: u32) {
@@ -177,6 +177,75 @@ fn decodes_mp3_fixture() {
     );
     assert!(frames > 1000, "decoded only {frames} frames");
     assert!(peak > 0.05, "MP3 tone should carry energy, peak {peak}");
+}
+
+/// Wrap MPEG frames in the RIFF/WAVE container some MP3s ship in: `wFormatTag` 0x0055
+/// (`WAVE_FORMAT_MPEGLAYER3`), the frames in the `data` chunk, an ID3v2 tag in front of the lot.
+fn riff_wrapped_mp3(frames: &[u8], id3: &[u8]) -> Vec<u8> {
+    let mut out = id3.to_vec();
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&0x0055u16.to_le_bytes());
+    fmt.extend_from_slice(&2u16.to_le_bytes()); // channels
+    fmt.extend_from_slice(&44100u32.to_le_bytes());
+    fmt.extend_from_slice(&16000u32.to_le_bytes()); // average bytes per second
+    fmt.extend_from_slice(&1u16.to_le_bytes()); // block align
+    fmt.extend_from_slice(&0u16.to_le_bytes()); // bits per sample
+    fmt.extend_from_slice(&[0u8; 16]); // MPEGLAYER3 extension
+
+    let mut body = b"WAVE".to_vec();
+    body.extend_from_slice(b"fmt ");
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    body.extend_from_slice(frames);
+
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+#[test]
+fn probes_plays_and_tags_an_mp3_stored_inside_a_riff_wave_container() {
+    // Real files in the wild: an ID3v2 tag, then a RIFF/WAVE wrapper whose data chunk holds the
+    // MPEG stream, still named .mp3. Symphonia routes them to its WAV reader, which rejects the
+    // format outright, so the track showed a blank duration, no metadata, and would not play.
+    let fixture: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tone.mp3");
+    let frames = std::fs::read(&fixture).unwrap();
+    let tag = id3v2_block("France Galle", "Elle Elle La");
+    let path = std::env::temp_dir().join("xubamp_riff_wrapped_test.mp3");
+    std::fs::write(&path, riff_wrapped_mp3(&frames, &tag)).unwrap();
+
+    let info = probe_stream_info(&path).expect("stream facts, not a blank file-info box");
+    assert_eq!(info.sample_rate, Some(48000));
+    assert_eq!(info.channels, Some(2));
+    assert!(info.codec.contains("MP3") || info.codec.contains("MPEG"), "{}", info.codec);
+
+    let tags = probe_tags(&path).expect("the leading ID3v2 tag survives the unwrap");
+    assert_eq!(tags.artist.as_deref(), Some("France Galle"));
+    assert_eq!(tags.title.as_deref(), Some("Elle Elle La"));
+
+    // And it decodes: same audio as the bare file it was built from.
+    let mut wrapped_frames = 0u64;
+    let mut peak = 0.0f32;
+    let mut src = Source::open(&path).unwrap();
+    while let Some(s) = src.next_interleaved().unwrap() {
+        wrapped_frames += (s.len() / 2) as u64;
+        for &x in s {
+            peak = peak.max(x.abs());
+        }
+    }
+    assert_eq!(src.sample_rate, 48000);
+    assert!(peak > 0.05, "the tone decodes, peak {peak}");
+
+    let mut bare = Source::open(&fixture).unwrap();
+    let mut bare_frames = 0u64;
+    while let Some(s) = bare.next_interleaved().unwrap() {
+        bare_frames += (s.len() / 2) as u64;
+    }
+    assert_eq!(wrapped_frames, bare_frames, "unwrapping loses no audio");
+    std::fs::remove_file(&path).ok();
 }
 
 #[test]

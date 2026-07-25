@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::Path;
 
+use crate::riff_mpeg;
+
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error;
@@ -12,6 +14,31 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTagKey, Tag};
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
+
+/// Open `path` for Symphonia: the byte stream to probe plus the format hint to probe it with.
+///
+/// Ordinary files are handed over as they are, with the file extension as the hint. A file whose
+/// MPEG stream is buried in a RIFF/WAVE container (see [`crate::riff_mpeg`]) is presented as just
+/// that stream, hinted as MP3, because Symphonia's WAV reader rejects the wrapper outright and the
+/// track would otherwise neither probe, tag, nor play.
+fn open_source(path: &Path) -> Result<(MediaSourceStream, Hint), Error> {
+    let mut hint = Hint::new();
+    if let Some(unwrapped) = riff_mpeg::open(path)? {
+        hint.with_extension("mp3");
+        return Ok((
+            MediaSourceStream::new(Box::new(unwrapped), Default::default()),
+            hint,
+        ));
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let file = File::open(path)?;
+    Ok((
+        MediaSourceStream::new(Box::new(file), Default::default()),
+        hint,
+    ))
+}
 
 /// A decodable audio source: demuxer plus decoder producing interleaved f32 frames.
 pub struct Source {
@@ -37,12 +64,7 @@ pub struct Source {
 /// header (e.g. a VBR MP3 with no Xing header) or the file cannot be read, so a caller shows a blank
 /// time rather than a wrong one.
 pub fn probe_duration_secs(path: &Path) -> Option<u32> {
-    let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
+    let (mss, hint) = open_source(path).ok()?;
     let probed = symphonia::default::get_probe()
         .format(
             &hint,
@@ -74,12 +96,7 @@ pub struct StreamInfo {
 /// Header-only probe of a track's stream facts. No decoding happens. `None` when the file
 /// cannot be opened or no audio track is found.
 pub fn probe_stream_info(path: &Path) -> Option<StreamInfo> {
-    let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
+    let (mss, hint) = open_source(path).ok()?;
     let probed = symphonia::default::get_probe()
         .format(
             &hint,
@@ -142,12 +159,7 @@ impl TrackTags {
 /// metadata (Vorbis comments in Ogg/FLAC, RIFF INFO in WAV). Returns `None` when the file cannot
 /// be opened or probed; a readable file with no tags yields empty [`TrackTags`].
 pub fn probe_tags(path: &Path) -> Option<TrackTags> {
-    let file = File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
+    let (mss, hint) = open_source(path).ok()?;
     let mut probed = symphonia::default::get_probe()
         .format(
             &hint,
@@ -231,13 +243,7 @@ fn collect_tags(read: &[Tag], out: &mut TrackTags) {
 impl Source {
     /// Open a file and prepare its default audio track for decoding.
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let file = File::open(path)?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
+        let (mss, hint) = open_source(path)?;
 
         // Gapless trims LAME/Xing encoder delay and padding on MP3 (no leading click).
         let fmt_opts = FormatOptions {

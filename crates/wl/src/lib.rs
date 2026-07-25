@@ -552,6 +552,64 @@ fn snap_playlist_dimension(requested: i32, base: i32, segment: i32) -> i32 {
     base + (delta + segment / 2) / segment * segment
 }
 
+/// One of the three docked panes. They are separate Wayland surfaces (the main `xdg_toplevel` and
+/// two `wl_subsurface` children) laid out in the parent's coordinate space, which is what lets a
+/// pointer grab that started on one be routed to it from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Main,
+    Equalizer,
+    Playlist,
+}
+
+/// What [`App::route_pane_event`] does with one pointer event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneRouting {
+    /// The pane that handles the event.
+    target: Pane,
+    /// The left-button grab afterwards.
+    grab: Option<Pane>,
+    /// Whether a grab was still open when a new press arrived, meaning its release went missing
+    /// and the drag it belongs to has to be abandoned before this press starts a new one.
+    stale: bool,
+}
+
+/// The grab bookkeeping behind [`App::route_pane_event`], kept pure so the routing is testable
+/// without a compositor. `grab` is the pane holding the left button, `pane` the one whose surface
+/// the event actually arrived on.
+fn route_grab(grab: Option<Pane>, pane: Pane, kind: &PointerEventKind) -> PaneRouting {
+    match kind {
+        PointerEventKind::Press { button, .. } if *button == BTN_LEFT => PaneRouting {
+            target: pane,
+            grab: Some(pane),
+            stale: grab.is_some(),
+        },
+        PointerEventKind::Release { button, .. } if *button == BTN_LEFT => PaneRouting {
+            target: grab.unwrap_or(pane),
+            grab: None,
+            stale: false,
+        },
+        PointerEventKind::Motion { .. } => PaneRouting {
+            target: grab.unwrap_or(pane),
+            grab,
+            stale: false,
+        },
+        // Enter, Leave, and Axis stay with the surface that reported them: the panes use enter and
+        // leave for cursor and hover feedback, and an axis event has no grab to belong to.
+        _ => PaneRouting {
+            target: pane,
+            grab,
+            stale: false,
+        },
+    }
+}
+
+/// Re-express a surface-local point from a pane at `origin` in the coordinates of a pane at
+/// `target`, both origins being in the parent surface's space.
+fn translate_pane_point(origin: panes::Point, target: panes::Point, x: i32, y: i32) -> (i32, i32) {
+    (x + origin.x - target.x, y + origin.y - target.y)
+}
+
 /// Merge a polled playlist view into the window's list state, returning whether the window needs a
 /// repaint. `followed` is the id of the track the view last scrolled to, updated in place.
 ///
@@ -721,6 +779,7 @@ pub fn run(
             ..Default::default()
         },
         playlist_current_id: None,
+        pane_grab: None,
         pl_size: (
             i32::try_from(pane_layout.playlist_size.0).unwrap_or(i32::MAX),
             i32::try_from(pane_layout.playlist_size.1).unwrap_or(i32::MAX),
@@ -907,6 +966,10 @@ struct App {
     /// Stable id of the track the playlist view last followed. Compared against the polled id to
     /// tell a new track starting from the current one merely shifting index under a list edit.
     playlist_current_id: Option<u64>,
+    /// Which docked pane took the current left-button press, so the rest of the drag and its
+    /// release reach that pane whatever surface the compositor delivers them on. See
+    /// [`App::route_pane_event`].
+    pane_grab: Option<Pane>,
     /// The playlist pane's last expanded size, remembered across shade and close/reopen.
     pl_size: (i32, i32),
     /// Last child-surface position, remembered across close/reopen.
@@ -3608,18 +3671,42 @@ impl PointerHandler for App {
                     .equalizer
                     .as_ref()
                     .is_some_and(|equalizer| event.surface == equalizer.surface);
-            if on_equalizer {
-                self.equalizer_pointer(conn, &event.kind, x, y);
-                continue;
-            }
             let on_playlist = !on_main
                 && self
                     .playlist
                     .as_ref()
                     .is_some_and(|pl| event.surface == pl.surface);
-            if on_playlist {
-                self.playlist_pointer(conn, &event.kind, x, y);
+            // The three docked panes share one coordinate space (the main surface is the parent,
+            // at 0,0), so a grab that began on one of them can be routed to it from any of them.
+            let pane = if on_main {
+                Some(Pane::Main)
+            } else if on_equalizer {
+                Some(Pane::Equalizer)
+            } else if on_playlist {
+                Some(Pane::Playlist)
+            } else {
+                None
+            };
+            if let Some(pane) = pane {
+                let (pane, x, y) = self.route_pane_event(pane, &event.kind, x, y);
+                match pane {
+                    // Skin space: double-size halves the raw coordinates back to 275x116.
+                    Pane::Main => self.main_pointer(conn, &event.kind, x / self.scale(), y / self.scale()),
+                    Pane::Equalizer => self.equalizer_pointer(conn, &event.kind, x, y),
+                    Pane::Playlist => self.playlist_pointer(conn, &event.kind, x, y),
+                }
                 continue;
+            }
+            // A left release that landed anywhere else (one of the dialog windows, or a surface we
+            // do not own) will never reach the pane holding the grab, so end the drag here instead
+            // of leaving the pane stuck to the pointer.
+            if self.pane_grab.is_some()
+                && matches!(
+                    &event.kind,
+                    PointerEventKind::Release { button, .. } if *button == BTN_LEFT
+                )
+            {
+                self.cancel_pane_grabs();
             }
             let on_jump = !on_main
                 && self
@@ -3650,102 +3737,169 @@ impl PointerHandler for App {
                 self.file_info_pointer(conn, &event.kind, x, y);
                 continue;
             }
-            if !on_main {
-                continue; // an event for some other surface (e.g. the cursor surface)
-            }
-            // Skin space: double-size halves the raw coordinates back to the 275x116 layout.
-            let (x, y) = (x / self.scale(), y / self.scale());
-            match event.kind {
-                PointerEventKind::Enter { .. } => {
-                    // Set a normal arrow cursor; without this the window shows whatever cursor was
-                    // active on entry (often an I-beam), which makes the title bar feel un-draggable.
-                    if let Some(pointer) = &self.pointer {
-                        let _ = pointer.set_cursor(conn, CursorIcon::Default);
-                    }
+            // Anything left belongs to some other surface (e.g. the cursor surface).
+        }
+    }
+}
+
+impl App {
+    /// Where a docked pane's surface sits in the parent surface's coordinate space. The main
+    /// window is the parent, so it is the origin.
+    fn pane_origin(&self, pane: Pane) -> panes::Point {
+        match pane {
+            Pane::Main => panes::Point { x: 0, y: 0 },
+            Pane::Equalizer => self.equalizer_position,
+            Pane::Playlist => self
+                .playlist
+                .as_ref()
+                .map_or(self.pl_position, |pl| pl.position),
+        }
+    }
+
+    /// Decide which pane a pointer event belongs to, and translate its coordinates into that
+    /// pane's surface-local space.
+    ///
+    /// A left press takes the grab; every event up to the matching release goes to the pane that
+    /// took it. Wayland's implicit grab is meant to do this for us, but the panes are subsurfaces
+    /// and a pane drag moves the surface out from under the pointer. Some compositors (KWin, and
+    /// so every Plasma session) re-evaluate pointer focus anyway and hand the rest of the drag,
+    /// including the button release, to whichever surface is now underneath. The pane never sees
+    /// its release, keeps its drag or resize state, and then follows the bare pointer around on
+    /// the next hover: the "playlist sticks to the cursor" and "cannot resize it" reports. Routing
+    /// by the pressed pane makes a drag end where it started on any compositor.
+    fn route_pane_event(
+        &mut self,
+        pane: Pane,
+        kind: &PointerEventKind,
+        x: i32,
+        y: i32,
+    ) -> (Pane, i32, i32) {
+        let routing = route_grab(self.pane_grab, pane, kind);
+        if routing.stale {
+            self.cancel_pane_grabs();
+        }
+        self.pane_grab = routing.grab;
+        let (x, y) = translate_pane_point(
+            self.pane_origin(pane),
+            self.pane_origin(routing.target),
+            x,
+            y,
+        );
+        (routing.target, x, y)
+    }
+
+    /// Drop every in-progress pane drag, resize, and press. The safety net for a button release
+    /// that never reached us at all (delivered to a surface we do not own, or swallowed by a
+    /// compositor-side grab): without it a pane would stay glued to the pointer.
+    fn cancel_pane_grabs(&mut self) {
+        self.pane_grab = None;
+        self.armed_move = None;
+        self.main_shade_on_release = false;
+        if let Some(equalizer) = &mut self.equalizer {
+            equalizer.drag = None;
+        }
+        if let Some(pl) = &mut self.playlist {
+            pl.drag = None;
+            pl.resize = None;
+            pl.scrollbar_drag = false;
+            pl.row_drag = None;
+            pl.shade_on_release = false;
+        }
+    }
+
+    /// Pointer handling for the main window: transport and slider hit-testing, the deferred
+    /// title-bar drag, the windowshade double-click, and the wheel. `x`/`y` are skin-space.
+    fn main_pointer(&mut self, conn: &Connection, kind: &PointerEventKind, x: i32, y: i32) {
+        match *kind {
+            PointerEventKind::Enter { .. } => {
+                // Set a normal arrow cursor; without this the window shows whatever cursor was
+                // active on entry (often an I-beam), which makes the title bar feel un-draggable.
+                if let Some(pointer) = &self.pointer {
+                    let _ = pointer.set_cursor(conn, CursorIcon::Default);
                 }
-                PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
-                    let outcome = hit::on_press(&mut self.state, x, y);
-                    // A press on the title bar or the window body arms a window drag, but does NOT
-                    // start it yet: the compositor move is deferred until the pointer moves past a
-                    // threshold, so a click (or a near-miss on a small title-bar button) does not
-                    // jump the window. A second quick title-bar click is the classic windowshade
-                    // double-click, but its toggle is deferred to the release: if the pointer drags
-                    // past the threshold first, the user wanted a move, not a shade flip.
-                    if outcome.start_move {
-                        self.armed_move = Some((x, y, serial));
-                        if outcome.title_band {
-                            let now = Instant::now();
-                            let double = self
-                                .title_last_click
-                                .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
-                            if double {
-                                self.title_last_click = None;
-                                self.main_shade_on_release = true;
-                            } else {
-                                self.title_last_click = Some(now);
-                            }
+            }
+            PointerEventKind::Press { button, serial, .. } if button == BTN_LEFT => {
+                let outcome = hit::on_press(&mut self.state, x, y);
+                // A press on the title bar or the window body arms a window drag, but does NOT
+                // start it yet: the compositor move is deferred until the pointer moves past a
+                // threshold, so a click (or a near-miss on a small title-bar button) does not
+                // jump the window. A second quick title-bar click is the classic windowshade
+                // double-click, but its toggle is deferred to the release: if the pointer drags
+                // past the threshold first, the user wanted a move, not a shade flip.
+                if outcome.start_move {
+                    self.armed_move = Some((x, y, serial));
+                    if outcome.title_band {
+                        let now = Instant::now();
+                        let double = self
+                            .title_last_click
+                            .is_some_and(|at| now.duration_since(at) < DOUBLE_CLICK);
+                        if double {
+                            self.title_last_click = None;
+                            self.main_shade_on_release = true;
                         } else {
-                            // A body press is not part of a title double-click sequence.
-                            self.title_last_click = None;
+                            self.title_last_click = Some(now);
                         }
-                    }
-                    self.apply(outcome);
-                }
-                PointerEventKind::Motion { .. } => {
-                    // A moved-far-enough armed press becomes a compositor window drag: hand it off
-                    // with the original press serial, then let the compositor move the window until
-                    // release. Wayland has no client-set absolute position, so this is the classic
-                    // title-bar drag (extended to the whole dead surface of the window).
-                    if let Some((px, py, serial)) = self.armed_move {
-                        if hit::exceeds_move_threshold(x - px, y - py) {
-                            if let Some(seat) = &self.seat {
-                                self.window.move_(seat, serial);
-                            }
-                            self.armed_move = None;
-                            // A drag is not a double-click: neither the first half of the next one,
-                            // nor a pending shade toggle waiting for release.
-                            self.title_last_click = None;
-                            self.main_shade_on_release = false;
-                        }
-                    }
-                    // Drives slider dragging; inert otherwise. Wayland keeps delivering motion
-                    // during the implicit button grab, so a drag continues past the window edge.
-                    let outcome = hit::on_motion(&mut self.state, x, y);
-                    self.apply(outcome);
-                }
-                PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
-                    // A release without crossing the threshold was a click, not a drag. If it
-                    // completed a title-bar double-click, toggle windowshade now.
-                    self.armed_move = None;
-                    let outcome = hit::on_release(&mut self.state, x, y);
-                    self.apply(outcome);
-                    if self.main_shade_on_release {
-                        self.main_shade_on_release = false;
-                        self.toggle_shade();
-                    }
-                }
-                PointerEventKind::Axis { vertical, .. } => {
-                    // Wheel over the main window: balance/seek over their controls, volume
-                    // anywhere else (the classic behaviour). Wheel-up is a negative axis value.
-                    let notches = if vertical.discrete != 0 {
-                        -vertical.discrete
                     } else {
-                        -(vertical.absolute / 15.0).round() as i32
-                    };
-                    let outcome = hit::on_wheel(&mut self.state, x, y, notches);
-                    self.apply(outcome);
-                }
-                PointerEventKind::Leave { .. } => {
-                    self.armed_move = None;
-                    self.main_shade_on_release = false;
-                    // Cancel any in-progress button press so a button never stays stuck down.
-                    let needs_redraw = hit::on_leave(&mut self.state);
-                    if needs_redraw {
-                        self.redraw();
+                        // A body press is not part of a title double-click sequence.
+                        self.title_last_click = None;
                     }
                 }
-                _ => {}
+                self.apply(outcome);
             }
+            PointerEventKind::Motion { .. } => {
+                // A moved-far-enough armed press becomes a compositor window drag: hand it off
+                // with the original press serial, then let the compositor move the window until
+                // release. Wayland has no client-set absolute position, so this is the classic
+                // title-bar drag (extended to the whole dead surface of the window).
+                if let Some((px, py, serial)) = self.armed_move {
+                    if hit::exceeds_move_threshold(x - px, y - py) {
+                        if let Some(seat) = &self.seat {
+                            self.window.move_(seat, serial);
+                        }
+                        self.armed_move = None;
+                        // A drag is not a double-click: neither the first half of the next one,
+                        // nor a pending shade toggle waiting for release.
+                        self.title_last_click = None;
+                        self.main_shade_on_release = false;
+                    }
+                }
+                // Drives slider dragging; inert otherwise. Wayland keeps delivering motion
+                // during the implicit button grab, so a drag continues past the window edge.
+                let outcome = hit::on_motion(&mut self.state, x, y);
+                self.apply(outcome);
+            }
+            PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                // A release without crossing the threshold was a click, not a drag. If it
+                // completed a title-bar double-click, toggle windowshade now.
+                self.armed_move = None;
+                let outcome = hit::on_release(&mut self.state, x, y);
+                self.apply(outcome);
+                if self.main_shade_on_release {
+                    self.main_shade_on_release = false;
+                    self.toggle_shade();
+                }
+            }
+            PointerEventKind::Axis { vertical, .. } => {
+                // Wheel over the main window: balance/seek over their controls, volume
+                // anywhere else (the classic behaviour). Wheel-up is a negative axis value.
+                let notches = if vertical.discrete != 0 {
+                    -vertical.discrete
+                } else {
+                    -(vertical.absolute / 15.0).round() as i32
+                };
+                let outcome = hit::on_wheel(&mut self.state, x, y, notches);
+                self.apply(outcome);
+            }
+            PointerEventKind::Leave { .. } => {
+                self.armed_move = None;
+                self.main_shade_on_release = false;
+                // Cancel any in-progress button press so a button never stays stuck down.
+                let needs_redraw = hit::on_leave(&mut self.state);
+                if needs_redraw {
+                    self.redraw();
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -4282,6 +4436,92 @@ mod tests {
             "polling the same view again is a no-op"
         );
         assert_eq!(state.scroll, 100.0);
+    }
+
+    fn press() -> PointerEventKind {
+        PointerEventKind::Press {
+            time: 0,
+            button: BTN_LEFT,
+            serial: 1,
+        }
+    }
+
+    fn release() -> PointerEventKind {
+        PointerEventKind::Release {
+            time: 0,
+            button: BTN_LEFT,
+            serial: 2,
+        }
+    }
+
+    fn motion() -> PointerEventKind {
+        PointerEventKind::Motion { time: 0 }
+    }
+
+    #[test]
+    fn a_pane_drag_keeps_its_events_when_the_compositor_reroutes_them() {
+        // The user presses the playlist's title bar and drags. On KWin the pane slides out from
+        // under the pointer and the rest of the drag is delivered on the main surface instead.
+        let after_press = route_grab(None, Pane::Playlist, &press());
+        assert_eq!(after_press.target, Pane::Playlist);
+        assert_eq!(after_press.grab, Some(Pane::Playlist));
+        assert!(!after_press.stale);
+
+        let moved = route_grab(after_press.grab, Pane::Main, &motion());
+        assert_eq!(
+            moved.target,
+            Pane::Playlist,
+            "motion belongs to the pane that took the press"
+        );
+        assert_eq!(moved.grab, Some(Pane::Playlist));
+
+        let released = route_grab(moved.grab, Pane::Main, &release());
+        assert_eq!(
+            released.target,
+            Pane::Playlist,
+            "the release must reach the pane that is dragging, or it never stops"
+        );
+        assert_eq!(released.grab, None, "the grab ends with the button");
+    }
+
+    #[test]
+    fn a_press_while_a_grab_is_open_abandons_the_stale_drag() {
+        // A release that never arrived at all leaves the grab set; the next press must clear it
+        // rather than let the old drag ride along.
+        let routed = route_grab(Some(Pane::Playlist), Pane::Main, &press());
+        assert!(routed.stale);
+        assert_eq!(routed.grab, Some(Pane::Main));
+        assert_eq!(routed.target, Pane::Main);
+    }
+
+    #[test]
+    fn hover_and_wheel_events_are_never_rerouted() {
+        for kind in [
+            PointerEventKind::Enter { serial: 3 },
+            PointerEventKind::Leave { serial: 4 },
+        ] {
+            let routed = route_grab(Some(Pane::Playlist), Pane::Main, &kind);
+            assert_eq!(routed.target, Pane::Main, "{kind:?} stays on its surface");
+            assert_eq!(routed.grab, Some(Pane::Playlist), "and keeps the grab");
+        }
+        // With no grab open, ordinary motion goes to the surface it arrived on.
+        let routed = route_grab(None, Pane::Equalizer, &motion());
+        assert_eq!(routed.target, Pane::Equalizer);
+        assert_eq!(routed.grab, None);
+    }
+
+    #[test]
+    fn rerouted_coordinates_land_in_the_target_panes_space() {
+        // The playlist sits at (40, 130) below the main window, which is the parent at (0, 0).
+        let main = panes::Point { x: 0, y: 0 };
+        let playlist = panes::Point { x: 40, y: 130 };
+        // A point 12 px right and 5 px down from the main window's origin is 28 px left and 125 px
+        // above the playlist's.
+        assert_eq!(translate_pane_point(main, playlist, 12, 5), (-28, -125));
+        // And back again.
+        assert_eq!(translate_pane_point(playlist, main, -28, -125), (12, 5));
+        // Same pane, unchanged.
+        assert_eq!(translate_pane_point(playlist, playlist, 7, 9), (7, 9));
     }
 
     #[test]

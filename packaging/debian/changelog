@@ -1,3 +1,12 @@
+xubamp (0.2.9-1) resolute; urgency=medium
+
+  * MP3s stored inside a RIFF/WAVE container (wFormatTag 0x0055, usually still
+    named .mp3) now probe, show their tags, and play. They previously showed a
+    blank running time and an empty file-info box, and would not start.
+  * IMA ADPCM WAV files decode, via Symphonia's adpcm codec.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Sat, 25 Jul 2026 21:45:00 +0000
+
 xubamp (0.2.8-1) resolute; urgency=medium
 
   * Playback no longer stutters on tracks whose sample rate is below the

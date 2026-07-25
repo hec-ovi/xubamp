@@ -425,7 +425,11 @@ impl AudioEngine {
         // into the spare half behind the stale tail, and the realtime side drops the tail without
         // ever emptying the ring. `high_water` caps the steady-state fill; the spare capacity above
         // it is the seek staging area.
-        let headroom_frames = (rate as usize / 2).max(2048);
+        // The floor keeps the buffer above PipeWire's mapped buffer size (12288 frames on Ubuntu
+        // 26.04) whatever the track's rate: half a second at 22.05 kHz is only 11025 frames, and a
+        // realtime callback that has to fall back to filling the whole mapped buffer would then
+        // find the ring short every single cycle and pad the difference with silence.
+        let headroom_frames = (rate as usize / 2).max(16384);
         let cap_frames = headroom_frames * 2;
         let ring_slots = cap_frames * CHANNELS;
         let high_water = headroom_frames * CHANNELS;

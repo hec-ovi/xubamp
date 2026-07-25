@@ -75,6 +75,11 @@ pub struct SharedState {
     pub drop_before: AtomicU64,
     /// The graph rate PipeWire actually negotiated, published from `param_changed`.
     pub stream_rate: AtomicU32,
+    /// Frames the callback had to fill with silence because the ring was short (an underrun).
+    /// Expected to be zero in steady playback and to rise only at the end of a track; a steadily
+    /// climbing count means the output is emitting gaps, which is what a listener hears as
+    /// stuttering. Written only by the callback.
+    pub padded_frames: AtomicU64,
     /// Producer -> app: the track fully drained after a clean end of decode. Set once, so the
     /// UI can show the stopped state and a future playlist can advance to the next track.
     pub finished: AtomicBool,
@@ -111,6 +116,7 @@ impl SharedState {
             base_offset: AtomicI64::new(0),
             drop_before: AtomicU64::new(0),
             stream_rate: AtomicU32::new(0),
+            padded_frames: AtomicU64::new(0),
             finished: AtomicBool::new(false),
             // Set true once the stream connects (it starts active); toggled by pause/resume.
             playing: AtomicBool::new(false),
@@ -363,8 +369,13 @@ pub fn fill_output(c: &mut Consumer<f32>, out: &mut [f32], shared: &SharedState)
             .fetch_add(played, Ordering::Relaxed);
         chunk.commit_all();
     }
-    for s in &mut out[written..] {
-        *s = 0.0;
+    if written < out.len() {
+        for s in &mut out[written..] {
+            *s = 0.0;
+        }
+        shared
+            .padded_frames
+            .fetch_add(((out.len() - written) / CHANNELS) as u64, Ordering::Relaxed);
     }
     written / CHANNELS
 }

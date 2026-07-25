@@ -28,6 +28,27 @@ use crate::ring::{apply_gain, fill_output, SharedState, CHANNELS};
 /// Bytes per interleaved stereo f32 frame (8): the negotiated stride of the output buffer.
 const STRIDE: usize = std::mem::size_of::<f32>() * CHANNELS;
 
+/// How many frames the realtime callback writes this cycle: what the graph asked for
+/// (`buffer.requested()`), clamped to what the mapped buffer holds.
+///
+/// The two are far apart. PipeWire sizes the mapped buffer for a worst case (12288 frames on
+/// Ubuntu 26.04) while a cycle wants one quantum, ~470 frames for a 22.05 kHz stream in a 48 kHz
+/// graph. Filling the buffer end to end drains everything the producer has queued into a single
+/// cycle and silence-pads the shortfall, so the stream emits a burst of audio and then a gap, over
+/// and over. That stayed inaudible at 44.1 and 48 kHz only because the producer's half-second of
+/// buffered audio is longer there than the mapped buffer; at 22.05 kHz half a second is 11025
+/// frames against a 12288-frame buffer, and every cycle ended in ~57 ms of silence.
+///
+/// `requested` is 0 on PipeWire older than 0.3.49 (and on the first cycles of some sinks), where
+/// the buffer size is the only figure available.
+fn frames_this_cycle(requested: usize, capacity: usize) -> usize {
+    if requested > 0 {
+        requested.min(capacity)
+    } else {
+        capacity
+    }
+}
+
 /// User data owned by the stream listener for the life of the loop.
 ///
 /// `consumer` is touched only by the realtime `process` callback. `shared` is all atomics,
@@ -49,10 +70,12 @@ pub fn control_channel() -> (ControlSender<Control>, ControlReceiver<Control>) {
 
 /// Run the PipeWire main loop on the calling thread until [`Control::Quit`].
 ///
-/// Connects one persistent F32LE / stereo Output stream, requesting `request_rate`. The graph
-/// may negotiate a different rate; the real rate is read back in `param_changed` and published
-/// to `shared.stream_rate`, so the producer resamples to it and the position clock uses it.
-/// Spawn this on its own thread (`std::thread::spawn(move || run_loop(rx, rt, 48000))`).
+/// Connects one persistent Output stream offering exactly one format: F32LE stereo at
+/// `request_rate`, the track's own rate. Nothing downstream resamples, so the graph either accepts
+/// that rate (its adapter converts to the device) or the stream fails to connect; the rate it
+/// actually agreed to is read back in `param_changed` and published to `shared.stream_rate`, where
+/// the live playback test checks it against the request. Spawn this on its own thread
+/// (`std::thread::spawn(move || run_loop(rx, rt, 48000))`).
 pub fn run_loop(
     rx: ControlReceiver<Control>,
     rt: RtData,
@@ -117,16 +140,18 @@ pub fn run_loop(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            // How many frames the graph wants this cycle, which is NOT the size of the mapped
+            // buffer. See [`frames_this_cycle`].
+            let requested = buffer.requested() as usize;
             let datas = buffer.datas_mut();
             if datas.is_empty() {
                 return;
             }
             let data = &mut datas[0];
 
-            // How many whole frames fit in the mapped buffer this quantum.
             let mut frames = 0usize;
             if let Some(raw) = data.data() {
-                frames = raw.len() / STRIDE;
+                frames = frames_this_cycle(requested, raw.len() / STRIDE);
                 let usable = &mut raw[..frames * STRIDE];
                 // Aligned (MAP_BUFFERS) and length is a multiple of 4, so this succeeds; the
                 // fallible form keeps the RT thread panic-free if that ever fails to hold.
@@ -190,4 +215,19 @@ pub fn run_loop(
 
     mainloop.run(); // blocks until Control::Quit -> mainloop.quit(); keeps listeners alive
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frames_this_cycle;
+
+    #[test]
+    fn a_cycle_writes_what_the_graph_asked_for_not_the_whole_buffer() {
+        // A 22.05 kHz stream in a 48 kHz graph: ~470 frames per cycle out of a 12288-frame buffer.
+        assert_eq!(frames_this_cycle(471, 12288), 471);
+        // Never past the end of the mapping, whatever the graph claims to want.
+        assert_eq!(frames_this_cycle(20_000, 12288), 12288);
+        // PipeWire older than 0.3.49 reports nothing; the buffer size is all there is to go on.
+        assert_eq!(frames_this_cycle(0, 12288), 12288);
+    }
 }

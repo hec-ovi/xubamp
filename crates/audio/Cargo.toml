@@ -26,7 +26,10 @@ xubamp-dsp = { path = "../dsp" }
 # libpipewire-0.3-dev + libspa-0.2-dev + pkg-config + libclang, so it is OFF by default and
 # built only in the dev container (see Dockerfile.dev / scripts/dev-docker.sh). Pin exactly:
 # the crate is pre-1.0 and churny.
-pipewire = { version = "=0.10.0", optional = true }
+# `v0_3_49` enables `Buffer::requested()`, the frame count the graph wants this cycle. Without it
+# the realtime callback has to guess from the mapped buffer size, which is much larger. Ubuntu
+# 26.04 ships PipeWire 1.x, so the version gate is met with room to spare.
+pipewire = { version = "=0.10.0", optional = true, features = ["v0_3_49"] }
 # Zero-copy &mut [u8] -> &mut [f32] reinterpret of the mapped buffer in the RT callback.
 bytemuck = { version = "1", optional = true }
 

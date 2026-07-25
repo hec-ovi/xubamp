@@ -14,10 +14,43 @@ use xubamp_skin::{font, textfont, Skin};
 use crate::adwaita::UiFont;
 use crate::{blit, Framebuffer};
 
-/// Pixels-per-em for the playlist rows' vector font. Winamp's default playlist font height; at
-/// this size Arial-metric caps run ~7px, the same visual weight as the 5x7 bitmap fallback, and a
-/// full line box fits the fixed 13px row grid.
-const PL_FONT_PX: f32 = 10.0;
+/// Candidate pixels-per-em for the playlist rows, largest first.
+///
+/// The row grid is a fixed 13px, so the useful size is the biggest whose ink still fits one row.
+/// A constant cannot be that for every face: the skin names the font in `pledit.txt` and metrics
+/// vary, so 10px (the old constant) left an Arial-metric face at a ~7px cap height, small enough
+/// that unhinted stems land between pixels and the text reads as blurry. Measuring instead gets
+/// Liberation Sans to 12px, a 9px cap, with the descenders still inside the row.
+const PL_FONT_LADDER: [f32; 6] = [12.0, 11.5, 11.0, 10.5, 10.0, 9.0];
+
+/// The characters [`row_font_px`] measures: the tallest ascenders and deepest descenders an
+/// ordinary track title carries, the punctuation Winamp's `N. Artist - Title (M:SS)` format adds,
+/// and accented capitals, which are the tallest glyphs a European title can bring.
+const FIT_SAMPLE: &str = "AXbdfhklgjpqy(),.-'0123456789ÁÉÍÓÜÑ";
+
+/// The largest [`PL_FONT_LADDER`] size whose ink fits inside one [`sprites::PLEDIT_ROW_H`] row for
+/// `ui`, so a row can never clip its own ascenders or bleed a descender into the row below.
+/// Falls back to the smallest candidate for a face too tall for any of them.
+pub fn row_font_px(ui: &UiFont) -> f32 {
+    let last = PL_FONT_LADDER[PL_FONT_LADDER.len() - 1];
+    for px in PL_FONT_LADDER {
+        let baseline = row_baseline_offset(ui, px);
+        let fits = FIT_SAMPLE.chars().all(|ch| {
+            let (top, bottom) = ui.ink_extent(ch, px);
+            baseline - top >= 0 && baseline - bottom <= sprites::PLEDIT_ROW_H
+        });
+        if fits {
+            return px;
+        }
+    }
+    last
+}
+
+/// Baseline position within a row box, centring the font's line box in the 13px row.
+fn row_baseline_offset(ui: &UiFont, px: f32) -> i32 {
+    let pad = (sprites::PLEDIT_ROW_H as f32 - ui.line_height(px)) / 2.0;
+    (pad + ui.ascent(px)).round() as i32
+}
 
 /// Format a whole-second count as Winamp's `M:SS` (or `MM:SS`, `MMM:SS` for long values): minutes
 /// with no leading zero, seconds always two digits. There is no hours field, matching the classic
@@ -1104,6 +1137,8 @@ fn draw_rows(
 ) {
     let offset = state.scroll_offset(window_h);
     let visible = PlState::visible_rows(window_h);
+    // One measurement for the whole list: the size depends only on the face and the row height.
+    let font_px = pl_font.map_or(0.0, row_font_px);
     for (i, row) in state.rows.iter().enumerate().skip(offset).take(visible) {
         let screen_row = (i - offset) as i32;
         let y = sprites::PLEDIT_LIST_Y + screen_row * sprites::PLEDIT_ROW_H;
@@ -1124,7 +1159,7 @@ fn draw_rows(
         };
         let c = [rgb.r, rgb.g, rgb.b];
         if let Some(ui) = pl_font {
-            draw_row_vector(fb, ui, row, y, list_w, rgb);
+            draw_row_vector(fb, ui, row, y, list_w, rgb, font_px);
             continue;
         }
         // Right-aligned duration first, so we know how much room the title has.
@@ -1155,38 +1190,37 @@ fn draw_rows(
 /// Draw one row with the skin's vector font: right-aligned duration, then the title truncated to
 /// the space left of it. `y` is the bitmap-font text top the row grid hands out; the row box the
 /// selection paints starts 2px above it, and the baseline centres the font's line box in that box.
-fn draw_row_vector(fb: &mut Framebuffer, ui: &UiFont, row: &Row, y: i32, list_w: i32, rgb: Rgb) {
+fn draw_row_vector(
+    fb: &mut Framebuffer,
+    ui: &UiFont,
+    row: &Row,
+    y: i32,
+    list_w: i32,
+    rgb: Rgb,
+    px: f32,
+) {
     let rgba = [rgb.r, rgb.g, rgb.b, 255];
     let row_top = y - 2;
-    let line = ui.line_height(PL_FONT_PX);
-    let pad = (sprites::PLEDIT_ROW_H as f32 - line) / 2.0;
-    let baseline = row_top + (pad + ui.ascent(PL_FONT_PX)).round() as i32;
+    let baseline = row_top + row_baseline_offset(ui, px);
     let dur_w = if row.duration.is_empty() {
         0
     } else {
-        let dw = ui.text_width(&row.duration, PL_FONT_PX).ceil() as i32;
+        let dw = ui.text_width(&row.duration, px).ceil() as i32;
         let dx = sprites::PLEDIT_LIST_X + list_w - dw - 3;
-        ui.draw_text_linear(fb, dx, baseline, &row.duration, PL_FONT_PX, rgba);
+        ui.draw_text_linear(fb, dx, baseline, &row.duration, px, rgba);
         dw + 4
     };
     let avail = (list_w - 2 - dur_w).max(0) as f32;
-    let max_chars = chars_fitting_vector(ui, &row.title, avail);
+    let max_chars = chars_fitting_vector(ui, &row.title, avail, px);
     let title: String = row.title.chars().take(max_chars).collect();
-    ui.draw_text_linear(
-        fb,
-        sprites::PLEDIT_LIST_X + 1,
-        baseline,
-        &title,
-        PL_FONT_PX,
-        rgba,
-    );
+    ui.draw_text_linear(fb, sprites::PLEDIT_LIST_X + 1, baseline, &title, px, rgba);
 }
 
 /// How many leading chars of `text` fit in `avail` px of the vector font at the row size.
-fn chars_fitting_vector(ui: &UiFont, text: &str, avail: f32) -> usize {
+fn chars_fitting_vector(ui: &UiFont, text: &str, avail: f32, px: f32) -> usize {
     let mut w = 0.0;
     for (i, ch) in text.chars().enumerate() {
-        w += ui.advance(ch, PL_FONT_PX);
+        w += ui.advance(ch, px);
         if w > avail {
             return i;
         }
@@ -2264,17 +2298,71 @@ mod tests {
     }
 
     #[test]
+    fn row_text_takes_the_largest_size_whose_ink_stays_inside_the_row() {
+        let Some(ui) = UiFont::load_system() else {
+            return;
+        };
+        let px = row_font_px(&ui);
+        assert!(
+            PL_FONT_LADDER.contains(&px),
+            "the size comes from the ladder, got {px}"
+        );
+
+        // Whatever it picked has to fit: no ascender above the row, no descender below it.
+        let baseline = row_baseline_offset(&ui, px);
+        for ch in FIT_SAMPLE.chars() {
+            let (top, bottom) = ui.ink_extent(ch, px);
+            assert!(
+                baseline - top >= 0,
+                "'{ch}' at {px}px reaches {} px above the row",
+                top - baseline
+            );
+            assert!(
+                baseline - bottom <= sprites::PLEDIT_ROW_H,
+                "'{ch}' at {px}px hangs {} px below the row",
+                baseline - bottom - sprites::PLEDIT_ROW_H
+            );
+        }
+
+        // And it is the largest that does: every bigger candidate must overflow, or the fit would
+        // have taken it. This is what stops the size silently drifting back down.
+        for bigger in PL_FONT_LADDER.iter().copied().take_while(|&p| p > px) {
+            let baseline = row_baseline_offset(&ui, bigger);
+            let overflows = FIT_SAMPLE.chars().any(|ch| {
+                let (top, bottom) = ui.ink_extent(ch, bigger);
+                baseline - top < 0 || baseline - bottom > sprites::PLEDIT_ROW_H
+            });
+            assert!(overflows, "{bigger}px also fits, so it should have been used");
+        }
+    }
+
+    #[test]
+    fn row_text_is_bigger_than_the_bitmap_fallback_it_replaced() {
+        let Some(ui) = UiFont::load_system() else {
+            return;
+        };
+        // The 5x7 bitmap fallback and the old fixed 10px vector size both drew ~7px capitals, small
+        // enough that unhinted stems fall between pixels. The fitted size must beat that.
+        let (cap_top, _) = ui.ink_extent('H', row_font_px(&ui));
+        assert!(
+            cap_top >= 8,
+            "capitals should be at least 8px tall, got {cap_top}"
+        );
+    }
+
+    #[test]
     fn vector_title_truncates_before_the_duration() {
         let Some(ui) = UiFont::load_system() else {
             return;
         };
+        let px = row_font_px(&ui);
         let long = "m".repeat(400);
-        let fits = chars_fitting_vector(&ui, &long, 100.0);
+        let fits = chars_fitting_vector(&ui, &long, 100.0, px);
         assert!(fits > 0 && fits < 400, "a 100px slot holds some but not 400 'm's");
-        let width_kept = ui.text_width(&long.chars().take(fits).collect::<String>(), PL_FONT_PX);
+        let width_kept = ui.text_width(&long.chars().take(fits).collect::<String>(), px);
         assert!(width_kept <= 100.0, "kept prefix fits the slot");
         assert_eq!(
-            chars_fitting_vector(&ui, "abc", 1000.0),
+            chars_fitting_vector(&ui, "abc", 1000.0, px),
             3,
             "ample room keeps the whole string"
         );

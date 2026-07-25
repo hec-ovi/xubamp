@@ -339,6 +339,14 @@ impl UiFont {
         Self::from_bytes(&std::fs::read(path).ok()?)
     }
 
+    /// How far a glyph's ink reaches above and below the baseline at `px` pixels-per-em, as
+    /// `(top, bottom)` in pixels above the baseline. `bottom` is negative for a descender, and a
+    /// blank glyph gives `(0, 0)`. Used to fit text into a fixed-height row without clipping.
+    pub fn ink_extent(&self, ch: char, px: f32) -> (i32, i32) {
+        let m = self.font.metrics(ch, px);
+        (m.ymin + m.height as i32, m.ymin)
+    }
+
     /// Total advance width of `text` at `px` pixels-per-em, summed over each glyph's metrics.
     pub fn text_width(&self, text: &str, px: f32) -> f32 {
         text.chars()

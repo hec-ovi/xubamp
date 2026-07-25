@@ -9,7 +9,7 @@ members = ["crates/skin", "crates/render", "crates/wl", "crates/audio", "crates/
 symphonia-bundle-mp3 = { path = "vendor/symphonia-bundle-mp3" }
 
 [workspace.package]
-version = "0.2.9"
+version = "0.2.10"
 edition = "2021"
 rust-version = "1.96"
 license = "GPL-2.0-or-later"

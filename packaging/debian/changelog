@@ -1,3 +1,13 @@
+xubamp (0.2.10-1) resolute; urgency=medium
+
+  * Playlist row text is sized to the row rather than pinned at 10 pixels, so
+    it is larger and its stems land on the pixel grid instead of splitting
+    across it. Liberation Sans now draws at 12 pixels with a 9 pixel cap
+    height; a face with taller metrics gets a smaller size rather than
+    clipping.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Sat, 25 Jul 2026 22:30:00 +0000
+
 xubamp (0.2.9-1) resolute; urgency=medium
 
   * MP3s stored inside a RIFF/WAVE container (wFormatTag 0x0055, usually still

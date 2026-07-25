@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "xubamp"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "xubamp-audio",
  "xubamp-config",
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "xubamp-audio"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "bytemuck",
  "pipewire",
@@ -1672,19 +1672,19 @@ dependencies = [
 
 [[package]]
 name = "xubamp-config"
-version = "0.2.7"
+version = "0.2.8"
 
 [[package]]
 name = "xubamp-dsp"
-version = "0.2.7"
+version = "0.2.8"
 
 [[package]]
 name = "xubamp-library"
-version = "0.2.7"
+version = "0.2.8"
 
 [[package]]
 name = "xubamp-portal"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "ashpd",
  "async-io",
@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "xubamp-render"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "fontdue",
  "xubamp-skin",
@@ -1701,14 +1701,14 @@ dependencies = [
 
 [[package]]
 name = "xubamp-skin"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "miniz_oxide",
 ]
 
 [[package]]
 name = "xubamp-wl"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "smithay-client-toolkit",
  "wayland-client",

@@ -1,3 +1,20 @@
+xubamp (0.2.8-1) resolute; urgency=medium
+
+  * Playback no longer stutters on tracks whose sample rate is below the
+    graph rate: the output wrote PipeWire's whole mapped buffer each cycle
+    and padded the shortfall with silence, which at 22.05 kHz meant a gap
+    twice a second.
+  * MP3 frames with a digitally silent granule decode instead of being
+    dropped. The old failure cleared the bit reservoir and cascaded, so
+    intros, fades, and whole tail sections of affected tracks went missing.
+  * Deleting a playlist row no longer scrolls the list back to the playing
+    track.
+  * A playlist drag or resize can no longer stick to the pointer on
+    compositors that reroute pointer focus mid-drag, such as KWin.
+  * Failing to find a Wayland compositor now explains what to do about it.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Sat, 25 Jul 2026 20:30:00 +0000
+
 xubamp (0.2.7-1) resolute; urgency=medium
 
   * Playlist running time drawn with the skin's 5x6 text.bmp glyphs, so it

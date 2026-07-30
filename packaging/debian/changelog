@@ -1,3 +1,16 @@
+xubamp (0.2.11-1) resolute; urgency=medium
+
+  * The playlist pane takes the arrow keys once you click into it: Up and Down
+    walk its rows and scroll the selection into view, instead of nudging the
+    volume. The other panes, and a closed or windowshaded playlist, leave the
+    arrows to the volume as before.
+  * Files dragged from the file manager onto the playlist are appended, several
+    at once, in the order the drag carried them. Folders and dead paths are
+    skipped, and the audio-only guard still applies, so a mixed drop adds only
+    the playable files.
+
+ -- Hector Oviedo <hector.ernesto.oviedo@gmail.com>  Thu, 30 Jul 2026 12:00:00 +0000
+
 xubamp (0.2.10-1) resolute; urgency=medium
 
   * Playlist row text is sized to the row rather than pinned at 10 pixels, so

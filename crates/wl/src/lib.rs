@@ -14,13 +14,20 @@ use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::reexports::calloop::{
     timer::{TimeoutAction, Timer},
-    EventLoop,
+    EventLoop, LoopHandle, PostAction,
 };
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
-    delegate_shm, delegate_subcompositor, delegate_xdg_shell, delegate_xdg_window,
+    data_device_manager::{
+        data_device::{DataDevice, DataDeviceData, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::DataSourceHandler,
+        DataDeviceManagerState, WritePipe,
+    },
+    delegate_compositor, delegate_data_device, delegate_output, delegate_pointer,
+    delegate_registry, delegate_seat, delegate_shm, delegate_subcompositor, delegate_xdg_shell,
+    delegate_xdg_window,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -43,8 +50,12 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface, wl_surface},
-    Connection, QueueHandle,
+    protocol::{
+        wl_data_device::WlDataDevice, wl_data_device_manager::DndAction,
+        wl_data_source::WlDataSource, wl_output, wl_pointer, wl_seat, wl_shm, wl_subsurface,
+        wl_surface,
+    },
+    Connection, Proxy, QueueHandle,
 };
 use xubamp_render::vis::{AnalyzerStyle, BandWidth, OscStyle, VisMode, FFT_N};
 use xubamp_render::{
@@ -57,8 +68,6 @@ use xubamp_skin::{default_skin, Skin};
 // libxkbcommon build dependency (see Cargo.toml). These imports exist only when it is enabled.
 #[cfg(feature = "keyboard")]
 use smithay_client_toolkit::delegate_keyboard;
-#[cfg(feature = "keyboard")]
-use smithay_client_toolkit::reexports::calloop::LoopHandle;
 #[cfg(feature = "keyboard")]
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
 #[cfg(feature = "keyboard")]
@@ -135,6 +144,9 @@ pub enum PlaylistRequest {
     /// Permute the whole playlist after a drag-to-reorder step: element `i` is the display index
     /// (before the move) of the track now shown at row `i`.
     Reorder(Vec<usize>),
+    /// Append files dropped onto the playlist pane, in the order the drag carried them. Already
+    /// filtered to existing regular files; the application still applies its own audio-only guard.
+    AddFiles(Vec<PathBuf>),
 }
 
 /// The reorderings the MISC > Sort List submenu offers.
@@ -642,6 +654,70 @@ fn translate_pane_point(origin: panes::Point, target: panes::Point, x: i32, y: i
     (x + origin.x - target.x, y + origin.y - target.y)
 }
 
+/// The one drag-and-drop flavour the playlist accepts. Every file manager on the desktop offers it
+/// (Nautilus, Dolphin, Thunar, Files-over-portal), and it is the only one that carries a list.
+const URI_LIST_MIME: &str = "text/uri-list";
+
+/// Cap on a dropped `text/uri-list` payload, so a misbehaving source cannot grow our buffer without
+/// bound. A thousand paths fit in well under this.
+const URI_LIST_MAX_BYTES: usize = 1 << 20;
+
+/// Parse an RFC 2483 `text/uri-list` payload into local paths, keeping the drag's order. Blank
+/// lines and `#` comments are skipped, and only `file:` URIs on this machine survive: a URL with
+/// any other scheme, or a remote host, names nothing we can decode.
+fn parse_uri_list(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(file_uri_to_path)
+        .collect()
+}
+
+/// Decode one `file://[host]/path` URI into a path. The host must be empty or `localhost`; the
+/// path is percent-decoded byte-wise, because a Unix path is bytes and need not be UTF-8.
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let rest = uri.strip_prefix("file://")?;
+    let path = match rest.find('/') {
+        Some(0) => rest,
+        Some(slash) if &rest[..slash] == "localhost" => &rest[slash..],
+        _ => return None,
+    };
+    Some(PathBuf::from(OsString::from_vec(percent_decode(path)?)))
+}
+
+/// Percent-decode a URI path into raw bytes. `None` on a truncated or non-hex escape, so a
+/// malformed URI is dropped rather than turned into a wrong path.
+fn percent_decode(text: &str) -> Option<Vec<u8>> {
+    let src = text.as_bytes();
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'%' {
+            let hex = std::str::from_utf8(src.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(src[i]);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+/// The droppable targets in a `text/uri-list` payload: existing regular files, in drag order.
+/// Directories are deliberately skipped. Adding a folder means deciding whether to recurse and how
+/// to sort what comes back, which is what the playlist's own ADD DIR does with the user's
+/// preferences; a drop has no way to ask.
+fn dropped_files(text: &str) -> Vec<PathBuf> {
+    parse_uri_list(text)
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect()
+}
+
 /// Merge a polled playlist view into the window's list state, returning whether the window needs a
 /// repaint. `followed` is the id of the track the view last scrolled to, updated in place.
 ///
@@ -728,6 +804,9 @@ pub fn run(
         SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)?;
     let xdg_shell = XdgShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
+    // Drag-and-drop onto the playlist. Optional: a compositor without wl_data_device_manager just
+    // means nothing can be dropped, which is not worth refusing to start over.
+    let data_device_manager = DataDeviceManagerState::bind(&globals, &qh).ok();
 
     let mut visualization = xubamp_render::vis::VisState::default();
     visualization.mode = runtime.ui_options.visualization_mode;
@@ -812,6 +891,10 @@ pub fn run(
         },
         playlist_current_id: None,
         pane_grab: None,
+        active_pane: Pane::Main,
+        data_device_manager,
+        data_device: None,
+        dnd_on_playlist: false,
         pl_size: (
             i32::try_from(pane_layout.playlist_size.0).unwrap_or(i32::MAX),
             i32::try_from(pane_layout.playlist_size.1).unwrap_or(i32::MAX),
@@ -874,7 +957,6 @@ pub fn run(
         preferences_keyboard_focus: false,
         #[cfg(feature = "keyboard")]
         modifiers: Modifiers::default(),
-        #[cfg(feature = "keyboard")]
         loop_handle: loop_handle.clone(),
         configured: false,
         exit: false,
@@ -971,9 +1053,8 @@ struct App {
     /// `update_modifiers` and read to decide whether a shortcut's modifiers are clear.
     #[cfg(feature = "keyboard")]
     modifiers: Modifiers,
-    /// A handle to the event loop, so the keyboard can be created with SCTK's calloop-driven key
-    /// repeat when the seat advertises the capability. The `'static` here pins the loop's lifetime.
-    #[cfg(feature = "keyboard")]
+    /// A handle to the event loop: the keyboard is created on it with SCTK's calloop-driven key
+    /// repeat, and a drop's transfer pipe is read on it too. The `'static` pins the loop's lifetime.
     loop_handle: LoopHandle<'static, App>,
     /// A queue handle, kept so child surfaces and dialogs can be created after startup.
     qh: QueueHandle<App>,
@@ -1002,6 +1083,17 @@ struct App {
     /// release reach that pane whatever surface the compositor delivers them on. See
     /// [`App::route_pane_event`].
     pane_grab: Option<Pane>,
+    /// The pane the user last clicked. The three panes are subsurfaces of one toplevel, so the
+    /// compositor gives them a single keyboard focus; this is our own stand-in for which one the
+    /// keys belong to, and it is what sends the arrow keys to the playlist instead of the volume.
+    active_pane: Pane,
+    /// Drag-and-drop plumbing: the manager global (absent on a compositor without it) and the
+    /// seat's data device, kept alive for as long as the seat has a pointer.
+    data_device_manager: Option<DataDeviceManagerState>,
+    data_device: Option<DataDevice>,
+    /// Whether the drag currently hovering us is over the playlist pane and offers a URI list, so
+    /// the drop is ours to take.
+    dnd_on_playlist: bool,
     /// The playlist pane's last expanded size, remembered across shade and close/reopen.
     pl_size: (i32, i32),
     /// Last child-surface position, remembered across close/reopen.
@@ -2157,6 +2249,20 @@ impl App {
         (self.on_menu)(MenuRequest::Playlist(request));
     }
 
+    /// Append the files named by a completed `text/uri-list` transfer. A payload that is not UTF-8,
+    /// or that named only folders and dead links, adds nothing.
+    fn add_dropped_files(&mut self, payload: &[u8]) {
+        let Ok(text) = std::str::from_utf8(payload) else {
+            eprintln!("xubamp: the dropped file list is not valid UTF-8");
+            return;
+        };
+        let files = dropped_files(text);
+        if files.is_empty() {
+            return;
+        }
+        self.request_playlist(PlaylistRequest::AddFiles(files));
+    }
+
     fn set_time_display(&mut self, display: hit::TimeDisplay) {
         if self.state.time_display != display {
             self.state.time_display = display;
@@ -2274,6 +2380,11 @@ impl App {
             playlist.surface.destroy();
         }
         self.playlist_state.pressed_title = None;
+        // With the pane gone the arrow keys belong to the volume again.
+        if self.active_pane == Pane::Playlist {
+            self.active_pane = Pane::Main;
+        }
+        self.dnd_on_playlist = false;
         self.state.pl_open = false;
         self.redraw();
     }
@@ -3563,6 +3674,10 @@ impl SeatHandler for App {
                 )
                 .expect("failed to create pointer");
             self.pointer = Some(pointer);
+            // Drag-and-drop rides the pointer, so the data device is created alongside it.
+            if let Some(manager) = &self.data_device_manager {
+                self.data_device = Some(manager.get_data_device(qh, &seat));
+            }
             // Clone so the keyboard branch below can still take `seat`; only one capability arrives
             // per call, but both branches reference `seat`, so the pointer branch must not move it.
             self.seat = Some(seat.clone());
@@ -3602,6 +3717,9 @@ impl SeatHandler for App {
             if let Some(pointer) = self.pointer.take() {
                 pointer.pointer().release();
             }
+            // Dropping the DataDevice releases it; without a pointer nothing can be dragged in.
+            self.data_device = None;
+            self.dnd_on_playlist = false;
             self.seat = None;
         }
         #[cfg(feature = "keyboard")]
@@ -3615,6 +3733,205 @@ impl SeatHandler for App {
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+/// Files dragged from a file manager onto the playlist pane are appended to the list. Only that
+/// pane takes a drop: rejecting the offer everywhere else is what makes the compositor draw the
+/// no-drop cursor over the main and equalizer windows, so the target is visible while dragging.
+impl DataDeviceHandler for App {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+        x: f64,
+        y: f64,
+        surface: &wl_surface::WlSurface,
+    ) {
+        let Some(offer) = drag_offer(data_device) else {
+            return;
+        };
+        let has_uris = offer.with_mime_types(|types| types.iter().any(|t| t == URI_LIST_MIME));
+        self.answer_drag(&offer, has_uris && self.over_playlist(surface, x, y));
+    }
+
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+        x: f64,
+        y: f64,
+    ) {
+        // Crossing between panes only produces enter/leave when the compositor tracks the drag per
+        // subsurface. When it reports the whole toplevel instead, motion is the only place the
+        // pointer entering or leaving the pane's rectangle shows up.
+        let Some(offer) = drag_offer(data_device) else {
+            return;
+        };
+        let has_uris = offer.with_mime_types(|types| types.iter().any(|t| t == URI_LIST_MIME));
+        let accept = has_uris && self.over_playlist(&offer.surface, x, y);
+        if accept != self.dnd_on_playlist {
+            self.answer_drag(&offer, accept);
+        }
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
+        self.dnd_on_playlist = false;
+    }
+
+    fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {
+        // Clipboard offers: nothing in the player pastes.
+    }
+
+    fn drop_performed(
+        &mut self,
+        conn: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+    ) {
+        if !std::mem::take(&mut self.dnd_on_playlist) {
+            return;
+        }
+        let Some(offer) = drag_offer(data_device) else {
+            return;
+        };
+        let Ok(pipe) = offer.receive(URI_LIST_MIME.to_owned()) else {
+            finish_offer(&offer);
+            return;
+        };
+        // The source only writes once our receive request reaches it, and the calloop Wayland
+        // source flushes at the end of a dispatch, not mid-handler.
+        let _ = conn.flush();
+        let transfer = offer.clone();
+        let mut payload = Vec::new();
+        let inserted = self
+            .loop_handle
+            .insert_source(pipe, move |_, file, app: &mut App| {
+                // The pipe is registered level-triggered and read only when poll says it is ready,
+                // so one read per wake-up never blocks the loop. `&File` reads without needing the
+                // mutable borrow calloop deliberately makes unsafe.
+                use std::io::Read;
+                let mut chunk = [0u8; 4096];
+                let mut source: &std::fs::File = file;
+                match source.read(&mut chunk) {
+                    Ok(0) => {
+                        app.add_dropped_files(&payload);
+                        finish_offer(&transfer);
+                        PostAction::Remove
+                    }
+                    Ok(read) => {
+                        if payload.len() + read > URI_LIST_MAX_BYTES {
+                            eprintln!("xubamp: dropped payload too large, ignoring");
+                            finish_offer(&transfer);
+                            return PostAction::Remove;
+                        }
+                        payload.extend_from_slice(&chunk[..read]);
+                        PostAction::Continue
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        PostAction::Continue
+                    }
+                    Err(error) => {
+                        eprintln!("xubamp: cannot read the dropped file list: {error}");
+                        finish_offer(&transfer);
+                        PostAction::Remove
+                    }
+                }
+            })
+            .is_ok();
+        if !inserted {
+            finish_offer(&offer);
+        }
+    }
+}
+
+/// The action negotiation is settled once, on enter: the playlist only ever copies.
+impl DataOfferHandler for App {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+/// The player never starts a drag, so it never owns a data source. These arrive only for a source
+/// we created; the delegate needs the impl to exist.
+impl DataSourceHandler for App {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlDataSource,
+        _: String,
+        _: WritePipe,
+    ) {
+    }
+    fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
+}
+
+impl App {
+    /// Whether a drag at surface-local (`x`, `y`) is over the playlist pane. The obvious case is
+    /// the pane's own surface under the drag. A compositor that tracks the drag against the whole
+    /// toplevel instead reports the parent, and since all three panes are laid out in the parent's
+    /// coordinate space, the pane's rectangle answers it there.
+    fn over_playlist(&self, surface: &wl_surface::WlSurface, x: f64, y: f64) -> bool {
+        let Some(pl) = self.playlist.as_ref() else {
+            return false;
+        };
+        if *surface == pl.surface {
+            return true;
+        }
+        *surface == *self.window.wl_surface()
+            && panes::Rect::at(pl.position, pl.width, pl.height).contains(x as i32, y as i32)
+    }
+
+    /// Accept or reject the hovering drag, remembering the answer for the drop. Accepting is also
+    /// what makes the compositor show a copy cursor over the playlist and a no-drop cursor
+    /// everywhere else, so the target is visible while dragging.
+    fn answer_drag(&mut self, offer: &DragOffer, accept: bool) {
+        self.dnd_on_playlist = accept;
+        if accept {
+            offer.set_actions(DndAction::Copy, DndAction::Copy);
+            offer.accept_mime_type(offer.serial, Some(URI_LIST_MIME.to_owned()));
+        } else {
+            offer.accept_mime_type(offer.serial, None);
+        }
+    }
+}
+
+/// The drag offer a data device is currently carrying, if any.
+fn drag_offer(data_device: &WlDataDevice) -> Option<DragOffer> {
+    data_device.data::<DataDeviceData>()?.drag_offer()
+}
+
+/// Tell the source the transfer is done and release the offer. A dropped offer is ours to destroy
+/// (SCTK leaves it alone precisely so the transfer can outlive the drag).
+fn finish_offer(offer: &DragOffer) {
+    offer.finish();
+    offer.destroy();
 }
 
 impl PointerHandler for App {
@@ -3720,6 +4037,10 @@ impl PointerHandler for App {
                 None
             };
             if let Some(pane) = pane {
+                // A click is what focuses a pane, in the absence of per-pane keyboard focus.
+                if matches!(&event.kind, PointerEventKind::Press { .. }) {
+                    self.active_pane = pane;
+                }
                 let (pane, x, y) = self.route_pane_event(pane, &event.kind, x, y);
                 match pane {
                     // Skin space: double-size halves the raw coordinates back to 275x116.
@@ -4087,6 +4408,24 @@ impl App {
         if m.ctrl || m.alt || m.logo {
             return;
         }
+        // With the playlist the focused pane, Up and Down walk its rows instead of nudging the
+        // volume, the way the classic editor behaves once you click into it. The shaded strip has
+        // no rows to walk, so it leaves them to the volume.
+        if self.active_pane == Pane::Playlist && !self.playlist_state.shade {
+            let step = match event.keysym {
+                Keysym::Up => -1,
+                Keysym::Down => 1,
+                _ => 0,
+            };
+            if step != 0 {
+                if let Some(height) = self.playlist.as_ref().map(|pl| pl.height) {
+                    if self.playlist_state.move_cursor(step, height) {
+                        self.redraw_playlist();
+                    }
+                    return;
+                }
+            }
+        }
         // Del removes the selected playlist rows when the pane is open.
         if event.keysym == Keysym::Delete && self.playlist.is_some() {
             let rows = self.selected_rows();
@@ -4265,6 +4604,7 @@ impl ProvidesRegistryState for App {
 }
 
 delegate_compositor!(App);
+delegate_data_device!(App);
 delegate_output!(App);
 delegate_seat!(App);
 delegate_pointer!(App);
@@ -4279,6 +4619,63 @@ delegate_registry!(App);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uri_list_keeps_local_files_in_drag_order_and_decodes_escapes() {
+        // What Nautilus writes: CRLF-separated, percent-encoded, sometimes with a comment line.
+        let payload = "# a comment\r\n\
+             file:///home/hec/Music/one.mp3\r\n\
+             file://localhost/home/hec/Music/two%20-%20b.flac\r\n\
+             \r\n\
+             file:///home/hec/Music/caf%C3%A9.ogg\r\n";
+        assert_eq!(
+            parse_uri_list(payload),
+            vec![
+                PathBuf::from("/home/hec/Music/one.mp3"),
+                PathBuf::from("/home/hec/Music/two - b.flac"),
+                PathBuf::from("/home/hec/Music/café.ogg"),
+            ]
+        );
+    }
+
+    #[test]
+    fn uri_list_drops_remote_and_malformed_entries() {
+        let payload = "https://example.com/song.mp3\n\
+             file://otherhost/home/hec/song.mp3\n\
+             file:///home/hec/tru%.mp3\n\
+             file:///home/hec/short%2\n\
+             /home/hec/not-a-uri.mp3\n\
+             file:///home/hec/good.mp3\n";
+        assert_eq!(
+            parse_uri_list(payload),
+            vec![PathBuf::from("/home/hec/good.mp3")],
+            "only the well-formed local file survives"
+        );
+    }
+
+    #[test]
+    fn a_drop_takes_the_files_and_leaves_the_folders() {
+        let dir = std::env::temp_dir().join(format!("xubamp-drop-{}", std::process::id()));
+        let subdir = dir.join("album");
+        std::fs::create_dir_all(&subdir).expect("temp dir");
+        let song = dir.join("song one.mp3");
+        std::fs::write(&song, b"").expect("temp file");
+
+        let payload = format!(
+            "file://{}\r\nfile://{}\r\nfile://{}\r\n",
+            song.display().to_string().replace(' ', "%20"),
+            subdir.display(),
+            dir.join("missing.mp3").display(),
+        );
+        let files = dropped_files(&payload);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            files,
+            vec![song],
+            "the folder and the dead path are skipped, the file is kept"
+        );
+    }
 
     #[test]
     fn pending_external_work_caps_the_idle_poll_delay() {

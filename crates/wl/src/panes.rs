@@ -53,6 +53,12 @@ impl Rect {
     pub const fn bottom(self) -> i32 {
         self.y + self.height
     }
+
+    /// Whether a point in the same (parent-surface) space falls inside the pane, right and bottom
+    /// edges exclusive.
+    pub const fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -193,6 +199,23 @@ mod tests {
         width: 275,
         height: 116,
     };
+
+    #[test]
+    fn contains_covers_the_pane_without_its_far_edges() {
+        // A pane docked below and right of the main window, as a drop hit test sees it.
+        let pane = Rect {
+            x: 275,
+            y: 116,
+            width: 275,
+            height: 116,
+        };
+        assert!(pane.contains(275, 116), "top-left corner is inside");
+        assert!(pane.contains(400, 200));
+        assert!(!pane.contains(pane.right(), 200), "right edge is exclusive");
+        assert!(!pane.contains(400, pane.bottom()), "bottom edge is exclusive");
+        assert!(!pane.contains(274, 116), "just left of the pane");
+        assert!(!pane.contains(400, 115), "just above the pane");
+    }
 
     #[test]
     fn snap_threshold_is_strictly_less_than_fifteen() {

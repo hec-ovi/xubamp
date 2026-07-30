@@ -565,6 +565,32 @@ impl PlState {
         Some(order)
     }
 
+    /// Keyboard cursor step in the list: replace the selection with the single row `delta`
+    /// positions away and scroll it into view, in a window `window_h` px tall. A multi-row
+    /// selection steps from its bottom going down and from its top going up; with nothing selected
+    /// the first press lands on the playing row (or the top) instead of stepping past it. Returns
+    /// whether the selection or the scroll changed.
+    pub fn move_cursor(&mut self, delta: i32, window_h: i32) -> bool {
+        let len = self.rows.len();
+        if len == 0 {
+            return false;
+        }
+        let live: Vec<usize> = self.selected.iter().copied().filter(|&i| i < len).collect();
+        let target = match (live.iter().min(), live.iter().max()) {
+            (Some(&first), Some(&last)) => {
+                if delta >= 0 { last as i32 } else { first as i32 }.saturating_add(delta)
+            }
+            _ => self.current.filter(|&c| c < len).unwrap_or(0) as i32,
+        };
+        let target = target.clamp(0, len as i32 - 1) as usize;
+        let scroll_before = self.scroll;
+        let changed = self.selected != [target];
+        self.selected = vec![target];
+        self.anchor = Some(target);
+        self.scroll_to(target, window_h);
+        changed || self.scroll != scroll_before
+    }
+
     /// Adjust the scroll so row `i` is visible in a window `window_h` px tall (scrolls the minimum
     /// needed: to the top if above the view, to the bottom if below it, otherwise unchanged).
     pub fn scroll_to(&mut self, i: usize, window_h: i32) {
@@ -2113,6 +2139,59 @@ mod tests {
         let before = s.scroll;
         s.scroll_to(s.scroll_offset(h), h);
         assert_eq!(s.scroll, before);
+    }
+
+    #[test]
+    fn move_cursor_walks_the_rows_and_follows_them_with_the_scroll() {
+        let h = sprites::PLEDIT_H; // 4 visible, overflow 16 for 20 rows
+        let mut s = PlState {
+            rows: rows(20),
+            current: Some(7),
+            ..Default::default()
+        };
+        // Nothing selected: the first press lands on the playing row rather than stepping past it,
+        // and scrolls it into view.
+        assert!(s.move_cursor(1, h));
+        assert_eq!(s.selected, vec![7]);
+        assert_eq!(s.anchor, Some(7));
+        assert_eq!(s.scroll_offset(h), 4, "row 7 pulled to the bottom of the view");
+
+        assert!(s.move_cursor(1, h));
+        assert_eq!(s.selected, vec![8]);
+        assert!(s.move_cursor(-1, h));
+        assert_eq!(s.selected, vec![7]);
+
+        // Down steps off the bottom of a multi-row selection, up off its top.
+        s.selected = vec![3, 4, 5];
+        assert!(s.move_cursor(1, h));
+        assert_eq!(s.selected, vec![6]);
+        s.selected = vec![3, 4, 5];
+        assert!(s.move_cursor(-1, h));
+        assert_eq!(s.selected, vec![2]);
+    }
+
+    #[test]
+    fn move_cursor_stops_at_both_ends_and_on_an_empty_list() {
+        let h = sprites::PLEDIT_H;
+        let mut s = PlState {
+            rows: rows(3),
+            selected: vec![0],
+            ..Default::default()
+        };
+        assert!(!s.move_cursor(-1, h), "already at the top: nothing changed");
+        assert_eq!(s.selected, vec![0]);
+        s.selected = vec![2];
+        assert!(!s.move_cursor(1, h), "already at the last row");
+        assert_eq!(s.selected, vec![2]);
+
+        // A stale selection past the end of a shrunken list still lands on a real row.
+        s.selected = vec![9];
+        assert!(s.move_cursor(1, h));
+        assert_eq!(s.selected, vec![0], "no live selection: falls back to the top");
+
+        let mut empty = PlState::default();
+        assert!(!empty.move_cursor(1, h));
+        assert!(empty.selected.is_empty());
     }
 
     /// The shown titles, to assert on row order after a drag move.

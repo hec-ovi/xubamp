@@ -424,6 +424,11 @@ fn apply_playlist_request(
         P::Reverse => player.reverse_playlist(),
         P::Randomize => player.randomize_playlist(),
         P::Reorder(order) => player.reorder_indices(&order),
+        P::AddFiles(paths) => {
+            let dropped = paths.len();
+            let added = player.append_paths(paths).len();
+            eprintln!("xubamp: added {added} of {dropped} dropped file(s) to the playlist");
+        }
         P::Sort(sort) => {
             let mut entries = player.playlist_entries();
             entries.sort_by(|a, b| {
@@ -1296,6 +1301,52 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use xubamp_render::hit::Transport;
+
+    /// Files dropped onto the playlist pane come in as one AddFiles request; the player's
+    /// audio-only guard is what decides which of them become rows.
+    #[cfg(feature = "audio")]
+    #[test]
+    fn a_playlist_drop_appends_the_audio_files_it_carried() {
+        use crate::{apply_playlist_request, player::Player, portal_actions};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let dir = temp_settings_path().parent().unwrap().join("drop");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (first, second, sleeve) = (
+            dir.join("a.mp3"),
+            dir.join("b.flac"),
+            dir.join("cover.jpg"),
+        );
+        for path in [&first, &second, &sleeve] {
+            std::fs::write(path, b"").expect("temp file");
+        }
+
+        let player = Rc::new(RefCell::new(Player::new(Vec::new())));
+        let (launcher, _receiver) = portal_actions::bridge();
+        apply_playlist_request(
+            &player,
+            &launcher,
+            xubamp_wl::PlaylistRequest::AddFiles(vec![
+                first.clone(),
+                sleeve,
+                second.clone(),
+            ]),
+        );
+        let rows: Vec<PathBuf> = player
+            .borrow()
+            .playlist_entries()
+            .into_iter()
+            .map(|(_, path)| path)
+            .collect();
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+
+        assert_eq!(
+            rows,
+            vec![first, second],
+            "both audio files appended in drag order, the cover art dropped"
+        );
+    }
 
     #[test]
     fn only_eject_and_empty_play_open_the_media_picker() {

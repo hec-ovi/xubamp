@@ -49,12 +49,12 @@ File info with editable ID3v1 tags:
 - MP3, WAV, FLAC, and Ogg Vorbis decoded with Symphonia, played through PipeWire, with gapless seek.
 - The visualizer is a faithful port of the XMMS/Audacious classic analyzer: log bands, 40 dB range, normal/fire/line styles, thick or thin bands, peaks, five falloff speeds, 10 to 70 fps refresh.
 - The 10-band equalizer with preamp, the 17 classic presets, and EQF load/save.
-- Playlist editor with working ADD/REM/SEL/MISC/LIST clusters, `.m3u`/`.pls` save and load, right-click track menu, per-track times, mini clock and mini transport, a skinned scrollbar, and a resize grip. The playlist survives close and reopen.
+- Playlist editor with working ADD/REM/SEL/MISC/LIST clusters, `.m3u`/`.pls` save and load, right-click track menu, per-track times, mini clock and mini transport, a skinned scrollbar, and a resize grip. Drop files onto it from the file manager to append them, as many at once as you like; folders are skipped, since ADD > DIR is where the recursion and sort preferences live. The playlist survives close and reopen.
 - Jump-to-file (`j`) searches every tag the file carries, not just the shown title.
 - Marquee shows the tagged "N. Artist - Title (M:SS)" (ID3v2, Vorbis comments, RIFF INFO; file name when untagged), next to kbps/kHz readouts and the elapsed/remaining clock with the classic paused blink.
 - Shuffle and repeat retrace the real play order, so Previous works under shuffle.
 - File info box with the stream facts and an editable ID3v1 tag form for MP3s.
-- Classic hotkeys (`z x c v b` transport, `r s`, `l`, `j`, arrows for volume and seek, `Ctrl+T/D/P`, `Alt+3`) and mouse wheel for volume, balance, seek, and list scroll.
+- Classic hotkeys (`z x c v b` transport, `r s`, `l`, `j`, arrows for volume and seek, `Ctrl+T/D/P`, `Alt+3`) and mouse wheel for volume, balance, seek, and list scroll. Click into the playlist and Up/Down walk its rows instead of the volume.
 - Menus, Preferences, Jump, and file info are native GNOME dialogs (Adwaita, light and dark); everything else is skin-rendered.
 - Every window drags from any free surface, not just the 14px title strip.
 
